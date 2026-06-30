@@ -153,16 +153,18 @@ wtd_session_run_claude() {
   # conversation instead of starting cold — including after a reboot (the process dies, the transcript
   # doesn't). First open mints an id and starts with --session-id; later opens pass --resume once that
   # id's transcript is actually on disk, else re-create it under the same id.
-  local idf id
+  # NB: keep every step here from tripping `set -e` (a failed `cat`/`wtd_uuid` must NOT abort the
+  # launch, or the terminal would just close instead of starting claude).
+  local idf id=""
   idf="$(wtd_session_idfile "$session")"
-  id="$(cat "$idf" 2>/dev/null)"
+  [ -f "$idf" ] && id="$(cat "$idf" 2>/dev/null || true)"
   if [ -n "$id" ]; then
     if [ -f "$(wtd_claude_transcript "$wt" "$id")" ]; then
       exec claude --permission-mode "$pmode" --resume "$id"
     fi
     exec claude --permission-mode "$pmode" --session-id "$id"
   fi
-  id="$(wtd_uuid)"
+  id="$(wtd_uuid || true)"
   if [ -n "$id" ]; then
     mkdir -p "$(wtd_session_idsdir)"
     printf '%s\n' "$id" > "$idf"
