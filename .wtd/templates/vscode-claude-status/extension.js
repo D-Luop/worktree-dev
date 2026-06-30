@@ -527,6 +527,7 @@ class DevSummaryProvider {
   .wt .unr:hover{color:var(--vscode-charts-yellow,#d2a000);}
   .wt.sep{margin-top:7px;}   /* gap between status groups */
   /* pinned assistant row: above the worktree groups, no status glyph/git, with a divider below it */
+  .wt.asst{margin-top:9px;}   /* breathing room between the header buttons and the assistant row */
   .wt.asst .agly{width:15px;text-align:center;}
   .wt.asst .nm{font-weight:600;}
   .asstsep{border-bottom:1px solid var(--vscode-panel-border,rgba(127,127,127,.2));margin:2px 0 6px;}
@@ -545,7 +546,7 @@ class DevSummaryProvider {
 </style></head><body>
 <div id="lim"><div class="none">waiting for a session…</div></div>
 <hr>
-<div class="head"><span class="counts" id="counts"></span><span class="btn" id="img" title="Add an image to the focused session — pastes a clipboard screenshot, or pick a file (works around native-Windows terminal paste)">📷</span><span class="btn" id="tests" title="Include/exclude test files in the diff panes">tests ✓</span><span class="btn" id="asst" title="Open the worktree-dev assistant (fleet management)">+ assistant</span><span class="btn" id="add" title="Launch a new agent">+ agent</span></div>
+<div class="head"><span class="counts" id="counts"></span><span class="btn" id="img" title="Add an image to the focused session — pastes a clipboard screenshot, or pick a file (works around native-Windows terminal paste)">📷</span><span class="btn" id="tests" title="Include/exclude test files in the diff panes">tests ✓</span><span class="btn" id="add" title="Launch a new agent">+ agent</span></div>
 <div id="roster"></div>
 <div id="monwrap">
 <hr>
@@ -643,7 +644,6 @@ class DevSummaryProvider {
       + mbar('mem', memPct, gb(mon.amem)+'G', 'Claude agents using '+gb(mon.amem)+' GB RAM ('+memPct+'% of '+gb(mon.mt)+'G) · whole system '+gb(mon.msys)+'/'+gb(mon.mt)+'G used ('+sysPct+'%)');
   }
   document.getElementById('add').onclick=()=>vsc.postMessage({cmd:'newAgent'});
-  document.getElementById('asst').onclick=()=>vsc.postMessage({cmd:'newAssistant'});
   document.getElementById('img').onclick=()=>vsc.postMessage({cmd:'pasteImage'});
   function renderTests(excluded){ const b=document.getElementById('tests'); if(!b) return;
     b.textContent = excluded ? 'tests ✕' : 'tests ✓';
