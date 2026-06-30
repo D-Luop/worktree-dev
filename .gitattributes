@@ -1,0 +1,8 @@
+# This is a Unix shell-script toolkit — force LF everywhere so scripts run on
+# Linux/macOS/Git-Bash regardless of the contributor's platform.
+* text=auto eol=lf
+
+# Binary assets — never normalize.
+*.vsix binary
+*.wav  binary
+*.png  binary

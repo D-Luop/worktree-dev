@@ -1,0 +1,37 @@
+# Worktree-dev manages bare clones, worktrees, and reference checkouts on disk —
+# these are local/heavy/runtime state, never committed.
+repos/
+worktrees/
+refs/
+
+# Per-machine runtime state written by the engine at install/run time.
+.wtd/repos.tsv.local
+.wtd/reviews/.scratch/
+.wtd/reviews/reviewer-lessons.md
+.wtd/reviews/.claude-status
+.wtd/review-context/*.md
+.wtd/review-focus/*.md
+.wtd/review-knowledge/*.md
+.wtd/repo-hooks/*.json
+.wtd/expert/.claude-status
+rate-limits.json
+# …but keep the placeholder READMEs that document those per-repo dirs.
+!.wtd/review-context/README.md
+!.wtd/review-focus/README.md
+!.wtd/review-knowledge/README.md
+!.wtd/repo-hooks/README.md
+
+# Don't commit a private repo registry — keep your slugs/URLs local.
+# (The committed repos.tsv is an example with placeholders.)
+
+# Secrets — never commit.
+*.secret
+*.env
+.env
+
+# Editor / OS
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

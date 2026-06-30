@@ -1,0 +1,8 @@
+# Worktree-dev repo registry.  One line per repo:  <slug><TAB><git-url>
+# The slug is the short name you pass to `agent <slug> <name>` and `tokens`.
+# The bare repo lives at  ~/dev/repos/<slug>/.bare  and worktrees at  ~/dev/worktrees/<slug>/<name>.
+# Add repos with:  add-repo <slug> <git-url>
+#
+# Example (replace with your own — this file is yours, not shipped):
+# app	git@github.com:youruser/your-app.git
+# api	git@github.com:youruser/your-api.git

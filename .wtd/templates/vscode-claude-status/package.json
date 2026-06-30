@@ -1,0 +1,88 @@
+{
+  "name": "claude-status",
+  "displayName": "Claude Status",
+  "description": "Recolors worktree folders in the Explorer from a .claude-status sentinel (working=blue, input=yellow, reviewing=purple, done=green, stopped=red) and shows a small Claude session-limit progress bar in the Explorer.",
+  "version": "0.0.45",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.70.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "colors": [
+      {
+        "id": "claudeStatus.working",
+        "description": "Claude working",
+        "defaults": {
+          "dark": "#4aa3ff",
+          "light": "#0b66c3",
+          "highContrast": "#4aa3ff"
+        }
+      },
+      {
+        "id": "claudeStatus.input",
+        "description": "Your turn",
+        "defaults": {
+          "dark": "#ffd83d",
+          "light": "#b58900",
+          "highContrast": "#ffd83d"
+        }
+      },
+      {
+        "id": "claudeStatus.reviewing",
+        "description": "Waiting on review",
+        "defaults": {
+          "dark": "#c586f0",
+          "light": "#8250df",
+          "highContrast": "#d2a8ff"
+        }
+      },
+      {
+        "id": "claudeStatus.pr",
+        "description": "PR ready",
+        "defaults": {
+          "dark": "#5cc8ff",
+          "light": "#0a86d6",
+          "highContrast": "#5cc8ff"
+        }
+      },
+      {
+        "id": "claudeStatus.done",
+        "description": "Done",
+        "defaults": {
+          "dark": "#3fd35f",
+          "light": "#1a7f37",
+          "highContrast": "#3fd35f"
+        }
+      },
+      {
+        "id": "claudeStatus.stopped",
+        "description": "Stopped (no session)",
+        "defaults": {
+          "dark": "#ff5c57",
+          "light": "#cf222e",
+          "highContrast": "#ff5c57"
+        }
+      }
+    ],
+    "views": {
+      "explorer": [
+        {
+          "type": "webview",
+          "id": "claudeStatus.limit",
+          "name": "Dev workflow summary",
+          "contextualTitle": "Dev workflow summary",
+          "order": 1,
+          "visibility": "visible"
+        }
+      ]
+    }
+  }
+}
