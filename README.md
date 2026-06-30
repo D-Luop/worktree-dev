@@ -140,7 +140,8 @@ A **Dev workflow summary** panel in the Explorer (between the folder tree and Ou
   colored) + `↑n` unpushed / `●` dirty; live sessions get a faint gray row, and a row that just became
   *your turn* is highlighted until opened. **Click a row** to open it, **⏹** (live sessions only) to
   end the session keeping the worktree, **📦** to archive, **🗑** to delete the worktree (a modal offers
-  *worktree only* or *worktree + branch*), **+ agent** to launch one, or **tests ✓/✕**
+  *worktree only* or *worktree + branch*; if it's dirty, a second prompt asks before force-discarding),
+  **+ agent** to launch one, or **tests ✓/✕**
   to include/exclude test files from every diff pane;
 - a **monitor** — agent-scoped CPU/memory (summed over the claude process trees), tmux session count,
   and running review count.

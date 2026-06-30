@@ -181,18 +181,38 @@ class DevSummaryProvider {
         });
       } else if (m.cmd === 'delete' && m.slug && m.name) {
         // Two-option modal: remove the worktree (keep the branch) or also force-delete the branch.
+        // We never pass --force up front (it would silently discard uncommitted/untracked work). A
+        // clean delete is tried first; only if `agent rm` reports a dirty worktree do we ask, in a
+        // SECOND modal, whether to force-delete and discard — so destroying work is always an explicit
+        // extra confirmation, never agent-inferred.
         vscode.window.showWarningMessage(
           'Delete ' + m.slug + ' ' + m.name + '?  Ends its session and removes the worktree. "+ branch" also force-deletes the git branch — any unpushed commits on it are lost.',
           { modal: true }, 'Delete worktree', 'Delete worktree + branch'
         ).then((ch) => {
           if (ch !== 'Delete worktree' && ch !== 'Delete worktree + branch') return;
-          const args = ['rm', m.slug, m.name, '-y'];
-          if (ch === 'Delete worktree + branch') args.push('--branch');
-          execScript(path.join(HOME, '.local', 'bin', 'agent'), args, { timeout: 30000 }, (e, so, se) => {
-            if (e) vscode.window.showErrorMessage('delete failed: ' + ((se || '').trim() || e.message));
-            else vscode.window.showInformationMessage('Deleted ' + m.slug + ' ' + m.name + (ch === 'Delete worktree + branch' ? ' (+ branch)' : ''));
-            setTimeout(() => this._postRoster(), 600);
-          });
+          const withBranch = ch === 'Delete worktree + branch';
+          const run = (force) => {
+            const args = ['rm', m.slug, m.name, '-y'];
+            if (force) args.push('--force');
+            if (withBranch) args.push('--branch');
+            execScript(path.join(HOME, '.local', 'bin', 'agent'), args, { timeout: 30000 }, (e, so, se) => {
+              const out = ((se || '') + (so || '')).trim();
+              if (!e) {
+                vscode.window.showInformationMessage('Deleted ' + m.slug + ' ' + m.name + (withBranch ? ' (+ branch)' : ''));
+                setTimeout(() => this._postRoster(), 600);
+                return;
+              }
+              if (!force && /--force|modified or untracked/i.test(out)) {   // dirty worktree → ask before discarding
+                vscode.window.showWarningMessage(
+                  m.slug + ' ' + m.name + ' has uncommitted or untracked changes. Force-delete and DISCARD them?',
+                  { modal: true }, 'Force delete'
+                ).then((c) => { if (c === 'Force delete') run(true); });
+                return;
+              }
+              vscode.window.showErrorMessage('delete failed: ' + (out || e.message));
+            });
+          };
+          run(false);
         });
       } else if (m.cmd === 'terminate' && m.slug && m.name) {
         vscode.window.showWarningMessage(
