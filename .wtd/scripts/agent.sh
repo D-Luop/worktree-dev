@@ -21,6 +21,11 @@ REG="$WTD/repos.tsv"
 . "$WTD/scripts/refs-lib.sh"
 # shellcheck source=account-lib.sh
 . "$WTD/scripts/account-lib.sh"          # account_dir_for_role/name, account_name_for_role
+# platform detection + backend-agnostic session ops (tmux on Linux/WSL/mac, VSCode terminals on Windows)
+# shellcheck source=platform-lib.sh
+. "$WTD/scripts/platform-lib.sh"
+# shellcheck source=session-lib.sh
+. "$WTD/scripts/session-lib.sh"
 
 # --- teardown subcommand:  agent rm <slug> <name> [--branch] [--force] [-y] ---
 # Kill the tmux session, remove the worktree, and (with --branch) delete the branch.
@@ -46,7 +51,7 @@ if [ "${1:-}" = "rm" ]; then
   rmsession="${rmrepo}-${rmname}"; rmsession="${rmsession//[.:]/-}"
 
   echo "About to remove:"
-  printf '  tmux session : %-32s %s\n' "$rmsession" "$(tmux has-session -t "=$rmsession" 2>/dev/null && echo '(running)' || echo '(none)')"
+  printf '  session      : %-32s %s\n' "$rmsession" "$(wtd_session_exists "$rmsession" && echo '(running)' || echo '(none)')"
   printf '  worktree     : %-32s %s\n' "$rmwt" "$([ -d "$rmwt" ] && echo '' || echo '(missing)')"
   [ "$del_branch" = 1 ] && printf '  branch       : %-32s %s\n' "$rmname" "(force-deleted)"
   [ -n "$force" ] && echo "  forcing: any uncommitted changes in the worktree will be discarded"
@@ -55,7 +60,7 @@ if [ "${1:-}" = "rm" ]; then
     case "$ans" in y|Y|yes|YES) ;; *) echo "aborted"; exit 1;; esac
   fi
 
-  tmux kill-session -t "=$rmsession" 2>/dev/null && echo "killed session $rmsession" || echo "no running session $rmsession"
+  wtd_session_kill "$rmsession" "$rmwt" && echo "killed session $rmsession" || echo "no running session $rmsession"
   if [ -d "$rmwt" ]; then
     if out="$(git -C "$rmbare" worktree remove $force "$rmwt" 2>&1)"; then
       echo "removed worktree $rmwt"
@@ -97,12 +102,14 @@ fi
 if [ "${1:-}" = "ls" ] || [ "${1:-}" = "sessions" ] || [ "${1:-}" = "ps" ]; then
   printf '%-34s %-9s %s\n' "SESSION" "ATTACHED" "STATUS"
   printf '%-34s %-9s %s\n' "----------------------------------" "--------" "------"
-  tmux list-sessions -F '#{session_name}'"$(printf '\t')"'#{?session_attached,yes,no}' 2>/dev/null \
-    | sort | while IFS=$'\t' read -r s att; do
-        st="$(tmux show -t "$s" -v @wt_status 2>/dev/null)"
-        printf '%-34s %-9s %s\n' "$s" "$att" "${st:-·}"
-      done || true
-  tmux list-sessions >/dev/null 2>&1 || echo "(no tmux server running)"
+  rows="$(wtd_session_list)"
+  if [ -n "$rows" ]; then
+    printf '%s\n' "$rows" | while IFS=$'\t' read -r s att st; do
+      printf '%-34s %-9s %s\n' "$s" "$att" "${st:-·}"
+    done
+  else
+    echo "(no live sessions)"
+  fi
   echo
   echo "end one with:  agent stop <slug> <name>   (kills the session, keeps the worktree)"
   exit 0
@@ -114,12 +121,12 @@ if [ "${1:-}" = "stop" ] || [ "${1:-}" = "kill" ]; then
   sslug="${1:-}"; sname="${2:-}"
   if [ -z "$sslug" ] || [ -z "$sname" ]; then
     # no args: end the CURRENT session (run from inside the session you want to close)
-    cur="$(tmux display-message -p '#S' 2>/dev/null)"
-    if [ -n "${TMUX:-}" ] && [ -n "$cur" ]; then
+    cur="$(wtd_session_current)"
+    if [ -n "$cur" ]; then
       sroot="$(git rev-parse --show-toplevel 2>/dev/null)"
       [ -n "$sroot" ] && CLAUDE_PROJECT_DIR="$sroot" "$WTD/hooks/wt-status.sh" sessionend </dev/null
       echo "ending current session '$cur' (worktree kept → red 'stopped' unless done)"
-      tmux kill-session -t "$cur"; exit 0
+      wtd_session_kill "$cur" "$sroot"; exit 0
     fi
     echo "usage: agent stop [<slug> <name>]   (no args = end the current session, from inside it)"
     exit 1
@@ -127,7 +134,8 @@ if [ "${1:-}" = "stop" ] || [ "${1:-}" = "kill" ]; then
   ssession="${sslug}-${sname}"; ssession="${ssession//[.:]/-}"
   swt="$DEV/worktrees/$sslug/$sname"
   [ -d "$swt" ] && CLAUDE_PROJECT_DIR="$swt" "$WTD/hooks/wt-status.sh" sessionend </dev/null
-  if tmux kill-session -t "$ssession" 2>/dev/null; then
+  if wtd_session_exists "$ssession"; then
+    wtd_session_kill "$ssession" "$swt"
     echo "stopped session '$ssession' (worktree kept → red 'stopped' unless done). Re-open: agent $sslug $sname"
   else
     echo "no running session '$ssession'."
@@ -341,6 +349,16 @@ if [ "${#refs[@]}" -gt 0 ]; then
     echo "references announced in CLAUDE.md (read access is global via ~/.claude/settings.json):"
     for i in "${!refpaths[@]}"; do printf '  %-24s %s\n' "${reflabels[$i]}" "${refpaths[$i]}"; done
   fi
+fi
+
+# --- vscode backend (Windows / no tmux): run claude directly in the terminal the extension opened.
+# There are no tmux panes; the commit/diff surfaces come from VSCode's native SCM/diff + the panel.
+if [ "$(wtd_session_backend)" != tmux ]; then
+  if [ -n "$ccdir" ]; then echo "session '$session' → Claude account '$account_label' ($ccdir)"; fi
+  # wtd_session_run_claude registers the session, exports WTD_SESSION, cd's to the worktree, and
+  # exec's claude (replacing this shell). The trap it sets deregisters on exit so liveness is accurate.
+  wtd_session_run_claude "$session" "$repo" "$name" "$wt" "$ccdir" "$pmode" "$launch_claude"
+  exit 0   # safety net: wtd_session_run_claude exec's, so we never get here
 fi
 
 # --- tmux: one session per worktree ---

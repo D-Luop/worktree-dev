@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# Backend-agnostic session operations. agent.sh / close.sh / archive.sh call these instead of
+# touching tmux directly, so the same code drives both backends:
+#
+#   tmux   (Linux/WSL/mac) — one tmux session per worktree, the original 4-pane layout.
+#   vscode (Windows)       — the claude-status VSCode extension owns one integrated terminal per
+#                            worktree; this script runs `claude` directly in that terminal (no tmux)
+#                            and tracks liveness via the on-disk session registry.
+#
+# Requires platform-lib.sh to be sourced first (provides wtd_os / wtd_session_backend /
+# wtd_sessions_dir) and $WTD set.
+
+# --- session registry (vscode backend's source of truth; harmless on tmux too) ---------------
+# wtd_session_register <session> <slug> <name> <wt> [pid]
+wtd_session_register() {
+  local session="$1" slug="$2" name="$3" wt="$4" pid="${5:-$$}" dir
+  dir="$(wtd_sessions_dir)"; mkdir -p "$dir"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$slug" "$name" "$wt" "$pid" "$(date +%s 2>/dev/null || echo 0)" \
+    > "$dir/$session"
+}
+wtd_session_deregister() { rm -f "$(wtd_sessions_dir)/$1" 2>/dev/null || true; }
+wtd_session_registered() { [ -f "$(wtd_sessions_dir)/$1" ]; }
+
+# --- existence ------------------------------------------------------------------------------
+# wtd_session_exists <session>  → 0 if a live session by that name exists
+wtd_session_exists() {
+  case "$(wtd_session_backend)" in
+    tmux) tmux has-session -t "=$1" 2>/dev/null ;;
+    *)    wtd_session_registered "$1" ;;
+  esac
+}
+
+# --- listing --------------------------------------------------------------------------------
+# wtd_session_list  → prints one line per live session:  <session>\t<attached yes/no>\t<status>
+wtd_session_list() {
+  case "$(wtd_session_backend)" in
+    tmux)
+      tmux list-sessions -F '#{session_name}'"$(printf '\t')"'#{?session_attached,yes,no}' 2>/dev/null \
+        | sort | while IFS=$'\t' read -r s att; do
+            local st; st="$(tmux show -t "$s" -v @wt_status 2>/dev/null)"
+            printf '%s\t%s\t%s\n' "$s" "$att" "${st:-·}"
+          done
+      ;;
+    *)
+      local dir; dir="$(wtd_sessions_dir)"
+      [ -d "$dir" ] || return 0
+      for f in "$dir"/*; do
+        [ -e "$f" ] || continue
+        local session slug name wt st=""
+        session="$(basename "$f")"
+        IFS=$'\t' read -r slug name wt _ _ < "$f"
+        [ -n "${wt:-}" ] && st="$(cat "$wt/.claude-status" 2>/dev/null || echo '·')"
+        printf '%s\t%s\t%s\n' "$session" "-" "${st:-·}"
+      done | sort
+      ;;
+  esac
+}
+
+# wtd_session_live_names  → just the live session names, one per line (used by the extension too)
+wtd_session_live_names() {
+  case "$(wtd_session_backend)" in
+    tmux) tmux list-sessions -F '#{session_name}' 2>/dev/null ;;
+    *)    local dir; dir="$(wtd_sessions_dir)"; [ -d "$dir" ] && ls -1 "$dir" 2>/dev/null || true ;;
+  esac
+}
+
+# --- current session (run from inside one) --------------------------------------------------
+# wtd_session_current  → the current session name, or empty
+wtd_session_current() {
+  case "$(wtd_session_backend)" in
+    tmux) [ -n "${TMUX:-}" ] && tmux display-message -p '#S' 2>/dev/null || true ;;
+    *)    printf '%s' "${WTD_SESSION:-}" ;;   # set in the worktree terminal's environment
+  esac
+}
+
+# --- teardown -------------------------------------------------------------------------------
+# wtd_session_kill <session> [wt]  → end the session, keep the worktree
+wtd_session_kill() {
+  local session="$1" wt="${2:-}"
+  case "$(wtd_session_backend)" in
+    tmux) tmux kill-session -t "=$session" 2>/dev/null ;;
+    *)
+      local dir f pid; dir="$(wtd_sessions_dir)"; f="$dir/$session"
+      if [ -f "$f" ]; then
+        IFS=$'\t' read -r _ _ _ pid _ < "$f"
+        # best-effort stop the claude process tree so the VSCode terminal returns to a shell.
+        if [ -n "${pid:-}" ]; then
+          if command -v taskkill >/dev/null 2>&1; then taskkill //PID "$pid" //T //F >/dev/null 2>&1 || true
+          else kill "$pid" 2>/dev/null || true; fi
+        fi
+      fi
+      wtd_session_deregister "$session"
+      ;;
+  esac
+}
+
+# --- creation / launch ----------------------------------------------------------------------
+# On Windows there are no tmux panes: agent.sh calls wtd_session_run_claude to exec claude in the
+# current (VSCode-provided) terminal. On tmux, agent.sh keeps its own pane-building code path.
+# wtd_session_run_claude <session> <slug> <name> <wt> <ccdir-or-empty> <permission-mode> <launch 0|1>
+wtd_session_run_claude() {
+  local session="$1" slug="$2" name="$3" wt="$4" ccdir="$5" pmode="$6" launch="$7"
+  wtd_session_register "$session" "$slug" "$name" "$wt" "$$"
+  # deregister when this shell (the claude process host) exits, so liveness is accurate.
+  trap 'wtd_session_deregister "'"$session"'"' EXIT
+  export WTD_SESSION="$session"
+  cd "$wt" || return 1
+  # refresh the worktree's status glyph for the extension roster
+  CLAUDE_PROJECT_DIR="$wt" "$WTD/hooks/wt-status.sh" sync </dev/null 2>/dev/null || true
+  if [ "$launch" != 1 ]; then
+    echo "worktree ready: $wt  (run 'claude' when ready)"
+    exec "${SHELL:-bash}" -i
+  fi
+  if ! command -v claude >/dev/null 2>&1; then
+    echo "note: 'claude' not on PATH; leaving a shell in the worktree"
+    exec "${SHELL:-bash}" -i
+  fi
+  [ -n "$ccdir" ] && export CLAUDE_CONFIG_DIR="$ccdir"
+  exec claude --permission-mode "$pmode"
+}
