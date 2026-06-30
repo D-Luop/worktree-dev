@@ -11,32 +11,38 @@ VSIX="$WTD/templates/vscode-claude-status/claude-status-0.0.45.vsix"
 WTD_USER="$(id -un)"
 WTD_DISTRO="${WSL_DISTRO_NAME:-Ubuntu}"
 wtd_render() { sed -e "s#__DEV__#$BASE#g" -e "s#__USER__#$WTD_USER#g" -e "s#__DISTRO__#$WTD_DISTRO#g" "$@"; }
+# platform detection: tmux backend on Linux/WSL/mac, VSCode-terminal backend on native Windows.
+# shellcheck source=platform-lib.sh
+. "$WTD/scripts/platform-lib.sh"
+OS="$(wtd_os)"; BACKEND="$(wtd_session_backend)"
+echo "==> platform: $OS (session backend: $BACKEND)"
+mkdir -p "$WTD/state/sessions"   # the registry the VSCode backend uses to track live sessions
 
 echo "==> A. install 'agent' + 'add-repo' + 'ref' commands into ~/.local/bin"
 # Real executables on PATH (exported -> inherited by every child shell). A bashrc
 # *function* breaks under exported guards like __BASHRC_LOADED that make child shells
 # (tmux, VSCode terminals, subshells) skip the bashrc body before defining functions.
 mkdir -p "$HOME/.local/bin"
-ln -sf "$WTD/scripts/agent.sh"    "$HOME/.local/bin/agent"
-ln -sf "$WTD/scripts/add-repo.sh" "$HOME/.local/bin/add-repo"
-ln -sf "$WTD/scripts/ref.sh"      "$HOME/.local/bin/ref"
-ln -sf "$WTD/scripts/review.sh"   "$HOME/.local/bin/review"
-ln -sf "$WTD/scripts/archive.sh"  "$HOME/.local/bin/archive"
-ln -sf "$WTD/scripts/close.sh"    "$HOME/.local/bin/close"
-ln -sf "$WTD/scripts/wt-review.sh" "$HOME/.local/bin/wt-review"
-ln -sf "$WTD/scripts/ask.sh"      "$HOME/.local/bin/ask"
-ln -sf "$WTD/scripts/account.sh"  "$HOME/.local/bin/account"
-ln -sf "$WTD/scripts/ship.sh"     "$HOME/.local/bin/ship"
-echo "    linked ~/.local/bin/agent    -> $WTD/scripts/agent.sh"
-echo "    linked ~/.local/bin/add-repo -> $WTD/scripts/add-repo.sh"
-echo "    linked ~/.local/bin/ref      -> $WTD/scripts/ref.sh"
-echo "    linked ~/.local/bin/review   -> $WTD/scripts/review.sh"
-echo "    linked ~/.local/bin/archive  -> $WTD/scripts/archive.sh"
-echo "    linked ~/.local/bin/close    -> $WTD/scripts/close.sh"
-echo "    linked ~/.local/bin/wt-review -> $WTD/scripts/wt-review.sh"
-echo "    linked ~/.local/bin/ask      -> $WTD/scripts/ask.sh"
-echo "    linked ~/.local/bin/account  -> $WTD/scripts/account.sh"
-echo "    linked ~/.local/bin/ship     -> $WTD/scripts/ship.sh"
+# On Unix, symlink. On native Windows, Git-Bash symlinks need Developer Mode/admin, so write a tiny
+# exec-shim instead (always works, and still dispatches to the live script so edits take effect).
+wtd_link() {
+  local tgt="$WTD/scripts/$1" dst="$HOME/.local/bin/$2"
+  case "$OS" in
+    windows) printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$tgt" > "$dst"; chmod +x "$dst" 2>/dev/null || true ;;
+    *)       ln -sf "$tgt" "$dst" ;;
+  esac
+  echo "    $([ "$OS" = windows ] && echo shimmed || echo linked) ~/.local/bin/$2 -> $tgt"
+}
+wtd_link agent.sh     agent
+wtd_link add-repo.sh  add-repo
+wtd_link ref.sh       ref
+wtd_link review.sh    review
+wtd_link archive.sh   archive
+wtd_link close.sh     close
+wtd_link wt-review.sh wt-review
+wtd_link ask.sh       ask
+wtd_link account.sh   account
+wtd_link ship.sh      ship
 # migrate: strip the obsolete bashrc function block if a previous install added it
 if grep -q '>>> agent worktree launcher >>>' "$BASHRC" 2>/dev/null; then
   tmp=$(mktemp)
@@ -53,8 +59,11 @@ for c in agent archive review ask account; do ln -sf "$WTD/completions/wtd-compl
 echo "    installed bash completion for agent/archive/review/ask (open a new shell to use)"
 
 echo "==> B. dependency check"
+deps="jq git code node"
+[ "$BACKEND" = tmux ] && deps="$deps tmux"   # tmux only on the tmux backend (not native Windows)
+# git-delta is optional (diffs fall back to git's colors) but recommended.
 missing=()
-for d in jq tmux git code node; do
+for d in $deps; do
   if command -v "$d" >/dev/null 2>&1; then
     echo "    ok: $d"
   else
@@ -62,8 +71,13 @@ for d in jq tmux git code node; do
     missing+=("$d")
   fi
 done
+command -v delta >/dev/null 2>&1 && echo "    ok: delta (optional)" || echo "    optional: delta (git-delta) — nicer diffs"
 if [ "${#missing[@]}" -gt 0 ]; then
-  echo "    install missing deps (WSL needs sudo): sudo apt-get install -y ${missing[*]}"
+  case "$OS" in
+    windows) echo "    install missing deps on Windows:  winget install <name>   (or: scoop install ${missing[*]})" ;;
+    mac)     echo "    install missing deps:  brew install ${missing[*]}" ;;
+    *)       echo "    install missing deps (may need sudo):  sudo apt-get install -y ${missing[*]}" ;;
+  esac
 fi
 
 echo "==> C. merge Claude status hooks into ~/.claude/settings.json"
@@ -94,11 +108,11 @@ else
   echo "          code --install-extension \"$VSIX\" --force"
 fi
 
-echo "==> D2. terminal tab title from tmux/program (machine-wide, all WSL windows)"
-# tmux pushes a title (set-titles, step H) using @wt_label/@wt_status; VSCode only displays it when
-# the tab title uses ${sequence}. Set it in Machine settings so it applies to every window/folder on
-# this host (not just the ~/dev workspace). NOTE: VSCode must RELOAD the window to pick this up.
-MSET="$HOME/.vscode-server/data/Machine/settings.json"
+echo "==> D2. VSCode terminal tab title + bell prefs"
+# On the tmux backend, tmux pushes a title (set-titles, step H) using @wt_label; on Windows the
+# extension names each terminal directly. Either way VSCode displays it when the tab title uses
+# ${sequence}. Write it to this OS's VSCode user/machine settings. NOTE: reload the window to apply.
+MSET="$(wtd_vscode_settings_path)"
 mkdir -p "$(dirname "$MSET")"; [ -f "$MSET" ] || echo '{}' > "$MSET"
 tmp=$(mktemp)
 jq '. + {"terminal.integrated.tabs.title":"${sequence}","terminal.integrated.tabs.description":"${cwdFolder}","terminal.integrated.enableVisualBell":true,"accessibility.signals.terminalBell":{"sound":"off"},"terminal.integrated.confirmOnKill":"never"}' "$MSET" > "$tmp" && mv "$tmp" "$MSET"
@@ -137,6 +151,11 @@ jq --arg root "$REFROOT" '
 mv "$tmp" "$SETTINGS"
 echo "    granted read on $REFROOT (Edit/Write denied) in $SETTINGS"
 
+# Section H configures tmux (mouse, pane-lock, titles, bell, commit-click). Only the tmux backend
+# needs it — native Windows runs sessions in VSCode terminals, so skip the whole block there.
+if [ "$BACKEND" != tmux ]; then
+  echo "==> H. tmux config — SKIPPED (backend: $BACKEND; sessions run in VSCode integrated terminals)"
+else
 echo "==> H. tmux mouse scrollback (so the wheel scrolls history, not the app)"
 TMUXCONF="$HOME/.tmux.conf"
 touch "$TMUXCONF"
@@ -214,6 +233,7 @@ if ! grep -qF "source-file $CLICKCONF" "$TMUXCONF" 2>/dev/null; then
   echo "    added 'source-file $CLICKCONF' to $TMUXCONF"
 fi
 tmux source-file "$CLICKCONF" 2>/dev/null && echo "    loaded commit-click binding into running server" || true
+fi   # end Section H (tmux backend only)
 
 echo "==> I. commit-msg attribution stripper on all registered bares"
 # Belt-and-suspenders with attribution="": deterministically strip any Claude/AI lines from
