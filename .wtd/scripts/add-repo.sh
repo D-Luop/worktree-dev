@@ -9,6 +9,7 @@ set -euo pipefail
 WTD="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"   # ~/dev/.wtd
 DEV="$(dirname "$WTD")"                                                   # ~/dev
 REG="$WTD/repos.tsv"
+. "$WTD/scripts/platform-lib.sh"   # lets git use our bare repos under safe.bareRepository=explicit
 
 slug="${1:-}"
 url="${2:-}"

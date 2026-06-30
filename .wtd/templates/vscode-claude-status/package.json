@@ -2,7 +2,7 @@
   "name": "claude-status",
   "displayName": "Claude Status",
   "description": "Recolors worktree folders in the Explorer from a .claude-status sentinel (working=blue, input=yellow, reviewing=purple, done=green, stopped=red) and shows a Dev workflow summary (account usage + fleet roster) in the Explorer. Cross-platform: tmux sessions on Linux/WSL/mac, VSCode integrated terminals on native Windows.",
-  "version": "0.0.49",
+  "version": "0.0.52",
   "publisher": "local",
   "license": "MIT",
   "engines": {

@@ -5,7 +5,7 @@ BASE="$(dirname "$WTD")"                                                  # ~/de
 BASHRC="$HOME/.bashrc"
 SETTINGS="$HOME/.claude/settings.json"
 HOOKS_TMPL="$WTD/templates/claude-hooks.json"
-VSIX="$WTD/templates/vscode-claude-status/claude-status-0.0.49.vsix"
+VSIX="$WTD/templates/vscode-claude-status/claude-status-0.0.52.vsix"
 # Shipped templates carry __DEV__/__USER__/__DISTRO__ placeholders so they're machine-agnostic;
 # render them to this host's real values at install time.
 WTD_USER="$(id -un)"
@@ -43,6 +43,7 @@ wtd_link wt-review.sh wt-review
 wtd_link ask.sh       ask
 wtd_link account.sh   account
 wtd_link ship.sh      ship
+wtd_link assistant.sh assistant
 # migrate: strip the obsolete bashrc function block if a previous install added it
 if grep -q '>>> agent worktree launcher >>>' "$BASHRC" 2>/dev/null; then
   tmp=$(mktemp)
@@ -122,8 +123,8 @@ echo "==> D2. VSCode terminal tab title + bell prefs"
 MSET="$(wtd_vscode_settings_path)"
 mkdir -p "$(dirname "$MSET")"; [ -f "$MSET" ] || echo '{}' > "$MSET"
 tmp=$(mktemp)
-jq '. + {"terminal.integrated.tabs.title":"${sequence}","terminal.integrated.tabs.description":"${cwdFolder}","terminal.integrated.enableVisualBell":true,"accessibility.signals.terminalBell":{"sound":"off"},"terminal.integrated.confirmOnKill":"never"}' "$MSET" > "$tmp" && mv "$tmp" "$MSET"
-echo "    set tab title=\${sequence} + visual terminal bell (sound off) in $MSET"
+jq '. + {"terminal.integrated.tabs.title":"${sequence}","terminal.integrated.tabs.description":"${cwdFolder}","terminal.integrated.enableVisualBell":true,"accessibility.signals.terminalBell":{"sound":"off"},"terminal.integrated.confirmOnKill":"never","workbench.editor.showTabs":"none"}' "$MSET" > "$tmp" && mv "$tmp" "$MSET"
+echo "    set tab title=\${sequence} + visual terminal bell (sound off) + hid editor tabs (switch via the roster) in $MSET"
 
 echo "==> E. install claude-pace statusline"
 # Vendored from github.com/Astro-Han/claude-pace (manual method: no npm / no interactive
