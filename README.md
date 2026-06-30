@@ -77,6 +77,7 @@ time (plain Claude Code is simpler), or non-git workflows.
 | `agent stop <slug> <name>` | End a session, keep the worktree. |
 | `agent rm <slug> <name> [--branch] [--force] [-y]` | Tear down: kill session + remove worktree (`--branch` deletes branch too). |
 | `agent done` / `agent pr` / `agent wip` | (Inside a worktree) mark complete (sticky green) / PR-ready (sticky light-blue) / back to working. |
+| `assistant [--account <a>] [--mode <m>]` | Open/resume the **fleet assistant** — a Claude session in the dev base for managing worktrees (launch/stop/archive/review/teardown). Pinned at the top of the roster. |
 | `close` | (Inside a session) end the current session, keep the worktree. |
 | `archive <slug> <name>` | Shelve a worktree → `worktrees/<slug>/archive/`. Reopen via `agent` (prompts to restore). |
 
@@ -129,20 +130,28 @@ write `pr-notes.md`) · `/wt-review` (review + triage) · `/close` · `/push` ·
 ## Status colors
 
 🔵 working · 🟡 your turn · 🟣 waiting on review · 🔹 PR-ready (light blue) · 🟢 done · 🔴 stopped (no session).
-Shown as the Explorer folder color and the roster glyph — the terminal tab shows just the worktree
-name (no status dot). No AI attribution is added to commits/PRs.
+Shown as the Explorer folder color and the roster glyph. On the VSCode backend the editor **tab bar is
+hidden** (`workbench.editor.showTabs: none`) so the roster is the single place you switch sessions —
+**click a roster row** to focus its session. No AI attribution is added to commits/PRs.
 
 A **Dev workflow summary** panel in the Explorer (between the folder tree and Outline) shows:
 - every configured account's **email** + **live** 5h + 7d session-limit bars + reset countdown
   (fetched from Anthropic's usage endpoint every ~60s; falls back to the per-account
   `rate-limits.json` if offline);
+- a pinned **🤖 assistant** row at the top (separated from the worktrees, no status glyph) — a single
+  durable Claude session that runs in the dev base and helps you **manage the fleet** (launch / stop /
+  archive / review / tear down worktrees via the wtd commands). Click it (or **+ assistant**) to open;
+  it resumes across reopen/reboot like a worktree session. Route its cost with `--account` /
+  `$ASSISTANT_ACCOUNT` (defaults to your normal login);
 - a **fleet roster** grouped by repo (`mod` first) — each worktree's status glyph (`◐ ! ⋯ ◆ ✓ ○`,
   colored) + `↑n` unpushed / `●` dirty; live sessions get a faint gray row, and a row that just became
   *your turn* is highlighted until opened. **Click a row** to open it, **⏹** (live sessions only) to
   end the session keeping the worktree, **📦** to archive, **🗑** to delete the worktree (a modal offers
   *worktree only* or *worktree + branch*; if it's dirty, a second prompt asks before force-discarding),
-  **+ agent** to launch one, or **tests ✓/✕**
-  to include/exclude test files from every diff pane;
+  **+ agent** to launch one, **📷** to add an image to the focused session (pastes a clipboard
+  screenshot — the workaround for native-Windows terminal paste not loading clipboard images — else
+  pick a file; it stages the image and inserts its path, which Claude Code auto-loads on submit), or
+  **tests ✓/✕** to include/exclude test files from every diff pane;
 - a **monitor** — agent-scoped CPU/memory (summed over the claude process trees), tmux session count,
   and running review count.
 

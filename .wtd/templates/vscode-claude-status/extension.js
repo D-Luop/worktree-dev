@@ -57,6 +57,7 @@ function refreshDevRoot() {
   SESS_DIR = path.join(WTD, 'state', 'sessions');
 }
 const IS_WIN = process.platform === 'win32';
+const ASST_NAME = 'assistant';   // the reserved terminal name of the pinned fleet-management session
 // The shell each worktree terminal runs. On Windows that's Git Bash (so the .wtd bash scripts run);
 // elsewhere /bin/bash. On Windows `agent` runs claude directly in this terminal (no tmux); on Unix it
 // runs `tmux attach`, so the terminal hosts the tmux session either way.
@@ -123,6 +124,7 @@ class DevSummaryProvider {
     this._lastStatus = {};        // worktree key -> last status seen (to detect transitions)
     this._unread = {};            // worktree key -> true when it flipped to "your turn" and not yet opened
     this._current = null;         // the Terminal of the worktree session currently focused (marked in roster)
+    this._asstTerm = null;        // the pinned assistant session's Terminal (focus instead of duplicate)
   }
   _key(slug, name) { return slug + '' + name; }
   clearUnread(key) { if (this._unread[key]) { this._unread[key] = false; this._postRoster(); } }
@@ -147,7 +149,55 @@ class DevSummaryProvider {
     this.clearUnread(key);
     setTimeout(() => this._postRoster(), 1500);
   }
-  onTermClosed(t) { if (this._current === t) { this._current = null; this._postRoster(); } for (const [k, v] of this._terms) if (v === t) { this._terms.delete(k); break; } }
+  // Open (or focus) the pinned fleet assistant: one durable Claude session in the dev base that
+  // manages worktrees via the wtd PATH commands. Mirrors openOrFocus but with a reserved name and
+  // no slug/worktree of its own; `assistant` (the PATH command) handles resume.
+  openOrFocusAssistant() {
+    let t = this._asstTerm;
+    if (!t || t.exitStatus !== undefined) t = vscode.window.terminals.find((x) => x.name === ASST_NAME);
+    if (t) { t.show(); }
+    else {
+      t = vscode.window.createTerminal({ name: ASST_NAME, location: vscode.TerminalLocation.Editor,
+        shellPath: bashShell(), shellArgs: ['-lc', 'assistant'] });
+      t.show();
+    }
+    this._asstTerm = t; this._current = t;
+    setTimeout(() => this._postRoster(), 800);
+  }
+
+  // Add an image to the focused session without the broken native-Windows clipboard paste: grab the
+  // clipboard image (else let the user pick a file), stage it to a space-free path under .wtd/state,
+  // and INSERT that absolute path into the terminal (no Enter). Claude Code auto-detects the image
+  // path on submit and loads the picture — see the file-path image-input mechanism.
+  pasteImage() {
+    const target = vscode.window.activeTerminal || this._current;
+    if (!target) { vscode.window.showInformationMessage('claude-status: open a session first, then add an image.'); return; }
+    const dir = path.join(WTD, 'state', 'pasted-images');
+    try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+    const insert = (file) => { target.show(); target.sendText((IS_WIN ? file.replace(/\//g, '\\') : file) + ' ', false); };
+    const pick = () => {
+      vscode.window.showOpenDialog({ canSelectMany: false, openLabel: 'Add image',
+        filters: { Images: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'] } }).then((uris) => {
+        if (!uris || !uris.length) return;
+        const src = uris[0].fsPath;
+        // copy into the space-free staging dir so the inserted path can't trip Claude's path auto-detect
+        const staged = path.join(dir, 'img-' + Date.now() + (path.extname(src) || '.png'));
+        try { fs.copyFileSync(src, staged); insert(staged); }
+        catch (e) { vscode.window.showErrorMessage('claude-status: image copy failed: ' + e.message); }
+      });
+    };
+    if (!IS_WIN) return pick();
+    // Windows: try the clipboard image first (the case native paste can't handle); else pick a file.
+    const dest = path.join(dir, 'img-' + Date.now() + '.png');
+    const psPath = dest.replace(/\//g, '\\').replace(/'/g, "''");
+    const ps = "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $i=[System.Windows.Forms.Clipboard]::GetImage(); if($i){ $i.Save('" + psPath + "',[System.Drawing.Imaging.ImageFormat]::Png); $i.Dispose(); exit 0 } else { exit 3 }";
+    cp.execFile('powershell.exe', ['-NoProfile', '-STA', '-Command', ps], { timeout: 8000 }, (e) => {
+      if (!e) insert(dest);   // clipboard held an image → staged + inserted
+      else pick();            // nothing on the clipboard → fall back to a file picker
+    });
+  }
+
+  onTermClosed(t) { if (this._current === t) { this._current = null; this._postRoster(); } if (this._asstTerm === t) this._asstTerm = null; for (const [k, v] of this._terms) if (v === t) { this._terms.delete(k); break; } }
   onTermActive(t) {
     if (!t) return;
     this._current = t; setTimeout(() => this._postRoster(), 0);   // mark the focused session as selected
@@ -238,6 +288,10 @@ class DevSummaryProvider {
             setTimeout(() => this._postRoster(), 2500);
           }
         });
+      } else if (m.cmd === 'newAssistant') {
+        this.openOrFocusAssistant();
+      } else if (m.cmd === 'pasteImage') {
+        this.pasteImage();
       } else if (m.cmd === 'toggleTests') {
         // flip the global "exclude test files from diffs" flag, then re-seed live diffs so it shows now
         try {
@@ -368,7 +422,10 @@ class DevSummaryProvider {
       w.active = live.has(w.slug + '-' + w.name);   // has a live tmux session (vs. closed/inactive)
       w.current = !!cur && (curKey ? key === curKey : (!!cur.name && cur.name === w.name));   // focused session
     }
-    if (this.view && this.view.visible) this.view.webview.postMessage({ type: 'roster', rows });
+    // pinned assistant row state: live if a terminal named "assistant" exists; selected if it's focused
+    const asstTerm = vscode.window.terminals.find((x) => x.name === ASST_NAME);
+    const assistant = { active: !!asstTerm, current: !!cur && cur.name === ASST_NAME };
+    if (this.view && this.view.visible) this.view.webview.postMessage({ type: 'roster', rows, assistant });
   }
 
   // names of worktrees with a live session (session name = "<slug>-<name>"). On Windows there's no
@@ -453,7 +510,7 @@ class DevSummaryProvider {
   .none{opacity:.5;font-size:12px;padding:2px 0;}
   .stale{opacity:.45;} .staleNote{font-size:10px;opacity:.6;font-style:italic;color:var(--vscode-charts-yellow,#d2a000);margin-top:1px;}
   hr{border:none;border-top:1px solid var(--vscode-panel-border,rgba(127,127,127,.2));margin:5px 0 4px;}
-  .head{display:flex;align-items:center;justify-content:space-between;gap:6px;font-size:12px;margin-bottom:3px;}
+  .head{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:4px;font-size:12px;margin-bottom:3px;}
   .counts{opacity:.8;}
   .btn{cursor:pointer;border:1px solid var(--vscode-button-border,transparent);background:var(--vscode-button-secondaryBackground,rgba(127,127,127,.18));color:var(--vscode-button-secondaryForeground,inherit);border-radius:3px;padding:0 6px;line-height:16px;font-size:12px;}
   .btn:hover{background:var(--vscode-button-secondaryHoverBackground,rgba(127,127,127,.3));}
@@ -469,6 +526,10 @@ class DevSummaryProvider {
   .wt .term:hover,.wt .del:hover{color:var(--vscode-charts-red,#e5534b);}
   .wt .unr:hover{color:var(--vscode-charts-yellow,#d2a000);}
   .wt.sep{margin-top:7px;}   /* gap between status groups */
+  /* pinned assistant row: above the worktree groups, no status glyph/git, with a divider below it */
+  .wt.asst .agly{width:15px;text-align:center;}
+  .wt.asst .nm{font-weight:600;}
+  .asstsep{border-bottom:1px solid var(--vscode-panel-border,rgba(127,127,127,.2));margin:2px 0 6px;}
   .wt.active{background:rgba(127,127,127,.13);}   /* live tmux session — noticeably lighter than normal */
   .wt.unread{background:rgba(255,216,61,.16);box-shadow:inset 2px 0 0 var(--vscode-charts-yellow,#d2a000);}  /* your-turn, not yet opened — yellow */
   /* the session you currently have focused — VSCode's "selected list item" look (accent bar + bg).
@@ -484,7 +545,7 @@ class DevSummaryProvider {
 </style></head><body>
 <div id="lim"><div class="none">waiting for a session…</div></div>
 <hr>
-<div class="head"><span class="counts" id="counts"></span><span class="btn" id="tests" title="Include/exclude test files in the diff panes">tests ✓</span><span class="btn" id="add" title="Launch a new agent">+ agent</span></div>
+<div class="head"><span class="counts" id="counts"></span><span class="btn" id="img" title="Add an image to the focused session — pastes a clipboard screenshot, or pick a file (works around native-Windows terminal paste)">📷</span><span class="btn" id="tests" title="Include/exclude test files in the diff panes">tests ✓</span><span class="btn" id="asst" title="Open the worktree-dev assistant (fleet management)">+ assistant</span><span class="btn" id="add" title="Launch a new agent">+ agent</span></div>
 <div id="roster"></div>
 <div id="monwrap">
 <hr>
@@ -493,7 +554,7 @@ class DevSummaryProvider {
 </div>
 <script>
   const vsc = acquireVsCodeApi();
-  let accts=[], ros=[], mon=null;
+  let accts=[], ros=[], mon=null, asstState={};
   const GLYPH={working:'🔵',input:'🟡',reviewing:'🟣',pr:'🔹',done:'🟢',stopped:'🔴'};   // emoji -> editor tab name
   const GLYPHD={working:'◐',input:'!',reviewing:'⋯',pr:'◆',done:'✓',stopped:'○'};        // explorer-style glyph for the roster
   const COL={working:'#4aa3ff',input:'#ffd83d',reviewing:'#c586f0',pr:'#5cc8ff',done:'#3fd35f',stopped:'#ff5c57'};
@@ -543,12 +604,16 @@ class DevSummaryProvider {
         +'<span class="arch" title="Archive '+esc(w.name)+'">📦</span>'
         +'<span class="del" title="Delete '+esc(w.name)+' (remove worktree)">🗑</span></div>';
     };
-    document.getElementById('roster').innerHTML = slugs.map(slug=>{
+    // pinned assistant row at the very top — separated from the worktrees, no status indicators
+    const asstRow='<div class="wt asst'+(asstState.current?' current':'')+(asstState.active?' active':'')+'" id="asstRow" title="worktree-dev assistant — fleet management · click to open">'
+      +'<span class="agly">🤖</span><span class="nm">assistant</span></div><div class="asstsep"></div>';
+    document.getElementById('roster').innerHTML = asstRow + slugs.map(slug=>{
       const rows=groups[slug].sort((a,b)=>(PRIO[a.status]??9)-(PRIO[b.status]??9) || a.name.localeCompare(b.name));
       // add a gap whenever the status changes, so each status group is visually separated
       return '<div class="repo">'+esc(slug)+'</div>'+rows.map((w,i)=>wtRow(w, i>0 && rows[i-1].status!==w.status)).join('');
     }).join('');
-    document.querySelectorAll('.wt').forEach(el=>el.onclick=()=>vsc.postMessage({cmd:'open',slug:el.dataset.slug,name:el.dataset.name,glyph:el.dataset.glyph}));
+    const ar=document.getElementById('asstRow'); if(ar) ar.onclick=()=>vsc.postMessage({cmd:'newAssistant'});
+    document.querySelectorAll('.wt:not(.asst)').forEach(el=>el.onclick=()=>vsc.postMessage({cmd:'open',slug:el.dataset.slug,name:el.dataset.name,glyph:el.dataset.glyph}));
     document.querySelectorAll('.arch').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'archive',slug:p.dataset.slug,name:p.dataset.name}); });
     document.querySelectorAll('.del').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'delete',slug:p.dataset.slug,name:p.dataset.name}); });
     document.querySelectorAll('.term').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'terminate',slug:p.dataset.slug,name:p.dataset.name}); });
@@ -578,6 +643,8 @@ class DevSummaryProvider {
       + mbar('mem', memPct, gb(mon.amem)+'G', 'Claude agents using '+gb(mon.amem)+' GB RAM ('+memPct+'% of '+gb(mon.mt)+'G) · whole system '+gb(mon.msys)+'/'+gb(mon.mt)+'G used ('+sysPct+'%)');
   }
   document.getElementById('add').onclick=()=>vsc.postMessage({cmd:'newAgent'});
+  document.getElementById('asst').onclick=()=>vsc.postMessage({cmd:'newAssistant'});
+  document.getElementById('img').onclick=()=>vsc.postMessage({cmd:'pasteImage'});
   function renderTests(excluded){ const b=document.getElementById('tests'); if(!b) return;
     b.textContent = excluded ? 'tests ✕' : 'tests ✓';
     b.title = excluded ? 'Test files are EXCLUDED from the diff panes — click to include' : 'Test files are INCLUDED in the diff panes — click to exclude';
@@ -586,7 +653,7 @@ class DevSummaryProvider {
   window.addEventListener('message', e => {
     const m=e.data; if(!m) return;
     if(m.type==='limits'){ accts=m.accounts||[]; renderLim(); }
-    else if(m.type==='roster'){ ros=m.rows||[]; renderRoster(); }
+    else if(m.type==='roster'){ ros=m.rows||[]; asstState=m.assistant||{}; renderRoster(); }
     else if(m.type==='monitor'){ mon=m.m; renderMonitor(); }
     else if(m.type==='teststate'){ renderTests(m.excluded); }
   });
