@@ -5,7 +5,7 @@ BASE="$(dirname "$WTD")"                                                  # ~/de
 BASHRC="$HOME/.bashrc"
 SETTINGS="$HOME/.claude/settings.json"
 HOOKS_TMPL="$WTD/templates/claude-hooks.json"
-VSIX="$WTD/templates/vscode-claude-status/claude-status-0.0.56.vsix"
+VSIX="$WTD/templates/vscode-claude-status/claude-status-0.0.58.vsix"
 # Shipped templates carry __DEV__/__USER__/__DISTRO__ placeholders so they're machine-agnostic;
 # render them to this host's real values at install time.
 WTD_USER="$(id -un)"
@@ -44,6 +44,7 @@ wtd_link ask.sh       ask
 wtd_link account.sh   account
 wtd_link ship.sh      ship
 wtd_link assistant.sh assistant
+wtd_link preview.sh   preview
 # migrate: strip the obsolete bashrc function block if a previous install added it
 if grep -q '>>> agent worktree launcher >>>' "$BASHRC" 2>/dev/null; then
   tmp=$(mktemp)
