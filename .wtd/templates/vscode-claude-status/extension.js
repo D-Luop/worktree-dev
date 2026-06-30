@@ -453,6 +453,9 @@ class DevSummaryProvider {
     const live = await this._liveSessions();   // session names with a live tmux session
     // resolve which row is the currently-focused session: by exact terminal if we opened it, else
     // (e.g. after a window reload, when _terms is empty) fall back to matching the terminal's name.
+    // sync the focused terminal from VSCode (covers editor-area terminals — assistant/terminal/sessions —
+    // whose focus the cached _current can miss); keep the cache when focus is on a non-terminal.
+    if (vscode.window.activeTerminal) this._current = vscode.window.activeTerminal;
     const cur = this._current; let curKey = null;
     if (cur) for (const [k, v] of this._terms) if (v === cur) { curKey = k; break; }
     // mark a row "unread" when it flips to 'input' (agent finished → your turn); cleared on open/focus
@@ -573,7 +576,8 @@ class DevSummaryProvider {
   .wt .unr:hover{color:var(--vscode-charts-yellow,#d2a000);}
   .wt.sep{margin-top:7px;}   /* gap between status groups */
   /* pinned assistant row: above the worktree groups, no status glyph/git, with a divider below it */
-  .wt.asst{margin-top:9px;}   /* breathing room between the header buttons and the assistant row */
+  .wt.asst{margin-top:9px;}   /* breathing room between the header buttons and the first pinned row */
+  .wt.asst + .wt.asst{margin-top:2px;}   /* but keep terminal + assistant tight as a pair */
   .wt.asst .agly{width:15px;text-align:center;}
   .wt.asst .nm{font-weight:600;}
   .asstsep{border-bottom:1px solid var(--vscode-panel-border,rgba(127,127,127,.2));margin:2px 0 6px;}
@@ -653,7 +657,7 @@ class DevSummaryProvider {
     };
     // pinned plain-terminal row, just above the assistant — an ordinary shell for ad-hoc commands
     const termRow='<div class="wt asst'+(termState.current?' current':'')+(termState.active?' active':'')+'" id="termRow" title="plain terminal — a login shell in the dev base · click to open">'
-      +'<span class="agly">▸</span><span class="nm">terminal</span></div>';
+      +'<span class="agly">🖥️</span><span class="nm">terminal</span></div>';
     // pinned assistant row — separated from the worktrees, no status indicators
     const asstRow='<div class="wt asst'+(asstState.current?' current':'')+(asstState.active?' active':'')+'" id="asstRow" title="worktree-dev assistant — fleet management · click to open">'
       +'<span class="agly">🤖</span><span class="nm">assistant</span></div><div class="asstsep"></div>';
