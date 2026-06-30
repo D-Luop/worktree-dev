@@ -14,6 +14,10 @@ DEV="$(dirname "$WTD")"                                                   # ~/de
 REG="$WTD/repos.tsv"
 # shellcheck source=refs-lib.sh
 . "$WTD/scripts/refs-lib.sh"   # registered
+# shellcheck source=platform-lib.sh
+. "$WTD/scripts/platform-lib.sh"
+# shellcheck source=session-lib.sh
+. "$WTD/scripts/session-lib.sh"
 
 slug="${1:-}"; name="${2:-}"
 if [ -z "$slug" ] || [ -z "$name" ]; then
@@ -47,7 +51,7 @@ session="${slug}-${name}"; session="${session//[.:]/-}"
 [ -e "$arc" ] && { echo "error: archive target already exists: $arc"; exit 1; }
 
 # Kill the session so nothing holds the worktree open during the move.
-tmux kill-session -t "$session" 2>/dev/null && echo "killed session $session" || true
+wtd_session_kill "$session" "$wt" 2>/dev/null && echo "killed session $session" || true
 
 mkdir -p "$(dirname "$arc")"
 if git -c safe.bareRepository=all -C "$bare" worktree move "$wt" "$arc"; then

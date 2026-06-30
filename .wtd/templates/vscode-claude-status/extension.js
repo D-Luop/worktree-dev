@@ -12,6 +12,20 @@ const RATE_FILE = path.join(HOME, '.claude', 'rate-limits.json');   // statuslin
 const CREDS = path.join(HOME, '.claude', '.credentials.json');      // OAuth token for the live fetch
 const CLAUDE_JSON = path.join(HOME, '.claude.json');                // account email
 const TESTS_FLAG = path.join(HOME, '.config', 'wtd', 'exclude-tests');  // present = exclude test files from diffs
+const WTD = path.join(DEV, '.wtd');
+const SESS_DIR = path.join(WTD, 'state', 'sessions');   // vscode-backend session registry (no tmux)
+const IS_WIN = process.platform === 'win32';
+// The shell each worktree terminal runs. On Windows that's Git Bash (so the .wtd bash scripts run);
+// elsewhere /bin/bash. On Windows `agent` runs claude directly in this terminal (no tmux); on Unix it
+// runs `tmux attach`, so the terminal hosts the tmux session either way.
+function bashShell() {
+  if (!IS_WIN) return '/bin/bash';
+  for (const c of ['C:\\Program Files\\Git\\bin\\bash.exe', 'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
+                   path.join(HOME, 'scoop', 'apps', 'git', 'current', 'bin', 'bash.exe')]) {
+    try { if (fs.existsSync(c)) return c; } catch {}
+  }
+  return 'bash.exe';
+}
 
 class ClaudeStatusProvider {
   constructor() {
@@ -68,7 +82,7 @@ class DevSummaryProvider {
     else {
       const nm = name;   // tab = worktree name only (no slug, no status glyph — status shows in the roster)
       t = vscode.window.createTerminal({ name: nm, location: vscode.TerminalLocation.Editor,
-        shellPath: '/bin/bash', shellArgs: ['-lc', 'agent ' + shq(slug) + ' ' + shq(name)] });
+        shellPath: bashShell(), shellArgs: ['-lc', 'agent ' + shq(slug) + ' ' + shq(name)] });
       t.show();
     }
     this._terms.set(key, t);
@@ -110,7 +124,7 @@ class DevSummaryProvider {
         });
       } else if (m.cmd === 'terminate' && m.slug && m.name) {
         vscode.window.showWarningMessage(
-          'End the tmux session for ' + m.slug + ' ' + m.name + '?  The worktree (branch, changes, reviews) stays — only the live Claude session ends. Reopen it from the roster.',
+          'End the session for ' + m.slug + ' ' + m.name + '?  The worktree (branch, changes, reviews) stays — only the live Claude session ends. Reopen it from the roster.',
           { modal: true }, 'End session'
         ).then((ch) => {
           if (ch !== 'End session') return;
@@ -127,7 +141,7 @@ class DevSummaryProvider {
           if (v && v.trim()) {
             const nm = (v.trim().split(/\s+/)[1] || v.trim().split(/\s+/)[0] || 'agent');   // tab = the <name> token (no slug)
             const t = vscode.window.createTerminal({ name: nm, location: vscode.TerminalLocation.Editor,
-              shellPath: '/bin/bash', shellArgs: ['-lc', 'agent ' + v.trim()] });
+              shellPath: bashShell(), shellArgs: ['-lc', 'agent ' + v.trim()] });
             t.show();
             setTimeout(() => this._postRoster(), 2500);
           }
@@ -265,9 +279,16 @@ class DevSummaryProvider {
     if (this.view && this.view.visible) this.view.webview.postMessage({ type: 'roster', rows });
   }
 
-  // names of worktrees that currently have a live tmux session (session name = "<slug>-<name>")
+  // names of worktrees with a live session (session name = "<slug>-<name>"). On Windows there's no
+  // tmux: the on-disk registry (written by agent.sh) is the source of truth — filenames encode '/'
+  // as '__', so decode them back. On Unix, ask tmux.
   _liveSessions() {
     return new Promise((res) => {
+      if (IS_WIN) {
+        const s = new Set();
+        try { for (const f of fs.readdirSync(SESS_DIR)) s.add(f.replace(/__/g, '/')); } catch {}
+        return res(s);
+      }
       cp.execFile('tmux', ['list-sessions', '-F', '#{session_name}'], { timeout: 3000 }, (e, out) => {
         const s = new Set();
         if (!e && out) for (const ln of out.split('\n')) { const n = ln.trim(); if (n) s.add(n); }
@@ -548,7 +569,10 @@ function activate(context) {
     ['view_pr_notes', 'pr-notes.md', 'Open PR notes as text'],
     ['view_active_plan', '.claude/plans/active-plan.md', 'Open active plan as text'],
   ];
-  context.subscriptions.push(vscode.window.registerTerminalLinkProvider({
+  // The SHA→diff-pane and footer-button links are a tmux-pane feature (they repaint a tmux diff
+  // pane / resolve the commit pane's cwd). There are no tmux panes on Windows, so skip registration
+  // there — VSCode's native SCM/diff and the Source Control view cover diffs instead.
+  if (!IS_WIN) context.subscriptions.push(vscode.window.registerTerminalLinkProvider({
     provideTerminalLinks(ctx) {
       const links = []; const re = /\b[0-9a-f]{7,40}\b/g; let m;
       while ((m = re.exec(ctx.line)) !== null) {

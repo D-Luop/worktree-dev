@@ -1,6 +1,6 @@
 # WorkTreeDev
 
-Run many parallel Claude Code sessions across repos — **one git worktree + one tmux session per
+Run many parallel Claude Code sessions across repos — **one git worktree + one session per
 branch**, each repo stored once as a bare clone. Commands are on your `PATH` after `make install`.
 
 ```
@@ -11,6 +11,11 @@ branch**, each repo stored once as a bare clone. Commands are on your `PATH` aft
 ├── refs/<slug>/<branch>              # read-only reference checkouts
 └── .wtd/                             # the tooling
 ```
+
+**Cross-platform.** The session backend is auto-detected: a **tmux** session per worktree on
+Linux / WSL / macOS, or a **VSCode integrated terminal** per worktree on **native Windows** (Git
+Bash, no WSL). Override with `WTD_SESSION_BACKEND=tmux|vscode`. Windows setup:
+[**README-windows.md**](README-windows.md).
 
 ## Purpose & uses
 
