@@ -15,6 +15,7 @@ set -euo pipefail
 
 WTD="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"   # ~/dev/.wtd
 DEV="$(dirname "$WTD")"                                                   # ~/dev
+. "$WTD/scripts/platform-lib.sh"   # lets git use our bare repos under safe.bareRepository=explicit
 # shellcheck source=refs-lib.sh
 . "$WTD/scripts/refs-lib.sh"
 

@@ -61,3 +61,15 @@ wtd_git_bash_path() {
   done
   command -v bash 2>/dev/null
 }
+
+# Let git drive worktree-dev's own bare repos (repos/<slug>/.bare) even when the environment forces
+# `safe.bareRepository=explicit`. VSCode injects exactly that via GIT_CONFIG_PARAMETERS, so any wtd
+# script launched from VSCode (an extension button or an integrated terminal) would otherwise fail
+# every `git -C <bare> worktree …` with "cannot use bare repository … safe.bareRepository is
+# 'explicit'". We append our own `=all` last (GIT_CONFIG_PARAMETERS is last-wins, and -c/env beats
+# global config), scoped to this process tree only — the user's global setting is untouched. Runs at
+# source time so every script that sources platform-lib.sh is covered; idempotent.
+case " ${GIT_CONFIG_PARAMETERS:-} " in
+  *"'safe.bareRepository=all'"*) ;;
+  *) export GIT_CONFIG_PARAMETERS="${GIT_CONFIG_PARAMETERS:+$GIT_CONFIG_PARAMETERS }'safe.bareRepository=all'" ;;
+esac

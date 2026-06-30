@@ -25,6 +25,7 @@ set -euo pipefail
 WTD="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"   # ~/dev/.wtd
 DEV="$(dirname "$WTD")"                                                   # ~/dev
 REG="$WTD/repos.tsv"
+. "$WTD/scripts/platform-lib.sh"   # lets git use our bare repos under safe.bareRepository=explicit
 REVDIR="$WTD/reviews"                 # neutral workspace = the reviewer's cwd (OUTSIDE worktrees)
 FOCUSDIR="$WTD/review-focus"          # optional per-repo highlight focus
 CTXDIR="$WTD/review-context"          # optional per-repo orientation (generated paths, codegen flow, conventions)
