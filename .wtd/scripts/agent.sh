@@ -61,19 +61,31 @@ if [ "${1:-}" = "rm" ]; then
   fi
 
   wtd_session_kill "$rmsession" "$rmwt" && echo "killed session $rmsession" || echo "no running session $rmsession"
-  wtd_session_id_forget "$rmsession"   # drop the durable resume id so a future same-named worktree starts fresh
   if [ -d "$rmwt" ]; then
-    if out="$(git -C "$rmbare" worktree remove $force "$rmwt" 2>&1)"; then
+    # A session we just killed can keep file handles open for a moment on Windows, so `git worktree
+    # remove` fails with "Permission denied"/"used by another process". Retry a few times to let the
+    # OS release the handles; bail immediately on any other error (e.g. a real dirty-tree refusal).
+    out=""; removed=0
+    for _attempt in 1 2 3 4 5; do
+      if out="$(git -C "$rmbare" worktree remove $force "$rmwt" 2>&1)"; then removed=1; break; fi
+      case "$out" in *"Permission denied"*|*"used by another process"*) sleep 1 ;; *) break ;; esac
+    done
+    if [ "$removed" = 1 ]; then
       echo "removed worktree $rmwt"
     else
       echo "worktree remove failed: $out"
-      echo "  (uncommitted changes? re-run with --force to discard, or commit/push first)"
+      case "$out" in
+        *"Permission denied"*|*"used by another process"*)
+          echo "  (a process is still using the worktree — close its VSCode terminal/editor tab, then retry)" ;;
+        *) echo "  (uncommitted changes? re-run with --force to discard, or commit/push first)" ;;
+      esac
       exit 1
     fi
   else
     git -C "$rmbare" worktree prune 2>/dev/null || true
     echo "worktree not present; pruned stale entries"
   fi
+  wtd_session_id_forget "$rmsession"   # only now (worktree actually gone) drop the durable resume id
   if [ "$del_branch" = 1 ]; then
     if git -C "$rmbare" show-ref --verify --quiet "refs/heads/$rmname"; then
       git -C "$rmbare" branch -D "$rmname" && echo "deleted branch $rmname"
