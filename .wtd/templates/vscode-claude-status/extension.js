@@ -69,6 +69,21 @@ function bashShell() {
   return 'bash.exe';
 }
 
+// Run a .wtd shell script or a shebang wrapper (archive/agent/refresh-diffs/monitor-stats). On Windows
+// these aren't directly spawnable — cp.execFile throws EFTYPE — so route them through Git Bash (with
+// forward-slash paths it can stat); elsewhere exec them directly. Crucially this NEVER throws
+// synchronously: a spawn failure is delivered to cb, so e.g. _postMonitor can't take down the webview.
+function execScript(file, args, opts, cb) {
+  const done = typeof cb === 'function' ? cb : () => {};
+  try {
+    if (IS_WIN) {
+      const line = [file].concat(args || []).map((a) => shq(String(a).replace(/\\/g, '/'))).join(' ');
+      return cp.execFile(bashShell(), ['-lc', line], opts, done);
+    }
+    return cp.execFile(file, args || [], opts, done);
+  } catch (e) { done(e); }
+}
+
 class ClaudeStatusProvider {
   constructor() {
     this._onDidChange = new vscode.EventEmitter();
@@ -158,7 +173,7 @@ class DevSummaryProvider {
           { modal: true }, 'Archive'
         ).then((ch) => {
           if (ch !== 'Archive') return;
-          cp.execFile(path.join(HOME, '.local', 'bin', 'archive'), [m.slug, m.name], { timeout: 30000 }, (e, so, se) => {
+          execScript(path.join(HOME, '.local', 'bin', 'archive'), [m.slug, m.name], { timeout: 30000 }, (e, so, se) => {
             if (e) vscode.window.showErrorMessage('archive failed: ' + ((se || '').trim() || e.message));
             else vscode.window.showInformationMessage('Archived ' + m.slug + ' ' + m.name);
             this._postRoster();
@@ -170,7 +185,7 @@ class DevSummaryProvider {
           { modal: true }, 'End session'
         ).then((ch) => {
           if (ch !== 'End session') return;
-          cp.execFile(path.join(HOME, '.local', 'bin', 'agent'), ['stop', m.slug, m.name], { timeout: 15000 }, (e, so, se) => {
+          execScript(path.join(HOME, '.local', 'bin', 'agent'), ['stop', m.slug, m.name], { timeout: 15000 }, (e, so, se) => {
             if (e) vscode.window.showErrorMessage('end session failed: ' + ((se || '').trim() || e.message));
             setTimeout(() => this._postRoster(), 800);
           });
@@ -195,7 +210,7 @@ class DevSummaryProvider {
           else { fs.mkdirSync(path.dirname(TESTS_FLAG), { recursive: true }); fs.writeFileSync(TESTS_FLAG, ''); }
         } catch (e) { vscode.window.showErrorMessage('toggle tests failed: ' + e.message); }
         this._postTests();
-        cp.execFile(path.join(DEV, '.wtd', 'hooks', 'refresh-diffs.sh'), { timeout: 30000 }, () => {});
+        execScript(path.join(DEV, '.wtd', 'hooks', 'refresh-diffs.sh'), [], { timeout: 30000 }, () => {});
       }
     });
 
@@ -342,7 +357,7 @@ class DevSummaryProvider {
   // system monitor: tmux sessions, claude procs + RSS, reviews running, WSL mem, CPU load
   _postMonitor() {
     if (!this.view || !this.view.visible) return;
-    cp.execFile(path.join(DEV, '.wtd', 'hooks', 'monitor-stats.sh'), { timeout: 8000 }, (e, out) => {
+    execScript(path.join(DEV, '.wtd', 'hooks', 'monitor-stats.sh'), [], { timeout: 8000 }, (e, out) => {
       if (e || !this.view || !this.view.visible) return;
       const p = (out || '').trim().split('|');   // sess|nag|rev|acpu|amem|mt|msys|ncpu|load
       if (p.length < 9) return;
