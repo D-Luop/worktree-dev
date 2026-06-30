@@ -267,10 +267,10 @@ if [ ! -d "$wt" ]; then
     fi
     git -c safe.bareRepository=all -C "$bare" worktree add "$wt" -b "$name" "$base"            # new branch off "$base"
   fi
-  # seed: stub CLAUDE.md + .claude scaffolding (template skills + plans dir); rely on global hooks
+  # seed: stub CLAUDE.md + .claude scaffolding (plans dir); template skills are refreshed below on
+  # EVERY open (not just creation), so new skills reach existing worktrees too.
   mkdir -p "$wt/.claude/skills" "$wt/.claude/plans"
   [ -f "$wt/CLAUDE.md" ] || cp "$WTD/templates/CLAUDE.md" "$wt/CLAUDE.md"
-  cp -r "$WTD/templates/.claude/skills/." "$wt/.claude/skills/" 2>/dev/null || true
 
   # seed gitignored host-local env files from .wtd/env/<slug>/ (e.g. .env, .devcontainer/.env).
   # The stash mirrors the worktree layout: each file is copied to the same relative path, but
@@ -297,6 +297,11 @@ if [ ! -d "$wt" ]; then
     done
   fi
 fi
+
+# refresh template skills on EVERY open (not just creation) so new/updated skills — e.g. /preview —
+# propagate to existing worktrees on re-open. Skills are template-managed, not per-worktree edits.
+mkdir -p "$wt/.claude/skills"
+cp -r "$WTD/templates/.claude/skills/." "$wt/.claude/skills/" 2>/dev/null || true
 
 # --- per-repo hooks: merge .wtd/repo-hooks/<slug>.json into the worktree (idempotent) ---
 hookfrag="$WTD/repo-hooks/$repo.json"

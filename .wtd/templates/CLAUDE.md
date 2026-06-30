@@ -62,6 +62,14 @@ raise it with the user — don't quietly edit a generated file.
 
 <!-- Repo-specific build/test/deploy commands. Fill in for your codebase, or delete. -->
 
+## Showing the user a design (HTML preview)
+
+When you build something **visual** the user should look at (a page/component/theme mockup, a
+before/after, a diagram), don't just hand over a file path — **stage it for the roster preview panel**:
+write a **self-contained** `.html` (inline CSS, `data:`-URI images, inline JS — it renders sandboxed
+with no network), then run **`preview <file.html>`** from the worktree. A 🖼 appears on this worktree's
+roster row; the user clicks it to open the mockup editor-side. Re-run to refresh. (Or invoke `/preview`.)
+
 ## Referencing files for the user
 
 When you point the user at a file, write its **ABSOLUTE** path (e.g.

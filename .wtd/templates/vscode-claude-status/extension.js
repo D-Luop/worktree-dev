@@ -127,6 +127,7 @@ class DevSummaryProvider {
     this._current = null;         // the Terminal of the worktree session currently focused (marked in roster)
     this._asstTerm = null;        // the pinned assistant session's Terminal (focus instead of duplicate)
     this._term = null;            // the pinned plain terminal's Terminal (focus instead of duplicate)
+    this._preview = {};           // roster key -> staged design-preview .html path (🖼 on the row)
   }
   _key(slug, name) { return slug + '' + name; }
   clearUnread(key) { if (this._unread[key]) { this._unread[key] = false; this._postRoster(); } }
@@ -238,6 +239,45 @@ class DevSummaryProvider {
     });
   }
 
+  // map a staged preview file (…/state/previews/<slug>/<name>.html) back to a roster row key
+  _previewKey(fsPath) {
+    let rel = path.relative(path.join(WTD, 'state', 'previews'), fsPath).replace(/\\/g, '/');
+    if (rel.startsWith('..')) return null;
+    rel = rel.replace(/\.html$/i, '');
+    const i = rel.indexOf('/');
+    if (i < 0) return null;
+    return { slug: rel.slice(0, i), name: rel.slice(i + 1) };
+  }
+
+  // open (or refresh) the design preview for a worktree in an editor-side webview panel. The HTML is
+  // agent-authored, so it renders under a CSP: inline styles/scripts and data/https images only — no
+  // network fetch. Self-contained mockups (inline CSS, data-URI images) are the intended input.
+  showPreview(slug, name) {
+    const file = path.join(WTD, 'state', 'previews', slug, name + '.html');
+    let raw; try { raw = fs.readFileSync(file, 'utf8'); }
+    catch { vscode.window.showInformationMessage('claude-status: no preview staged for ' + slug + ' ' + name); return; }
+    if (!this._pvPanel) {
+      this._pvPanel = vscode.window.createWebviewPanel('claudeStatus.preview', 'Design preview',
+        { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
+        { enableScripts: true, retainContextWhenHidden: true });
+      this._pvPanel.onDidDispose(() => { this._pvPanel = null; });
+      this._pvPanel.webview.onDidReceiveMessage((msg) => { if (msg && msg.cmd === 'close' && this._pvPanel) this._pvPanel.dispose(); });
+    }
+    const csp = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; '
+      + 'img-src data: https:; style-src \'unsafe-inline\' https:; font-src data: https:; script-src \'unsafe-inline\';">';
+    // floating Close button overlaid on the mockup (in addition to the editor-tab X). acquireVsCodeApi
+    // is one-shot per webview, so grab it once in a script and wire the click to it.
+    const closeBtn = '<div id="__wtclose" title="Close preview" '
+      + 'style="position:fixed;top:10px;right:12px;z-index:2147483647;background:#21262d;color:#e6edf3;'
+      + 'border:1px solid #444c56;border-radius:6px;padding:4px 10px;font:600 12px system-ui;cursor:pointer;opacity:.9;">✕ Close</div>'
+      + '<script>(function(){var b=document.getElementById("__wtclose");if(b){var v=acquireVsCodeApi();b.addEventListener("click",function(){v.postMessage({cmd:"close"});});}})();</script>';
+    let html = /<head[^>]*>/i.test(raw) ? raw.replace(/<head[^>]*>/i, (m) => m + csp) : csp + raw;
+    html = /<\/body>/i.test(html) ? html.replace(/<\/body>/i, closeBtn + '</body>') : html + closeBtn;
+    this._pvPanel.title = slug + '/' + name + ' — preview';
+    this._pvPanel.webview.html = html;
+    this._pvPanel.reveal(vscode.ViewColumn.Beside, true);
+  }
+
   onTermClosed(t) { if (this._current === t) { this._current = null; this._postRoster(); } if (this._asstTerm === t) this._asstTerm = null; if (this._term === t) this._term = null; for (const [k, v] of this._terms) if (v === t) { this._terms.delete(k); break; } }
   onTermActive(t) {
     if (!t) return;
@@ -333,6 +373,8 @@ class DevSummaryProvider {
         this.openOrFocusAssistant();
       } else if (m.cmd === 'newTerminal') {
         this.openOrFocusTerminal();
+      } else if (m.cmd === 'preview') {
+        this.showPreview(m.slug, m.name);
       } else if (m.cmd === 'pasteImage') {
         this.pasteImage();
       } else if (m.cmd === 'toggleTests') {
@@ -467,6 +509,7 @@ class DevSummaryProvider {
       w.unread = !!this._unread[key];
       w.active = live.has(w.slug + '-' + w.name);   // has a live tmux session (vs. closed/inactive)
       w.current = !!cur && (curKey ? key === curKey : (!!cur.name && cur.name === w.name));   // focused session
+      w.preview = !!this._preview[key];             // an agent staged a design preview (🖼 on the row)
     }
     // pinned assistant row state: live if a terminal named "assistant" exists; selected if it's focused
     const asstTerm = vscode.window.terminals.find((x) => x.name === ASST_NAME);
@@ -574,6 +617,8 @@ class DevSummaryProvider {
   .wt:hover .arch,.wt:hover .term,.wt:hover .unr,.wt:hover .del{opacity:.55;} .wt .arch:hover,.wt .term:hover,.wt .unr:hover,.wt .del:hover{opacity:1;}
   .wt .term:hover,.wt .del:hover{color:var(--vscode-charts-red,#e5534b);}
   .wt .unr:hover{color:var(--vscode-charts-yellow,#d2a000);}
+  .wt .pv{cursor:pointer;padding:0 2px;font-size:12px;opacity:.9;}   /* design-preview ready — always visible */
+  .wt .pv:hover{opacity:1;}
   .wt.sep{margin-top:7px;}   /* gap between status groups */
   /* pinned assistant row: above the worktree groups, no status glyph/git, with a divider below it */
   .wt.asst{margin-top:9px;}   /* breathing room between the header buttons and the first pinned row */
@@ -649,7 +694,9 @@ class DevSummaryProvider {
       const gc=COL[w.status]||'#888';
       const git=(w.ahead?'<span class="ahead">↑'+w.ahead+'</span> ':'')+(w.dirty?'<span class="dirty">●</span>':'');
       return '<div class="wt'+(sep?' sep':'')+(w.active?' active':'')+(w.unread?' unread':'')+(w.current?' current':'')+'" data-slug="'+esc(w.slug)+'" data-name="'+esc(w.name)+'" data-glyph="'+g+'" title="'+esc(w.slug+' '+w.name)+(w.status?(' — '+w.status):'')+(w.active?' · active':'')+(w.current?' · selected':'')+(w.unread?' · unread':'')+' · click to open">'
-        +'<span style="color:'+gc+'">'+gd+'</span><span class="nm">'+esc(w.name)+'</span><span class="git">'+git+'</span>'
+        +'<span style="color:'+gc+'">'+gd+'</span><span class="nm">'+esc(w.name)+'</span>'
+        +(w.preview?'<span class="pv" title="Open design preview">🖼</span>':'')
+        +'<span class="git">'+git+'</span>'
         +(w.active&&!w.unread?'<span class="unr" title="Mark unread (flag it yellow to revisit)">✉</span>':'')
         +(w.active?'<span class="term" title="End the tmux session (worktree stays)">⏹</span>':'')
         +'<span class="arch" title="Archive '+esc(w.name)+'">📦</span>'
@@ -669,6 +716,7 @@ class DevSummaryProvider {
     const ar=document.getElementById('asstRow'); if(ar) ar.onclick=()=>vsc.postMessage({cmd:'newAssistant'});
     const tr=document.getElementById('termRow'); if(tr) tr.onclick=()=>vsc.postMessage({cmd:'newTerminal'});
     document.querySelectorAll('.wt:not(.asst)').forEach(el=>el.onclick=()=>vsc.postMessage({cmd:'open',slug:el.dataset.slug,name:el.dataset.name,glyph:el.dataset.glyph}));
+    document.querySelectorAll('.pv').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'preview',slug:p.dataset.slug,name:p.dataset.name}); });
     document.querySelectorAll('.arch').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'archive',slug:p.dataset.slug,name:p.dataset.name}); });
     document.querySelectorAll('.del').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'delete',slug:p.dataset.slug,name:p.dataset.name}); });
     document.querySelectorAll('.term').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'terminate',slug:p.dataset.slug,name:p.dataset.name}); });
@@ -767,6 +815,23 @@ function activate(context) {
   context.subscriptions.push(vscode.window.registerWebviewViewProvider('claudeStatus.limit', dev));
   // ctrl+v in a focused session → image-aware paste (see DevSummaryProvider.smartPaste)
   context.subscriptions.push(vscode.commands.registerCommand('claudeStatus.smartPaste', () => dev.smartPaste()));
+
+  // agents publish design mockups via the `preview` command (→ .wtd/state/previews/<slug>/<name>.html);
+  // watch that tree so a 🖼 appears on the worktree's roster row, and clears when the file is removed.
+  const pvDir = path.join(WTD, 'state', 'previews');
+  const pvWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(pvDir, '**/*.html'));
+  const pvSet = (uri) => { const k = dev._previewKey(uri.fsPath); if (k) { dev._preview[dev._key(k.slug, k.name)] = uri.fsPath; dev._postRoster(); } };
+  const pvDel = (uri) => { const k = dev._previewKey(uri.fsPath); if (k) { delete dev._preview[dev._key(k.slug, k.name)]; dev._postRoster(); } };
+  pvWatcher.onDidCreate(pvSet); pvWatcher.onDidChange(pvSet); pvWatcher.onDidDelete(pvDel);
+  context.subscriptions.push(pvWatcher);
+  // seed from any previews already on disk (so they survive a window reload)
+  try { for (const slug of fs.readdirSync(pvDir, { withFileTypes: true }).filter((d) => d.isDirectory())) {
+    const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const fp = path.join(d, e.name);
+      if (e.isDirectory()) walk(fp); else if (e.name.endsWith('.html')) { const k = dev._previewKey(fp); if (k) dev._preview[dev._key(k.slug, k.name)] = fp; }
+    } };
+    walk(path.join(pvDir, slug.name));
+  } } catch {}
   // the dev base is derived from the open folders — re-resolve it (and repaint) if they change
   context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => { refreshDevRoot(); dev._postRoster(); }));
   // keep the roster's terminal map + unread flags in sync with the actual terminals
