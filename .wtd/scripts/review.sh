@@ -2,7 +2,7 @@
 # Pre-push reviewer: review a worktree's unpushed changes with a SEPARATE Claude agent that
 # runs OUTSIDE the worktree (read-only access to it). Produces two markdown reports:
 #   review.md     — findings on documentation, repo standards, efficient/minimal code (+ precedents)
-#   highlights.md — repo-aware "changes worth noting" (e.g. mod: SQL + proto + integral Go)
+#   highlights.md — repo-aware "changes worth noting" (e.g. a repo's SQL + proto + integral code)
 #
 # Headless runs do TWO passes: (1) the `reviewer` agent writes the reports, then (2) an adversarial
 # `skeptic` agent re-checks the same diff for what pass 1 missed/blessed and appends an
@@ -14,8 +14,8 @@
 #     <name>        : the worktree at ~/dev/worktrees/<slug>/<name> to review.
 #     -i, --interactive : open an interactive Claude session (own tmux session) seeded with the
 #                         review prompt, instead of a one-shot headless print.
-#     --main/--full : review the WHOLE branch vs the repo default branch (main for mod/dv, dev for
-#                     core), not just unpushed work. Aliases: --vs-main.
+#     --main/--full : review the WHOLE branch vs the repo default branch (e.g. main or dev,
+#                     per repo), not just unpushed work. Aliases: --vs-main.
 #     --base <ref>  : diff against <ref> instead of the auto-detected upstream/merge-base.
 #     --model <m>   : model for the reviewer (default: opus).
 #     ref-token ... : <slug> or <slug>@<branch> read-only cross-repo context for finding precedents

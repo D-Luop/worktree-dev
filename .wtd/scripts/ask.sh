@@ -7,9 +7,9 @@
 # you pass @branch). With a question on the command line → one-shot answer; with no question → an
 # interactive expert session you can keep asking in.
 #
-#   ask mod "how does contract status-change validation work end to end?"
-#   ask mod@feat/contract-change-status "what does this branch change?"
-#   ask core                      # interactive expert session for core
+#   ask <slug> "how does contract status-change validation work end to end?"
+#   ask <slug>@feat/contract-change-status "what does this branch change?"
+#   ask <slug>                    # interactive expert session for a repo
 set -euo pipefail
 
 WTD="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"   # ~/dev/.wtd

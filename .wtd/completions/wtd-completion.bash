@@ -3,7 +3,7 @@
 # file); bash-completion sources it lazily on first <cmd><TAB>.
 #
 # Completes: repo slugs, agent subcommands, and — the point — branch/worktree NAMES for a slug, so
-# `agent mod feat/<TAB>` offers feat/contract-change-status, feat/job-setup, …
+# `agent <slug> feat/<TAB>` offers feat/contract-change-status, feat/job-setup, …
 
 # existing worktree NAMES for a slug (for stop/rm/archive/review — they need a live worktree).
 # Skips the reserved archive/ namespace (those are archived, not active).
