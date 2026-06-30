@@ -7,13 +7,55 @@ const https = require('https');
 
 const STATUS_FILE = '.claude-status';
 const HOME = os.homedir();
-const DEV = path.join(HOME, 'dev');
 const RATE_FILE = path.join(HOME, '.claude', 'rate-limits.json');   // statusline-written fallback
 const CREDS = path.join(HOME, '.claude', '.credentials.json');      // OAuth token for the live fetch
 const CLAUDE_JSON = path.join(HOME, '.claude.json');                // account email
 const TESTS_FLAG = path.join(HOME, '.config', 'wtd', 'exclude-tests');  // present = exclude test files from diffs
-const WTD = path.join(DEV, '.wtd');
-const SESS_DIR = path.join(WTD, 'state', 'sessions');   // vscode-backend session registry (no tmux)
+// The dev root (the dir holding .wtd/ + worktrees/ + repos/) is normally ~/dev, but the tree is
+// RELOCATABLE — install.sh renders __DEV__ into the hooks for wherever it actually lives. This
+// extension ships as a prebuilt .vsix, so it can't be render-substituted; instead it discovers the
+// root at runtime (see resolveDevRoot, called from activate). Initialized to the canonical ~/dev so
+// these are always defined; activate() overwrites them once the workspace is known.
+let DEV = path.join(HOME, 'dev');
+let WTD = path.join(DEV, '.wtd');
+let SESS_DIR = path.join(WTD, 'state', 'sessions');   // vscode-backend session registry (no tmux)
+
+// A dir is a worktree-dev base iff it contains a .wtd/ dir.
+const DEV_ROOT_PIN = path.join(HOME, '.config', 'wtd', 'dev-root');  // install-written absolute path
+function isDevRoot(d) { try { return !!d && fs.existsSync(path.join(d, '.wtd')); } catch { return false; } }
+
+// Resolve the dev base. The tree is relocatable and the shipped .vsix can't be render-substituted,
+// so we find it at runtime, most-authoritative first:
+//   1. the install-written pin file (location-independent — works even with no relevant folder open);
+//   2. a WTD_DEV env override;
+//   3. discovery from the open folders — each folder, its ANCESTORS (opened on a worktree) and its
+//      immediate CHILDREN (opened on the base's parent, e.g. D:\Projects\Dev);
+//   4. the canonical ~/dev.
+function resolveDevRoot() {
+  try { const p = fs.readFileSync(DEV_ROOT_PIN, 'utf8').trim(); if (isDevRoot(p)) return p; } catch {}
+  if (isDevRoot(process.env.WTD_DEV)) return process.env.WTD_DEV;
+  for (const start of (vscode.workspace.workspaceFolders || []).map((f) => f.uri.fsPath)) {
+    let d = start;
+    for (let i = 0; i < 8; i++) {                       // climb toward the filesystem root
+      if (isDevRoot(d)) return d;
+      const up = path.dirname(d);
+      if (up === d) break;                              // reached the root
+      d = up;
+    }
+    try {                                               // opened one level above the base
+      for (const e of fs.readdirSync(start, { withFileTypes: true }))
+        if (e.isDirectory() && isDevRoot(path.join(start, e.name))) return path.join(start, e.name);
+    } catch {}
+  }
+  return path.join(HOME, 'dev');
+}
+
+// (re)compute DEV/WTD/SESS_DIR from the current workspace
+function refreshDevRoot() {
+  DEV = resolveDevRoot();
+  WTD = path.join(DEV, '.wtd');
+  SESS_DIR = path.join(WTD, 'state', 'sessions');
+}
 const IS_WIN = process.platform === 'win32';
 // The shell each worktree terminal runs. On Windows that's Git Bash (so the .wtd bash scripts run);
 // elsewhere /bin/bash. On Windows `agent` runs claude directly in this terminal (no tmux); on Unix it
@@ -536,6 +578,8 @@ function tmuxSessionForPid(pid) {
 }
 
 function activate(context) {
+  refreshDevRoot();   // resolve the real dev base (the tree is relocatable) before anything scans it
+
   const provider = new ClaudeStatusProvider();
   context.subscriptions.push(vscode.window.registerFileDecorationProvider(provider));
 
@@ -548,6 +592,8 @@ function activate(context) {
 
   const dev = new DevSummaryProvider();
   context.subscriptions.push(vscode.window.registerWebviewViewProvider('claudeStatus.limit', dev));
+  // the dev base is derived from the open folders — re-resolve it (and repaint) if they change
+  context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => { refreshDevRoot(); dev._postRoster(); }));
   // keep the roster's terminal map + unread flags in sync with the actual terminals
   context.subscriptions.push(vscode.window.onDidCloseTerminal((t) => dev.onTermClosed(t)));
   context.subscriptions.push(vscode.window.onDidChangeActiveTerminal((t) => dev.onTermActive(t)));

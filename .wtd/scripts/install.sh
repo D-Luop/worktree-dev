@@ -5,7 +5,7 @@ BASE="$(dirname "$WTD")"                                                  # ~/de
 BASHRC="$HOME/.bashrc"
 SETTINGS="$HOME/.claude/settings.json"
 HOOKS_TMPL="$WTD/templates/claude-hooks.json"
-VSIX="$WTD/templates/vscode-claude-status/claude-status-0.0.46.vsix"
+VSIX="$WTD/templates/vscode-claude-status/claude-status-0.0.48.vsix"
 # Shipped templates carry __DEV__/__USER__/__DISTRO__ placeholders so they're machine-agnostic;
 # render them to this host's real values at install time.
 WTD_USER="$(id -un)"
@@ -98,6 +98,13 @@ fi
 rm -f "$HOOKS_RENDERED"
 
 echo "==> D. install VSCode claude-status extension"
+# Pin the dev base for the extension. The .vsix ships prebuilt (can't be __DEV__-rendered), so the
+# extension reads this file to find the real root regardless of which folder VSCode has open. Store a
+# NATIVE path (cygpath -w on Windows) — the extension resolves it with node's fs, not an MSYS path.
+DEV_ROOT_PIN="$HOME/.config/wtd/dev-root"
+mkdir -p "$(dirname "$DEV_ROOT_PIN")"
+if command -v cygpath >/dev/null 2>&1; then cygpath -w "$BASE" > "$DEV_ROOT_PIN"; else printf '%s\n' "$BASE" > "$DEV_ROOT_PIN"; fi
+echo "    pinned dev root -> $(cat "$DEV_ROOT_PIN")  ($DEV_ROOT_PIN)"
 if ! command -v code >/dev/null 2>&1; then
   echo "    SKIPPED: 'code' not on PATH"
 elif code --install-extension "$VSIX" --force 2>/dev/null; then
