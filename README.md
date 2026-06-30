@@ -140,8 +140,9 @@ A **Dev workflow summary** panel in the Explorer (between the folder tree and Ou
   `rate-limits.json` if offline);
 - a pinned **🤖 assistant** row at the top (separated from the worktrees, no status glyph) — a single
   durable Claude session that runs in the dev base and helps you **manage the fleet** (launch / stop /
-  archive / review / tear down worktrees via the wtd commands). Click it (or **+ assistant**) to open;
-  it resumes across reopen/reboot like a worktree session. Route its cost with `--account` /
+  archive / review / tear down worktrees via the wtd commands). Always present — **click it** to open
+  (or focus the one running); it resumes across reopen/reboot like a worktree session. There's only
+  ever one. Route its cost with `--account` /
   `$ASSISTANT_ACCOUNT` (defaults to your normal login);
 - a **fleet roster** grouped by repo (`mod` first) — each worktree's status glyph (`◐ ! ⋯ ◆ ✓ ○`,
   colored) + `↑n` unpushed / `●` dirty; live sessions get a faint gray row, and a row that just became
