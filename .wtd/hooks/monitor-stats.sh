@@ -9,6 +9,17 @@
 #   acpu  summed %CPU of all agent trees (across cores, may exceed 100)
 #   amem  summed RSS of all agent trees, MB
 #   mt    total RAM MB     msys  system used RAM MB     ncpu  cores     load  1m 5m 15m
+#
+# On native Windows (Git Bash) there's no tmux / /proc / free / usable `ps`, so delegate to the
+# PowerShell backend, which emits the SAME line from real process data. Unix path continues below.
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*)
+    ps1="$(dirname "$0")/monitor-stats.ps1"
+    command -v cygpath >/dev/null 2>&1 && ps1="$(cygpath -w "$ps1")"
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$ps1" 2>/dev/null
+    exit 0 ;;
+esac
+
 sess=$(tmux list-sessions 2>/dev/null | wc -l | tr -d ' ')
 ncpu=$(nproc)
 load=$(cut -d' ' -f1-3 /proc/loadavg)

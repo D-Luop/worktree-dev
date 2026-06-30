@@ -690,11 +690,11 @@ class DevSummaryProvider {
       +'<span class="pct">'+pct+'%</span><span class="meta">'+meta+'</span></div>';
     el.innerHTML =
       '<div class="statline">'
-        + stat('sessions', mon.sess, 'tmux sessions running')
+        + stat('sessions', mon.sess, 'fleet sessions running')
         + stat('agents', mon.nag, 'interactive claude agents')
         + stat('reviews', mon.rev, 'review agents running')
       +'</div>'
-      + mbar('cpu', cpuPct, cores+'/'+mon.ncpu+'c', 'Claude agents: '+cores+' of '+mon.ncpu+' cores ('+cpuPct+'% of CPU) · system load '+mon.load)
+      + mbar('cpu', cpuPct, cores+'/'+mon.ncpu+'c', 'Claude agents: '+cores+' of '+mon.ncpu+' cores ('+cpuPct+'% of CPU)'+(mon.load&&mon.load!=='n/a'?' · system load '+mon.load:''))
       + mbar('mem', memPct, gb(mon.amem)+'G', 'Claude agents using '+gb(mon.amem)+' GB RAM ('+memPct+'% of '+gb(mon.mt)+'G) · whole system '+gb(mon.msys)+'/'+gb(mon.mt)+'G used ('+sysPct+'%)');
   }
   document.getElementById('add').onclick=()=>vsc.postMessage({cmd:'newAgent'});
