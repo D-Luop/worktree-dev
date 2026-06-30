@@ -11,15 +11,18 @@
 # wtd_sessions_dir) and $WTD set.
 
 # --- session registry (vscode backend's source of truth; harmless on tmux too) ---------------
+# Session names can contain '/' (e.g. "mod-feat/x") — fine for tmux, not for a filename — so the
+# registry file encodes '/' as '__'. The extension decodes it back when reading the registry.
+wtd_session_keyfile() { printf '%s/%s' "$(wtd_sessions_dir)" "${1//\//__}"; }
 # wtd_session_register <session> <slug> <name> <wt> [pid]
 wtd_session_register() {
-  local session="$1" slug="$2" name="$3" wt="$4" pid="${5:-$$}" dir
-  dir="$(wtd_sessions_dir)"; mkdir -p "$dir"
+  local session="$1" slug="$2" name="$3" wt="$4" pid="${5:-$$}"
+  mkdir -p "$(wtd_sessions_dir)"
   printf '%s\t%s\t%s\t%s\t%s\n' "$slug" "$name" "$wt" "$pid" "$(date +%s 2>/dev/null || echo 0)" \
-    > "$dir/$session"
+    > "$(wtd_session_keyfile "$session")"
 }
-wtd_session_deregister() { rm -f "$(wtd_sessions_dir)/$1" 2>/dev/null || true; }
-wtd_session_registered() { [ -f "$(wtd_sessions_dir)/$1" ]; }
+wtd_session_deregister() { rm -f "$(wtd_session_keyfile "$1")" 2>/dev/null || true; }
+wtd_session_registered() { [ -f "$(wtd_session_keyfile "$1")" ]; }
 
 # --- existence ------------------------------------------------------------------------------
 # wtd_session_exists <session>  → 0 if a live session by that name exists
@@ -47,7 +50,7 @@ wtd_session_list() {
       for f in "$dir"/*; do
         [ -e "$f" ] || continue
         local session slug name wt st=""
-        session="$(basename "$f")"
+        session="$(basename "$f")"; session="${session//__//}"   # decode the filename → session name
         IFS=$'\t' read -r slug name wt _ _ < "$f"
         [ -n "${wt:-}" ] && st="$(cat "$wt/.claude-status" 2>/dev/null || echo '·')"
         printf '%s\t%s\t%s\n' "$session" "-" "${st:-·}"
@@ -60,7 +63,7 @@ wtd_session_list() {
 wtd_session_live_names() {
   case "$(wtd_session_backend)" in
     tmux) tmux list-sessions -F '#{session_name}' 2>/dev/null ;;
-    *)    local dir; dir="$(wtd_sessions_dir)"; [ -d "$dir" ] && ls -1 "$dir" 2>/dev/null || true ;;
+    *)    local dir; dir="$(wtd_sessions_dir)"; [ -d "$dir" ] && ls -1 "$dir" 2>/dev/null | sed 's#__#/#g' || true ;;
   esac
 }
 
@@ -80,7 +83,7 @@ wtd_session_kill() {
   case "$(wtd_session_backend)" in
     tmux) tmux kill-session -t "=$session" 2>/dev/null ;;
     *)
-      local dir f pid; dir="$(wtd_sessions_dir)"; f="$dir/$session"
+      local f pid; f="$(wtd_session_keyfile "$session")"
       if [ -f "$f" ]; then
         IFS=$'\t' read -r _ _ _ pid _ < "$f"
         # best-effort stop the claude process tree so the VSCode terminal returns to a shell.
