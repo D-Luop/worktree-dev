@@ -61,6 +61,7 @@ if [ "${1:-}" = "rm" ]; then
   fi
 
   wtd_session_kill "$rmsession" "$rmwt" && echo "killed session $rmsession" || echo "no running session $rmsession"
+  wtd_session_id_forget "$rmsession"   # drop the durable resume id so a future same-named worktree starts fresh
   if [ -d "$rmwt" ]; then
     if out="$(git -C "$rmbare" worktree remove $force "$rmwt" 2>&1)"; then
       echo "removed worktree $rmwt"

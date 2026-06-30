@@ -14,6 +14,35 @@
 # Session names can contain '/' (e.g. "mod-feat/x") — fine for tmux, not for a filename — so the
 # registry file encodes '/' as '__'. The extension decodes it back when reading the registry.
 wtd_session_keyfile() { printf '%s/%s' "$(wtd_sessions_dir)" "${1//\//__}"; }
+
+# --- durable per-worktree Claude session id (separate from the liveness registry) ------------
+# The registry above is liveness state — deleted on close. The session id below is DURABLE: it lets
+# reopening a worktree RESUME the same Claude conversation (the live process never survives a reboot,
+# but Claude persists every transcript to disk, so we just relaunch with --resume). Kept in the wtd
+# state tree (not the worktree → no git-dirty noise) and keyed exactly like the registry.
+wtd_session_idsdir()  { printf '%s/session-ids' "$(wtd_state_dir)"; }
+wtd_session_idfile()  { printf '%s/%s' "$(wtd_session_idsdir)" "${1//\//__}"; }
+wtd_session_id_forget() { rm -f "$(wtd_session_idfile "$1")" 2>/dev/null || true; }
+
+# wtd_uuid → a fresh UUID, using whatever's available (python on Windows; else uuidgen/kernel/PowerShell)
+wtd_uuid() {
+  if command -v python  >/dev/null 2>&1; then python  -c 'import uuid;print(uuid.uuid4())' && return; fi
+  if command -v python3 >/dev/null 2>&1; then python3 -c 'import uuid;print(uuid.uuid4())' && return; fi
+  if [ -r /proc/sys/kernel/random/uuid ]; then cat /proc/sys/kernel/random/uuid && return; fi
+  if command -v uuidgen >/dev/null 2>&1; then uuidgen | tr 'A-Z' 'a-z' && return; fi
+  command -v powershell >/dev/null 2>&1 && powershell -NoProfile -Command '[guid]::NewGuid().ToString()' | tr -d '\r'
+}
+
+# wtd_claude_transcript <wt> <session-id> → where Claude would store that id's transcript for this
+# worktree. Claude writes ~/.claude/projects/<cwd, every non-alphanumeric char replaced by '-'>/<id>.jsonl
+# (the cwd is the WINDOWS path on the vscode backend, so convert it). Lets us tell resume from start-new.
+wtd_claude_transcript() {
+  local wt="$1" id="$2" cwd enc
+  cwd="$(cygpath -w "$wt" 2>/dev/null || printf '%s' "$wt")"
+  enc="$(printf '%s' "$cwd" | sed 's/[^A-Za-z0-9]/-/g')"
+  printf '%s/.claude/projects/%s/%s.jsonl' "$HOME" "$enc" "$id"
+}
+
 # wtd_session_register <session> <slug> <name> <wt> [pid]
 wtd_session_register() {
   local session="$1" slug="$2" name="$3" wt="$4" pid="${5:-$$}"
@@ -119,5 +148,25 @@ wtd_session_run_claude() {
     exec "${SHELL:-bash}" -i
   fi
   [ -n "$ccdir" ] && export CLAUDE_CONFIG_DIR="$ccdir"
-  exec claude --permission-mode "$pmode"
+
+  # Per-worktree session continuity: a durable id makes reopening this worktree RESUME its Claude
+  # conversation instead of starting cold — including after a reboot (the process dies, the transcript
+  # doesn't). First open mints an id and starts with --session-id; later opens pass --resume once that
+  # id's transcript is actually on disk, else re-create it under the same id.
+  local idf id
+  idf="$(wtd_session_idfile "$session")"
+  id="$(cat "$idf" 2>/dev/null)"
+  if [ -n "$id" ]; then
+    if [ -f "$(wtd_claude_transcript "$wt" "$id")" ]; then
+      exec claude --permission-mode "$pmode" --resume "$id"
+    fi
+    exec claude --permission-mode "$pmode" --session-id "$id"
+  fi
+  id="$(wtd_uuid)"
+  if [ -n "$id" ]; then
+    mkdir -p "$(wtd_session_idsdir)"
+    printf '%s\n' "$id" > "$idf"
+    exec claude --permission-mode "$pmode" --session-id "$id"
+  fi
+  exec claude --permission-mode "$pmode"   # no uuid tool available → plain session (unchanged behavior)
 }
