@@ -179,6 +179,21 @@ class DevSummaryProvider {
             this._postRoster();
           });
         });
+      } else if (m.cmd === 'delete' && m.slug && m.name) {
+        // Two-option modal: remove the worktree (keep the branch) or also force-delete the branch.
+        vscode.window.showWarningMessage(
+          'Delete ' + m.slug + ' ' + m.name + '?  Ends its session and removes the worktree. "+ branch" also force-deletes the git branch — any unpushed commits on it are lost.',
+          { modal: true }, 'Delete worktree', 'Delete worktree + branch'
+        ).then((ch) => {
+          if (ch !== 'Delete worktree' && ch !== 'Delete worktree + branch') return;
+          const args = ['rm', m.slug, m.name, '-y'];
+          if (ch === 'Delete worktree + branch') args.push('--branch');
+          execScript(path.join(HOME, '.local', 'bin', 'agent'), args, { timeout: 30000 }, (e, so, se) => {
+            if (e) vscode.window.showErrorMessage('delete failed: ' + ((se || '').trim() || e.message));
+            else vscode.window.showInformationMessage('Deleted ' + m.slug + ' ' + m.name + (ch === 'Delete worktree + branch' ? ' (+ branch)' : ''));
+            setTimeout(() => this._postRoster(), 600);
+          });
+        });
       } else if (m.cmd === 'terminate' && m.slug && m.name) {
         vscode.window.showWarningMessage(
           'End the session for ' + m.slug + ' ' + m.name + '?  The worktree (branch, changes, reviews) stays — only the live Claude session ends. Reopen it from the roster.',
@@ -429,9 +444,9 @@ class DevSummaryProvider {
   .ahead{color:var(--vscode-charts-blue,#4aa3ff);} .dirty{color:var(--vscode-charts-yellow,#d2a000);}
   .repo{font-size:10px;text-transform:uppercase;letter-spacing:.6px;opacity:.5;margin:5px 0 1px;}
   .repo:first-child{margin-top:1px;}
-  .wt .arch,.wt .term,.wt .unr{opacity:0;cursor:pointer;padding:0 2px;font-size:12px;}
-  .wt:hover .arch,.wt:hover .term,.wt:hover .unr{opacity:.55;} .wt .arch:hover,.wt .term:hover,.wt .unr:hover{opacity:1;}
-  .wt .term:hover{color:var(--vscode-charts-red,#e5534b);}
+  .wt .arch,.wt .term,.wt .unr,.wt .del{opacity:0;cursor:pointer;padding:0 2px;font-size:12px;}
+  .wt:hover .arch,.wt:hover .term,.wt:hover .unr,.wt:hover .del{opacity:.55;} .wt .arch:hover,.wt .term:hover,.wt .unr:hover,.wt .del:hover{opacity:1;}
+  .wt .term:hover,.wt .del:hover{color:var(--vscode-charts-red,#e5534b);}
   .wt .unr:hover{color:var(--vscode-charts-yellow,#d2a000);}
   .wt.sep{margin-top:7px;}   /* gap between status groups */
   .wt.active{background:rgba(127,127,127,.13);}   /* live tmux session — noticeably lighter than normal */
@@ -505,7 +520,8 @@ class DevSummaryProvider {
         +'<span style="color:'+gc+'">'+gd+'</span><span class="nm">'+esc(w.name)+'</span><span class="git">'+git+'</span>'
         +(w.active&&!w.unread?'<span class="unr" title="Mark unread (flag it yellow to revisit)">✉</span>':'')
         +(w.active?'<span class="term" title="End the tmux session (worktree stays)">⏹</span>':'')
-        +'<span class="arch" title="Archive '+esc(w.name)+'">📦</span></div>';
+        +'<span class="arch" title="Archive '+esc(w.name)+'">📦</span>'
+        +'<span class="del" title="Delete '+esc(w.name)+' (remove worktree)">🗑</span></div>';
     };
     document.getElementById('roster').innerHTML = slugs.map(slug=>{
       const rows=groups[slug].sort((a,b)=>(PRIO[a.status]??9)-(PRIO[b.status]??9) || a.name.localeCompare(b.name));
@@ -514,6 +530,7 @@ class DevSummaryProvider {
     }).join('');
     document.querySelectorAll('.wt').forEach(el=>el.onclick=()=>vsc.postMessage({cmd:'open',slug:el.dataset.slug,name:el.dataset.name,glyph:el.dataset.glyph}));
     document.querySelectorAll('.arch').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'archive',slug:p.dataset.slug,name:p.dataset.name}); });
+    document.querySelectorAll('.del').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'delete',slug:p.dataset.slug,name:p.dataset.name}); });
     document.querySelectorAll('.term').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'terminate',slug:p.dataset.slug,name:p.dataset.name}); });
     document.querySelectorAll('.unr').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'markunread',slug:p.dataset.slug,name:p.dataset.name}); });
   }
