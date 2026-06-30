@@ -128,6 +128,10 @@ class DevSummaryProvider {
     this._asstTerm = null;        // the pinned assistant session's Terminal (focus instead of duplicate)
     this._term = null;            // the pinned plain terminal's Terminal (focus instead of duplicate)
     this._preview = {};           // roster key -> staged design-preview .html path (🖼 on the row)
+    this._pvPanel = null;         // the design-preview WebviewPanel (follows the focused worktree)
+    this._pvShownKey = null;      // roster key currently displayed in that panel
+    this._pvFollow = false;       // true once the user engages a preview → panel tracks focus
+    this._pvAutoClosing = false;  // transient: distinguish a follow-driven close from a user close
   }
   _key(slug, name) { return slug + '' + name; }
   clearUnread(key) { if (this._unread[key]) { this._unread[key] = false; this._postRoster(); } }
@@ -256,11 +260,16 @@ class DevSummaryProvider {
     const file = path.join(WTD, 'state', 'previews', slug, name + '.html');
     let raw; try { raw = fs.readFileSync(file, 'utf8'); }
     catch { vscode.window.showInformationMessage('claude-status: no preview staged for ' + slug + ' ' + name); return; }
+    this._pvFollow = true;   // engaging a preview → the panel now tracks the focused worktree
     if (!this._pvPanel) {
       this._pvPanel = vscode.window.createWebviewPanel('claudeStatus.preview', 'Design preview',
         { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
         { enableScripts: true, retainContextWhenHidden: true });
-      this._pvPanel.onDidDispose(() => { this._pvPanel = null; });
+      this._pvPanel.onDidDispose(() => {
+        this._pvPanel = null; this._pvShownKey = null;
+        if (this._pvAutoClosing) this._pvAutoClosing = false;   // we closed it to follow focus → keep following
+        else this._pvFollow = false;                            // the user closed it → stop following
+      });
       this._pvPanel.webview.onDidReceiveMessage((msg) => { if (msg && msg.cmd === 'close' && this._pvPanel) this._pvPanel.dispose(); });
     }
     const csp = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; '
@@ -275,13 +284,33 @@ class DevSummaryProvider {
     html = /<\/body>/i.test(html) ? html.replace(/<\/body>/i, closeBtn + '</body>') : html + closeBtn;
     this._pvPanel.title = slug + '/' + name + ' — preview';
     this._pvPanel.webview.html = html;
+    this._pvShownKey = this._key(slug, name);
     this._pvPanel.reveal(vscode.ViewColumn.Beside, true);
+  }
+
+  _showPreviewByKey(key) { const i = key.indexOf('\x01'); if (i >= 0) this.showPreview(key.slice(0, i), key.slice(i + 1)); }
+
+  // Keep the preview panel reflecting the focused worktree: show that worktree's staged preview, hide
+  // when focus is on the assistant/terminal or a worktree without one, re-show on return. Only active
+  // once the user has engaged a preview (clicked a 🖼); driven by terminal-focus changes, not the poll
+  // (so clicking a 🖼 from another tab doesn't immediately close the preview it just opened).
+  _syncPreviewPanel(t) {
+    if (!this._pvFollow) return;
+    let want = null;
+    if (t && t.name !== ASST_NAME && t.name !== TERM_NAME) {
+      for (const [k, v] of this._terms) if (v === t && this._preview[k]) { want = k; break; }
+      if (!want) for (const k of Object.keys(this._preview)) if (k.split('\x01')[1] === t.name) { want = k; break; }
+    }
+    if (want === this._pvShownKey) return;
+    if (want) this._showPreviewByKey(want);
+    else if (this._pvPanel) { this._pvAutoClosing = true; this._pvPanel.dispose(); }
   }
 
   onTermClosed(t) { if (this._current === t) { this._current = null; this._postRoster(); } if (this._asstTerm === t) this._asstTerm = null; if (this._term === t) this._term = null; for (const [k, v] of this._terms) if (v === t) { this._terms.delete(k); break; } }
   onTermActive(t) {
     if (!t) return;
     this._current = t; setTimeout(() => this._postRoster(), 0);   // mark the focused session as selected
+    this._syncPreviewPanel(t);   // make the design-preview panel follow the worktree you switched to
     for (const [k, v] of this._terms) if (v === t) { this.clearUnread(k); return; }
     // also match a reload-revived terminal by name
     for (const k of Object.keys(this._unread)) { const name = k.split('')[1]; if (this._unread[k] && t.name && t.name === name) { this.clearUnread(k); return; } }
@@ -504,7 +533,9 @@ class DevSummaryProvider {
     for (const w of rows) {
       const key = this._key(w.slug, w.name);
       const prev = this._lastStatus[key];
-      if (w.status === 'input' && prev !== undefined && prev !== 'input') this._unread[key] = true;
+      // flipped to 'input' (your turn) — but only "unread" if you weren't focused on it when it did
+      // (if it's the current session you saw the prompt live; don't nag when you switch away).
+      if (w.status === 'input' && prev !== undefined && prev !== 'input' && key !== curKey) this._unread[key] = true;
       this._lastStatus[key] = w.status;
       w.unread = !!this._unread[key];
       w.active = live.has(w.slug + '-' + w.name);   // has a live tmux session (vs. closed/inactive)
