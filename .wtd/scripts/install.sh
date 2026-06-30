@@ -5,7 +5,7 @@ BASE="$(dirname "$WTD")"                                                  # ~/de
 BASHRC="$HOME/.bashrc"
 SETTINGS="$HOME/.claude/settings.json"
 HOOKS_TMPL="$WTD/templates/claude-hooks.json"
-VSIX="$WTD/templates/vscode-claude-status/claude-status-0.0.53.vsix"
+VSIX="$WTD/templates/vscode-claude-status/claude-status-0.0.54.vsix"
 # Shipped templates carry __DEV__/__USER__/__DISTRO__ placeholders so they're machine-agnostic;
 # render them to this host's real values at install time.
 WTD_USER="$(id -un)"
@@ -123,8 +123,10 @@ echo "==> D2. VSCode terminal tab title + bell prefs"
 MSET="$(wtd_vscode_settings_path)"
 mkdir -p "$(dirname "$MSET")"; [ -f "$MSET" ] || echo '{}' > "$MSET"
 tmp=$(mktemp)
-jq '. + {"terminal.integrated.tabs.title":"${sequence}","terminal.integrated.tabs.description":"${cwdFolder}","terminal.integrated.enableVisualBell":true,"accessibility.signals.terminalBell":{"sound":"off"},"terminal.integrated.confirmOnKill":"never","workbench.editor.showTabs":"none"}' "$MSET" > "$tmp" && mv "$tmp" "$MSET"
-echo "    set tab title=\${sequence} + visual terminal bell (sound off) + hid editor tabs (switch via the roster) in $MSET"
+jq '. + {"terminal.integrated.tabs.title":"${sequence}","terminal.integrated.tabs.description":"${cwdFolder}","terminal.integrated.enableVisualBell":true,"accessibility.signals.terminalBell":{"sound":"off"},"terminal.integrated.confirmOnKill":"never"}' "$MSET" > "$tmp" && mv "$tmp" "$MSET"
+echo "    set tab title=\${sequence} + visual terminal bell (sound off) in $MSET"
+# NOTE: editor tabs are hidden via the worktree-dev WORKSPACE settings (.vscode/settings.json),
+# not globally — so other VSCode windows keep their tabs. (workbench.editor.showTabs lives there.)
 
 echo "==> E. install claude-pace statusline"
 # Vendored from github.com/Astro-Han/claude-pace (manual method: no npm / no interactive

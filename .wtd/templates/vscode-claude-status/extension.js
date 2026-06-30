@@ -58,6 +58,7 @@ function refreshDevRoot() {
 }
 const IS_WIN = process.platform === 'win32';
 const ASST_NAME = 'assistant';   // the reserved terminal name of the pinned fleet-management session
+const TERM_NAME = 'terminal';    // the reserved name of the pinned plain shell row (above assistant)
 // The shell each worktree terminal runs. On Windows that's Git Bash (so the .wtd bash scripts run);
 // elsewhere /bin/bash. On Windows `agent` runs claude directly in this terminal (no tmux); on Unix it
 // runs `tmux attach`, so the terminal hosts the tmux session either way.
@@ -125,6 +126,7 @@ class DevSummaryProvider {
     this._unread = {};            // worktree key -> true when it flipped to "your turn" and not yet opened
     this._current = null;         // the Terminal of the worktree session currently focused (marked in roster)
     this._asstTerm = null;        // the pinned assistant session's Terminal (focus instead of duplicate)
+    this._term = null;            // the pinned plain terminal's Terminal (focus instead of duplicate)
   }
   _key(slug, name) { return slug + '' + name; }
   clearUnread(key) { if (this._unread[key]) { this._unread[key] = false; this._postRoster(); } }
@@ -165,6 +167,21 @@ class DevSummaryProvider {
     setTimeout(() => this._postRoster(), 800);
   }
 
+  // Open (or focus) the pinned plain terminal: an ordinary login shell in the dev base for quick
+  // ad-hoc commands. Like the assistant row, but runs no Claude session — just an interactive shell.
+  openOrFocusTerminal() {
+    let t = this._term;
+    if (!t || t.exitStatus !== undefined) t = vscode.window.terminals.find((x) => x.name === TERM_NAME);
+    if (t) { t.show(); }
+    else {
+      t = vscode.window.createTerminal({ name: TERM_NAME, location: vscode.TerminalLocation.Editor,
+        shellPath: bashShell(), shellArgs: ['-l', '-i'] });
+      t.show();
+    }
+    this._term = t; this._current = t;
+    setTimeout(() => this._postRoster(), 800);
+  }
+
   // Add an image to the focused session without the broken native-Windows clipboard paste: grab the
   // clipboard image (else let the user pick a file), stage it to a space-free path under .wtd/state,
   // and INSERT that absolute path into the terminal (no Enter). Claude Code auto-detects the image
@@ -197,7 +214,31 @@ class DevSummaryProvider {
     });
   }
 
-  onTermClosed(t) { if (this._current === t) { this._current = null; this._postRoster(); } if (this._asstTerm === t) this._asstTerm = null; for (const [k, v] of this._terms) if (v === t) { this._terms.delete(k); break; } }
+  // Ctrl+V into a focused session: paste TEXT normally, but if the clipboard holds an IMAGE (and no
+  // text), stage it to a space-free path and INSERT that path so Claude Code loads the picture — the
+  // same trick as the 📷 button, minus the file-picker fallback. Bound to ctrl+v when a terminal is
+  // focused (Windows only; tmux/native paste handles it elsewhere). We check clipboard text first so
+  // the common text paste stays instant and never spawns powershell.
+  async smartPaste() {
+    const normalPaste = () => vscode.commands.executeCommand('workbench.action.terminal.paste');
+    let text = '';
+    try { text = await vscode.env.clipboard.readText(); } catch {}
+    if (text) return normalPaste();          // any text on the clipboard → ordinary paste
+    if (!IS_WIN) return normalPaste();
+    const target = vscode.window.activeTerminal || this._current;
+    if (!target) return normalPaste();
+    const dir = path.join(WTD, 'state', 'pasted-images');
+    try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+    const dest = path.join(dir, 'img-' + Date.now() + '.png');
+    const psPath = dest.replace(/\//g, '\\').replace(/'/g, "''");
+    const ps = "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $i=[System.Windows.Forms.Clipboard]::GetImage(); if($i){ $i.Save('" + psPath + "',[System.Drawing.Imaging.ImageFormat]::Png); $i.Dispose(); exit 0 } else { exit 3 }";
+    cp.execFile('powershell.exe', ['-NoProfile', '-STA', '-Command', ps], { timeout: 8000 }, (e) => {
+      if (!e) { target.show(); target.sendText(dest.replace(/\//g, '\\') + ' ', false); }  // image → insert path
+      else normalPaste();   // nothing pasteable as an image → ordinary paste
+    });
+  }
+
+  onTermClosed(t) { if (this._current === t) { this._current = null; this._postRoster(); } if (this._asstTerm === t) this._asstTerm = null; if (this._term === t) this._term = null; for (const [k, v] of this._terms) if (v === t) { this._terms.delete(k); break; } }
   onTermActive(t) {
     if (!t) return;
     this._current = t; setTimeout(() => this._postRoster(), 0);   // mark the focused session as selected
@@ -278,7 +319,7 @@ class DevSummaryProvider {
       } else if (m.cmd === 'newAgent') {
         vscode.window.showInputBox({
           prompt: 'New agent — enter: <slug> <name> [ref-tokens…]',
-          placeHolder: 'mod feat/my-thing',
+          placeHolder: '<slug> feat/my-thing',
         }).then((v) => {
           if (v && v.trim()) {
             const nm = (v.trim().split(/\s+/)[1] || v.trim().split(/\s+/)[0] || 'agent');   // tab = the <name> token (no slug)
@@ -290,6 +331,8 @@ class DevSummaryProvider {
         });
       } else if (m.cmd === 'newAssistant') {
         this.openOrFocusAssistant();
+      } else if (m.cmd === 'newTerminal') {
+        this.openOrFocusTerminal();
       } else if (m.cmd === 'pasteImage') {
         this.pasteImage();
       } else if (m.cmd === 'toggleTests') {
@@ -425,7 +468,10 @@ class DevSummaryProvider {
     // pinned assistant row state: live if a terminal named "assistant" exists; selected if it's focused
     const asstTerm = vscode.window.terminals.find((x) => x.name === ASST_NAME);
     const assistant = { active: !!asstTerm, current: !!cur && cur.name === ASST_NAME };
-    if (this.view && this.view.visible) this.view.webview.postMessage({ type: 'roster', rows, assistant });
+    // pinned plain-terminal row state (same idea, for the "terminal" row above the assistant)
+    const plainTerm = vscode.window.terminals.find((x) => x.name === TERM_NAME);
+    const terminal = { active: !!plainTerm, current: !!cur && cur.name === TERM_NAME };
+    if (this.view && this.view.visible) this.view.webview.postMessage({ type: 'roster', rows, assistant, terminal });
   }
 
   // names of worktrees with a live session (session name = "<slug>-<name>"). On Windows there's no
@@ -555,7 +601,7 @@ class DevSummaryProvider {
 </div>
 <script>
   const vsc = acquireVsCodeApi();
-  let accts=[], ros=[], mon=null, asstState={};
+  let accts=[], ros=[], mon=null, asstState={}, termState={};
   const GLYPH={working:'🔵',input:'🟡',reviewing:'🟣',pr:'🔹',done:'🟢',stopped:'🔴'};   // emoji -> editor tab name
   const GLYPHD={working:'◐',input:'!',reviewing:'⋯',pr:'◆',done:'✓',stopped:'○'};        // explorer-style glyph for the roster
   const COL={working:'#4aa3ff',input:'#ffd83d',reviewing:'#c586f0',pr:'#5cc8ff',done:'#3fd35f',stopped:'#ff5c57'};
@@ -589,10 +635,10 @@ class DevSummaryProvider {
     const order=['input','reviewing','working','pr','done','stopped'];
     document.getElementById('counts').innerHTML =
       order.filter(k=>c[k]).map(k=>'<span style="color:'+(COL[k]||'#888')+'">'+GLYPHD[k]+'</span>'+c[k]).join(' · ') || '<span style="opacity:.5">no worktrees</span>';
-    // group by repo (slug); 'mod' first, then the rest alphabetically. Within a repo, sort by
+    // group by repo (slug), alphabetically. Within a repo, sort by
     // status priority (actionable on top) then name.
     const groups={}; ros.forEach(w=>{ (groups[w.slug]=groups[w.slug]||[]).push(w); });
-    const slugs=Object.keys(groups).sort((a,b)=> a==='mod'?-1 : b==='mod'?1 : a.localeCompare(b));
+    const slugs=Object.keys(groups).sort((a,b)=> a.localeCompare(b));
     const wtRow=(w,sep)=>{
       const g=GLYPH[w.status]||GLYPH.stopped;      // emoji -> editor tab name (data-glyph)
       const gd=GLYPHD[w.status]||'○';              // explorer-style glyph shown in the row
@@ -605,15 +651,19 @@ class DevSummaryProvider {
         +'<span class="arch" title="Archive '+esc(w.name)+'">📦</span>'
         +'<span class="del" title="Delete '+esc(w.name)+' (remove worktree)">🗑</span></div>';
     };
-    // pinned assistant row at the very top — separated from the worktrees, no status indicators
+    // pinned plain-terminal row, just above the assistant — an ordinary shell for ad-hoc commands
+    const termRow='<div class="wt asst'+(termState.current?' current':'')+(termState.active?' active':'')+'" id="termRow" title="plain terminal — a login shell in the dev base · click to open">'
+      +'<span class="agly">▸</span><span class="nm">terminal</span></div>';
+    // pinned assistant row — separated from the worktrees, no status indicators
     const asstRow='<div class="wt asst'+(asstState.current?' current':'')+(asstState.active?' active':'')+'" id="asstRow" title="worktree-dev assistant — fleet management · click to open">'
       +'<span class="agly">🤖</span><span class="nm">assistant</span></div><div class="asstsep"></div>';
-    document.getElementById('roster').innerHTML = asstRow + slugs.map(slug=>{
+    document.getElementById('roster').innerHTML = termRow + asstRow + slugs.map(slug=>{
       const rows=groups[slug].sort((a,b)=>(PRIO[a.status]??9)-(PRIO[b.status]??9) || a.name.localeCompare(b.name));
       // add a gap whenever the status changes, so each status group is visually separated
       return '<div class="repo">'+esc(slug)+'</div>'+rows.map((w,i)=>wtRow(w, i>0 && rows[i-1].status!==w.status)).join('');
     }).join('');
     const ar=document.getElementById('asstRow'); if(ar) ar.onclick=()=>vsc.postMessage({cmd:'newAssistant'});
+    const tr=document.getElementById('termRow'); if(tr) tr.onclick=()=>vsc.postMessage({cmd:'newTerminal'});
     document.querySelectorAll('.wt:not(.asst)').forEach(el=>el.onclick=()=>vsc.postMessage({cmd:'open',slug:el.dataset.slug,name:el.dataset.name,glyph:el.dataset.glyph}));
     document.querySelectorAll('.arch').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'archive',slug:p.dataset.slug,name:p.dataset.name}); });
     document.querySelectorAll('.del').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'delete',slug:p.dataset.slug,name:p.dataset.name}); });
@@ -653,7 +703,7 @@ class DevSummaryProvider {
   window.addEventListener('message', e => {
     const m=e.data; if(!m) return;
     if(m.type==='limits'){ accts=m.accounts||[]; renderLim(); }
-    else if(m.type==='roster'){ ros=m.rows||[]; asstState=m.assistant||{}; renderRoster(); }
+    else if(m.type==='roster'){ ros=m.rows||[]; asstState=m.assistant||{}; termState=m.terminal||{}; renderRoster(); }
     else if(m.type==='monitor'){ mon=m.m; renderMonitor(); }
     else if(m.type==='teststate'){ renderTests(m.excluded); }
   });
@@ -711,6 +761,8 @@ function activate(context) {
 
   const dev = new DevSummaryProvider();
   context.subscriptions.push(vscode.window.registerWebviewViewProvider('claudeStatus.limit', dev));
+  // ctrl+v in a focused session → image-aware paste (see DevSummaryProvider.smartPaste)
+  context.subscriptions.push(vscode.commands.registerCommand('claudeStatus.smartPaste', () => dev.smartPaste()));
   // the dev base is derived from the open folders — re-resolve it (and repaint) if they change
   context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => { refreshDevRoot(); dev._postRoster(); }));
   // keep the roster's terminal map + unread flags in sync with the actual terminals

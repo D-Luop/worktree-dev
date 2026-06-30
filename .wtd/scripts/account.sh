@@ -12,7 +12,7 @@
 #   account rm <name>          delete an account dir (its login + history); confirms
 #
 # One-time per account: `account add <name>` opens Claude with that config dir — run `/login`, pick
-# the account, then exit. After that: `agent mod some-branch --account <name>`.
+# the account, then exit. After that: `agent <slug> some-branch --account <name>`.
 set -euo pipefail
 WTD="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 # shellcheck source=account-lib.sh

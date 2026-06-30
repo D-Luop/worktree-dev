@@ -3,7 +3,7 @@
 #   - tracked changes vs HEAD (staged + unstaged), all file types
 #   - untracked new files (shown as additions)
 # Generated files are excluded; delta-rendered if available, else git color. Unlike the live diff
-# pane (which, for mod, is filtered to .sql/.proto), this shows everything pending.
+# pane (which may be filtered to certain file types per repo), this shows everything pending.
 # Used by the commit pane's "view_uncommitted_diff" button via commit-diff-show.sh.
 # Usage: worktree-diff.sh <worktree-dir> [width]
 set -u

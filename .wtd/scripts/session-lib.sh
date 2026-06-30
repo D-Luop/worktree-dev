@@ -11,7 +11,7 @@
 # wtd_sessions_dir) and $WTD set.
 
 # --- session registry (vscode backend's source of truth; harmless on tmux too) ---------------
-# Session names can contain '/' (e.g. "mod-feat/x") — fine for tmux, not for a filename — so the
+# Session names can contain '/' (e.g. "<slug>-feat/x") — fine for tmux, not for a filename — so the
 # registry file encodes '/' as '__'. The extension decodes it back when reading the registry.
 wtd_session_keyfile() { printf '%s/%s' "$(wtd_sessions_dir)" "${1//\//__}"; }
 

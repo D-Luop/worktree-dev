@@ -144,7 +144,7 @@ A **Dev workflow summary** panel in the Explorer (between the folder tree and Ou
   (or focus the one running); it resumes across reopen/reboot like a worktree session. There's only
   ever one. Route its cost with `--account` /
   `$ASSISTANT_ACCOUNT` (defaults to your normal login);
-- a **fleet roster** grouped by repo (`mod` first) — each worktree's status glyph (`◐ ! ⋯ ◆ ✓ ○`,
+- a **fleet roster** grouped by repo (alphabetically) — each worktree's status glyph (`◐ ! ⋯ ◆ ✓ ○`,
   colored) + `↑n` unpushed / `●` dirty; live sessions get a faint gray row, and a row that just became
   *your turn* is highlighted until opened. **Click a row** to open it, **⏹** (live sessions only) to
   end the session keeping the worktree, **📦** to archive, **🗑** to delete the worktree (a modal offers
