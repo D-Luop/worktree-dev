@@ -222,7 +222,19 @@ A map of every moving part and what it's built on.
 - **State files:** `repos.tsv` (slug→URL registry), `.claude-status` (per-worktree sentinel),
   `rate-limits.json` (limit + email feed), `pr-notes.md` (scratch PR body),
   `.claude/plans/active-plan.md` (per-session plan), `review-knowledge/<slug>.md` (conventions ledger),
-  `~/.config/wtd/exclude-tests` (test-toggle flag).
+  `~/.config/wtd/exclude-tests` (test-toggle flag), `~/.config/wtd/dev-root` (absolute path of this
+  tree, written at install so the prebuilt VSCode extension finds it wherever it lives),
+  `.wtd/state/sessions/<session>` (liveness registry, deleted on close) and
+  `.wtd/state/session-ids/<session>` (durable Claude session id — see resume below).
+
+### Session continuity — resume across reopen/reboot
+A live Claude process never survives a reboot (on the vscode backend it runs in the VSCode terminal;
+even tmux dies on reboot), but Claude persists every session transcript to disk. So each worktree gets
+a **durable session id** (`.wtd/state/session-ids/<session>`, kept out of the worktree so it never
+shows as git-dirty): the first launch mints a UUID and starts `claude --session-id <uuid>`; reopening
+the worktree (from the roster or `agent <slug> <name>`) **resumes** that conversation with
+`claude --resume <uuid>` once its transcript is on disk — including after a restart. `agent rm` forgets
+the id so a future same-named worktree starts clean.
 
 > **Repo-agnostic.** worktree-dev makes no assumptions about the language or stack of the repos it
 > drives — it orchestrates git worktrees, tmux sessions, and Claude Code agents. Repo-specific build,

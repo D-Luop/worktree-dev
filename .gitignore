@@ -5,6 +5,8 @@ worktrees/
 refs/
 
 # Per-machine runtime state written by the engine at install/run time.
+.wtd/state/
+.claude-status
 .wtd/repos.tsv.local
 .wtd/reviews/.scratch/
 .wtd/reviews/reviewer-lessons.md
