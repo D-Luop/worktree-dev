@@ -76,6 +76,7 @@ fi
 
 # Visual "unread" indicator on turn-end: write a BEL to the pane tty. tmux (visual-bell off,
 # bell-action any) passes it to the VSCode terminal, which badges the tab while it's unfocused and
-# clears it when you focus the tab. SOUND is muted in VSCode settings — we keep our own alert.wav.
+# clears it when you focus the tab. This is VISUAL only — the bell SOUND is kept off
+# (accessibility.signals.terminalBell.sound="off" in .vscode/settings.json) so it doesn't beep.
 [ "$ev" = stop ] && printf '\a' > /dev/tty 2>/dev/null
 exit 0
