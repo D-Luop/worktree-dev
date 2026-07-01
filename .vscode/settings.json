@@ -3,7 +3,7 @@
     "terminal.integrated.tabs.description": "${cwdFolder}",
     "workbench.editorAssociations": { "*.md": "vscode.markdown.preview.editor" },
     "accessibility.signals.terminalBell": {
-        "sound": "on"
+        "sound": "off"
     },
     "peacock.color": "#dd0531",
     "workbench.colorCustomizations": {

@@ -290,6 +290,22 @@ class DevSummaryProvider {
 
   _showPreviewByKey(key) { const i = key.indexOf('\x01'); if (i >= 0) this.showPreview(key.slice(0, i), key.slice(i + 1)); }
 
+  // the worktree key of the currently-focused session (null for assistant/terminal/non-worktree)
+  _focusedWorktreeKey() {
+    const cur = this._current || vscode.window.activeTerminal;
+    if (!cur || cur.name === ASST_NAME || cur.name === TERM_NAME) return null;
+    for (const [k, v] of this._terms) if (v === cur) return k;
+    for (const k of Object.keys(this._preview)) if (k.split('\x01')[1] === cur.name) return k;   // reload-revived
+    return null;
+  }
+
+  // header 🖼 button: open the design preview for the worktree you're focused on (then it follows focus)
+  previewFocused() {
+    const key = this._focusedWorktreeKey();
+    if (key && this._preview[key]) this._showPreviewByKey(key);
+    else vscode.window.showInformationMessage('claude-status: no design preview for the focused session — an agent stages one with `preview <file>`.');
+  }
+
   // Keep the preview panel reflecting the focused worktree: show that worktree's staged preview, hide
   // when focus is on the assistant/terminal or a worktree without one, re-show on return. Only active
   // once the user has engaged a preview (clicked a 🖼); driven by terminal-focus changes, not the poll
@@ -402,8 +418,8 @@ class DevSummaryProvider {
         this.openOrFocusAssistant();
       } else if (m.cmd === 'newTerminal') {
         this.openOrFocusTerminal();
-      } else if (m.cmd === 'preview') {
-        this.showPreview(m.slug, m.name);
+      } else if (m.cmd === 'previewFocused') {
+        this.previewFocused();
       } else if (m.cmd === 'pasteImage') {
         this.pasteImage();
       } else if (m.cmd === 'toggleTests') {
@@ -414,18 +430,20 @@ class DevSummaryProvider {
         } catch (e) { vscode.window.showErrorMessage('toggle tests failed: ' + e.message); }
         this._postTests();
         execScript(path.join(DEV, '.wtd', 'hooks', 'refresh-diffs.sh'), [], { timeout: 30000 }, () => {});
+      } else if (m.cmd === 'toggleBell') {
+        this.toggleBell();
       }
     });
 
     const tick = () => this._postLimits();
-    tick(); this._postRoster(); this._postMonitor(); this._postTests();
+    tick(); this._postRoster(); this._postMonitor(); this._postTests(); this._postBell();
     // refresh accounts' usage every 60s. Active accounts come from their (free) statusline file; only
     // idle accounts hit the endpoint — 60s keeps API calls low enough to avoid 429. Roster every 12s,
     // system monitor every 5s.
     this.limTimer = setInterval(tick, 60000);
     this.rosTimer = setInterval(() => this._postRoster(), 12000);
     this.monTimer = setInterval(() => this._postMonitor(), 5000);
-    view.onDidChangeVisibility(() => { if (view.visible) { tick(); this._postRoster(); this._postMonitor(); this._postTests(); } });
+    view.onDidChangeVisibility(() => { if (view.visible) { tick(); this._postRoster(); this._postMonitor(); this._postTests(); this._postBell(); } });
     view.onDidDispose(() => {
       if (this.limTimer) clearInterval(this.limTimer);
       if (this.rosTimer) clearInterval(this.rosTimer);
@@ -439,6 +457,23 @@ class DevSummaryProvider {
     if (!this.view || !this.view.visible) return;
     let excluded = false; try { excluded = fs.existsSync(TESTS_FLAG); } catch {}
     this.view.webview.postMessage({ type: 'teststate', excluded });
+  }
+
+  // whether the turn-end bell SOUND is muted (accessibility.signals.terminalBell.sound === "off")
+  _postBell() {
+    if (!this.view || !this.view.visible) return;
+    let muted = false;
+    try { const tb = vscode.workspace.getConfiguration('accessibility.signals').get('terminalBell') || {}; muted = (tb.sound || 'auto') === 'off'; } catch {}
+    this.view.webview.postMessage({ type: 'bell', muted });
+  }
+
+  // header 🔔 button: mute/unmute the turn-end sound alert (writes the workspace setting live)
+  toggleBell() {
+    const cfg = vscode.workspace.getConfiguration('accessibility.signals');
+    const tb = cfg.get('terminalBell') || {};
+    const muted = (tb.sound || 'auto') === 'off';
+    cfg.update('terminalBell', { ...tb, sound: muted ? 'auto' : 'off' }, vscode.ConfigurationTarget.Workspace)
+      .then(() => this._postBell(), (e) => vscode.window.showErrorMessage('claude-status: toggle bell failed: ' + (e && e.message)));
   }
 
   // every configured account: the default (~/.claude) + each ~/.claude-accounts/<name>
@@ -540,7 +575,6 @@ class DevSummaryProvider {
       w.unread = !!this._unread[key];
       w.active = live.has(w.slug + '-' + w.name);   // has a live tmux session (vs. closed/inactive)
       w.current = !!cur && (curKey ? key === curKey : (!!cur.name && cur.name === w.name));   // focused session
-      w.preview = !!this._preview[key];             // an agent staged a design preview (🖼 on the row)
     }
     // pinned assistant row state: live if a terminal named "assistant" exists; selected if it's focused
     const asstTerm = vscode.window.terminals.find((x) => x.name === ASST_NAME);
@@ -635,7 +669,7 @@ class DevSummaryProvider {
   hr{border:none;border-top:1px solid var(--vscode-panel-border,rgba(127,127,127,.2));margin:5px 0 4px;}
   .head{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:4px;font-size:12px;margin-bottom:3px;}
   .counts{opacity:.8;}
-  .btn{cursor:pointer;border:1px solid var(--vscode-button-border,transparent);background:var(--vscode-button-secondaryBackground,rgba(127,127,127,.18));color:var(--vscode-button-secondaryForeground,inherit);border-radius:3px;padding:0 6px;line-height:16px;font-size:12px;}
+  .btn{cursor:pointer;border:none;background:var(--vscode-button-secondaryBackground,rgba(127,127,127,.18));color:var(--vscode-button-secondaryForeground,inherit);border-radius:3px;padding:2px 6px;font-size:12px;display:inline-flex;align-items:center;justify-content:center;}
   .btn:hover{background:var(--vscode-button-secondaryHoverBackground,rgba(127,127,127,.3));}
   .wt{display:flex;align-items:center;gap:5px;height:21px;cursor:pointer;border-radius:3px;padding:0 3px;font-size:13px;}
   .wt:hover{background:var(--vscode-list-hoverBackground,rgba(127,127,127,.12));}
@@ -648,8 +682,6 @@ class DevSummaryProvider {
   .wt:hover .arch,.wt:hover .term,.wt:hover .unr,.wt:hover .del{opacity:.55;} .wt .arch:hover,.wt .term:hover,.wt .unr:hover,.wt .del:hover{opacity:1;}
   .wt .term:hover,.wt .del:hover{color:var(--vscode-charts-red,#e5534b);}
   .wt .unr:hover{color:var(--vscode-charts-yellow,#d2a000);}
-  .wt .pv{cursor:pointer;padding:0 2px;font-size:12px;opacity:.9;}   /* design-preview ready — always visible */
-  .wt .pv:hover{opacity:1;}
   .wt.sep{margin-top:7px;}   /* gap between status groups */
   /* pinned assistant row: above the worktree groups, no status glyph/git, with a divider below it */
   .wt.asst{margin-top:9px;}   /* breathing room between the header buttons and the first pinned row */
@@ -672,7 +704,7 @@ class DevSummaryProvider {
 </style></head><body>
 <div id="lim"><div class="none">waiting for a session…</div></div>
 <hr>
-<div class="head"><span class="counts" id="counts"></span><span class="btn" id="img" title="Add an image to the focused session — pastes a clipboard screenshot, or pick a file (works around native-Windows terminal paste)">📷</span><span class="btn" id="tests" title="Include/exclude test files in the diff panes">tests ✓</span><span class="btn" id="add" title="Launch a new agent">+ agent</span></div>
+<div class="head"><span class="counts" id="counts"></span><span class="btn" id="img" title="Add an image to the focused session — pastes a clipboard screenshot, or pick a file (works around native-Windows terminal paste)">📷</span><span class="btn" id="bell" title="Turn-end sound alert — click to mute/unmute">🔔</span><span class="btn" id="prev" title="Open the focused worktree's design preview">🖼</span><span class="btn" id="tests" title="Include/exclude test files in the diff panes">tests ✓</span><span class="btn" id="add" title="Launch a new agent">+ agent</span></div>
 <div id="roster"></div>
 <div id="monwrap">
 <hr>
@@ -726,7 +758,6 @@ class DevSummaryProvider {
       const git=(w.ahead?'<span class="ahead">↑'+w.ahead+'</span> ':'')+(w.dirty?'<span class="dirty">●</span>':'');
       return '<div class="wt'+(sep?' sep':'')+(w.active?' active':'')+(w.unread?' unread':'')+(w.current?' current':'')+'" data-slug="'+esc(w.slug)+'" data-name="'+esc(w.name)+'" data-glyph="'+g+'" title="'+esc(w.slug+' '+w.name)+(w.status?(' — '+w.status):'')+(w.active?' · active':'')+(w.current?' · selected':'')+(w.unread?' · unread':'')+' · click to open">'
         +'<span style="color:'+gc+'">'+gd+'</span><span class="nm">'+esc(w.name)+'</span>'
-        +(w.preview?'<span class="pv" title="Open design preview">🖼</span>':'')
         +'<span class="git">'+git+'</span>'
         +(w.active&&!w.unread?'<span class="unr" title="Mark unread (flag it yellow to revisit)">✉</span>':'')
         +(w.active?'<span class="term" title="End the tmux session (worktree stays)">⏹</span>':'')
@@ -747,7 +778,6 @@ class DevSummaryProvider {
     const ar=document.getElementById('asstRow'); if(ar) ar.onclick=()=>vsc.postMessage({cmd:'newAssistant'});
     const tr=document.getElementById('termRow'); if(tr) tr.onclick=()=>vsc.postMessage({cmd:'newTerminal'});
     document.querySelectorAll('.wt:not(.asst)').forEach(el=>el.onclick=()=>vsc.postMessage({cmd:'open',slug:el.dataset.slug,name:el.dataset.name,glyph:el.dataset.glyph}));
-    document.querySelectorAll('.pv').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'preview',slug:p.dataset.slug,name:p.dataset.name}); });
     document.querySelectorAll('.arch').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'archive',slug:p.dataset.slug,name:p.dataset.name}); });
     document.querySelectorAll('.del').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'delete',slug:p.dataset.slug,name:p.dataset.name}); });
     document.querySelectorAll('.term').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'terminate',slug:p.dataset.slug,name:p.dataset.name}); });
@@ -778,17 +808,24 @@ class DevSummaryProvider {
   }
   document.getElementById('add').onclick=()=>vsc.postMessage({cmd:'newAgent'});
   document.getElementById('img').onclick=()=>vsc.postMessage({cmd:'pasteImage'});
+  document.getElementById('prev').onclick=()=>vsc.postMessage({cmd:'previewFocused'});
   function renderTests(excluded){ const b=document.getElementById('tests'); if(!b) return;
     b.textContent = excluded ? 'tests ✕' : 'tests ✓';
     b.title = excluded ? 'Test files are EXCLUDED from the diff panes — click to include' : 'Test files are INCLUDED in the diff panes — click to exclude';
     b.style.opacity = excluded ? '.6' : '1'; }
   document.getElementById('tests').onclick=()=>vsc.postMessage({cmd:'toggleTests'});
+  function renderBell(muted){ const b=document.getElementById('bell'); if(!b) return;
+    b.textContent = muted ? '🔕' : '🔔';
+    b.title = muted ? 'Turn-end sound alert is OFF — click to enable' : 'Turn-end sound alert is ON — click to mute';
+    b.style.opacity = muted ? '.6' : '1'; }
+  document.getElementById('bell').onclick=()=>vsc.postMessage({cmd:'toggleBell'});
   window.addEventListener('message', e => {
     const m=e.data; if(!m) return;
     if(m.type==='limits'){ accts=m.accounts||[]; renderLim(); }
     else if(m.type==='roster'){ ros=m.rows||[]; asstState=m.assistant||{}; termState=m.terminal||{}; renderRoster(); }
     else if(m.type==='monitor'){ mon=m.m; renderMonitor(); }
     else if(m.type==='teststate'){ renderTests(m.excluded); }
+    else if(m.type==='bell'){ renderBell(m.muted); }
   });
   setInterval(renderLim, 15000);   // keep the reset countdown ticking
 </script></body></html>`;
