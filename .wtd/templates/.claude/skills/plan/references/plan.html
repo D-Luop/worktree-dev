@@ -1,0 +1,193 @@
+<!doctype html>
+<!--
+  LIVING PLAN template for the /plan skill. Copy to .claude/plans/active-plan.html, then FILL:
+   • <title>, .h1 title, .lead one-liner, .meta context line
+   • one <section class="phase"> per phase; inside it, one .item per step
+   • an ITEM is done when its checkbox has `checked` — the script dims it and updates the counter,
+     so marking a step done = add `checked` to that one <input> (nothing else to touch)
+   • append a <li> to the Progress Log as you finish each step
+  Each item has a "▶ Start" button. When the plan is open in the roster preview panel, clicking it
+  tells THIS worktree's Claude session to begin that step (it does nothing when the file is opened
+  outside the panel). Keep step TITLES self-contained — the title text is what the session is told to
+  work on. Self-contained: all CSS/JS inline, no network. Re-run `preview .claude/plans/active-plan.html`
+  after every edit to refresh the panel.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PLAN — {{ worktree / task title }}</title>
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#121924; --panel2:#0f1520; --bd:#232e3d; --bd2:#2c3849;
+    --tx:#c9d3e0; --mut:#7d8899; --dim:#5b6675;
+    --blue:#4aa3ff; --green:#3fb950; --amber:#d29922; --red:#f85149; --grey:#6e7681; --purple:#bc8cff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:26px 30px 60px;background:var(--bg);color:var(--tx);
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;}
+  code{font-family:"SF Mono",Consolas,"Liberation Mono",monospace;font-size:.86em;
+    background:#1c2430;border:1px solid var(--bd);border-radius:4px;padding:1px 5px;color:#d7e0ec;}
+  a{color:var(--blue)}
+
+  /* header */
+  .h1{font-size:26px;font-weight:700;letter-spacing:-.4px;margin:0 0 6px;color:#eaf1fb}
+  .lead{font-size:15px;color:#aab6c6;margin:0 0 4px}
+  .meta{font-size:12.5px;color:var(--mut);margin:0}
+
+  /* progress bar */
+  .prog{margin:18px 0 8px;display:flex;align-items:center;gap:12px}
+  .track{flex:1;height:8px;border-radius:5px;background:#1a2230;overflow:hidden;border:1px solid var(--bd)}
+  .fill{height:100%;width:0;background:linear-gradient(90deg,var(--blue),var(--green));transition:width .35s ease}
+  .count{font-size:13px;color:var(--mut);font-variant-numeric:tabular-nums;white-space:nowrap}
+  .count b{color:var(--green)}
+
+  /* legend */
+  .legend{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 22px;align-items:center}
+  .chip{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:600;
+    text-transform:uppercase;letter-spacing:.4px;padding:3px 9px;border-radius:20px;border:1px solid transparent}
+  .chip::before{content:"";width:7px;height:7px;border-radius:50%}
+  .chip.todo{color:#aab6c6;background:#181f2b;border-color:var(--bd2)} .chip.todo::before{background:var(--grey)}
+  .chip.doing{color:#9cc7ff;background:#132131;border-color:#27405c} .chip.doing::before{background:var(--blue)}
+  .chip.done{color:#7ee39a;background:#10241a;border-color:#1f4d31} .chip.done::before{background:var(--green)}
+  .chip.blocked{color:#ff9d97;background:#2a1514;border-color:#5a2420} .chip.blocked::before{background:var(--red)}
+
+  /* phase section */
+  .phase{margin:26px 0 6px}
+  .phead{display:flex;align-items:baseline;gap:10px;font-size:12px;font-weight:700;letter-spacing:1px;
+    text-transform:uppercase;color:var(--mut);border-bottom:1px solid var(--bd);padding-bottom:7px;margin-bottom:12px}
+  .phead .n{color:var(--dim);font-weight:600}
+
+  /* checklist item */
+  .item{display:flex;gap:13px;align-items:flex-start;background:var(--panel);border:1px solid var(--bd);
+    border-radius:10px;padding:13px 15px;margin:9px 0;transition:opacity .2s,background .2s}
+  .item input[type=checkbox]{margin:2px 0 0;width:17px;height:17px;flex:none;accent-color:var(--green);cursor:pointer}
+  .id{flex:none;font-size:11px;font-weight:700;color:#9fb0c4;background:#1a2331;border:1px solid var(--bd2);
+    border-radius:6px;padding:3px 8px;letter-spacing:.5px;min-width:42px;text-align:center}
+  .body{flex:1;min-width:0}
+  .row1{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:3px}
+  .ttl{font-weight:600;color:#e7eefa;font-size:14.5px}
+  .tag{font-size:10.5px;font-weight:600;padding:1px 7px;border-radius:5px;background:#1c2836;color:#9db3cc;border:1px solid var(--bd2)}
+  .desc{color:#93a1b4;font-size:13px}
+  .desc b{color:#c3cede;font-weight:600}
+  /* "start this step" button — wired by the preview panel; inert when the file is opened elsewhere */
+  .go{flex:none;align-self:center;cursor:pointer;font:600 11.5px system-ui;color:#9cc7ff;background:#132131;
+    border:1px solid #27405c;border-radius:7px;padding:5px 11px;white-space:nowrap;transition:.15s}
+  .go:hover{background:#1b3350;color:#cfe4ff;border-color:#3a5c82}
+  .go:active,.go.go-fired{background:#1f4d31;border-color:#2f7d4e;color:#9ff0b8}
+  /* done styling (driven by the checkbox via JS) */
+  .item.is-done{opacity:.5} .item.is-done .go{opacity:.4}
+  .item.is-done .ttl{text-decoration:line-through;text-decoration-color:var(--dim)}
+
+  /* progress log */
+  .log{margin-top:30px}
+  .log ul{margin:10px 0 0;padding-left:0;list-style:none}
+  .log li{padding:7px 0 7px 16px;border-left:2px solid var(--bd2);margin-left:3px;color:#9aa7b8;font-size:13px}
+  .log li b{color:#c3cede}
+  .log .empty{color:var(--dim);font-style:italic;border:none;padding-left:0}
+
+  .foot{margin-top:34px;color:var(--dim);font-size:11.5px;border-top:1px solid var(--bd);padding-top:12px}
+</style>
+</head>
+<body>
+
+  <h1 class="h1">{{ Task / worktree title }}</h1>
+  <p class="lead">{{ one-sentence goal — what this branch delivers and why }}</p>
+  <p class="meta">{{ context line — scope · constraints · branch · anything a fresh agent needs }}</p>
+
+  <div class="prog">
+    <div class="track"><div class="fill" id="fill"></div></div>
+    <div class="count"><b id="ndone">0</b> / <span id="ntot">0</span> done</div>
+  </div>
+
+  <div class="legend">
+    <span class="chip todo">Todo</span>
+    <span class="chip doing">In progress</span>
+    <span class="chip done">Done</span>
+    <span class="chip blocked">Blocked</span>
+    <span class="meta" style="margin-left:4px">tick a box to complete · ▶ Start hands a step to this worktree's session</span>
+  </div>
+
+  <!-- ============ PHASE (duplicate per phase) ============ -->
+  <section class="phase">
+    <div class="phead"><span>{{ Phase name }}</span><span class="n" id="c-p1">·</span></div>
+
+    <!-- ITEM (duplicate per step). Add `checked` to the input when the step is complete. -->
+    <div class="item">
+      <input type="checkbox">
+      <span class="id">P1</span>
+      <span class="body">
+        <span class="row1"><span class="ttl">{{ Step title — imperative, self-contained }}</span>
+          <span class="tag">{{ optional scope/area tag }}</span></span>
+        <span class="desc">{{ What this step does and why. Name the files/dirs it touches; use
+          <code>identifiers</code> for symbols. <b>Commit + push, log progress, then ask before the next step.</b></span>
+      </span>
+      <button class="go" type="button" title="Tell this worktree's session to start this step">▶ Start</button>
+    </div>
+
+    <div class="item">
+      <input type="checkbox" checked>
+      <span class="id">P2</span>
+      <span class="body">
+        <span class="row1"><span class="ttl">{{ An already-finished step — note the `checked` above }}</span></span>
+        <span class="desc">{{ It renders dimmed + struck-through automatically. }}</span>
+      </span>
+      <button class="go" type="button" title="Tell this worktree's session to start this step">▶ Start</button>
+    </div>
+  </section>
+
+  <!-- ============ fixed tail (keep last; reviews are NOT a step — the user runs wt-review) ============ -->
+  <section class="phase">
+    <div class="phead"><span>Wrap-up</span><span class="n">·</span></div>
+    <div class="item">
+      <input type="checkbox">
+      <span class="id">T1</span>
+      <span class="body">
+        <span class="row1"><span class="ttl">Tests</span></span>
+        <span class="desc">Write tests per the repo's own conventions for this kind of change.</span>
+      </span>
+      <button class="go" type="button" title="Tell this worktree's session to start this step">▶ Start</button>
+    </div>
+    <div class="item">
+      <input type="checkbox">
+      <span class="id">T2</span>
+      <span class="body">
+        <span class="row1"><span class="ttl">Green build</span></span>
+        <span class="desc">Run the repo's build / codegen / lint / test commands and make them pass; ignore
+          failures pre-existing to the merge-base.</span>
+      </span>
+      <button class="go" type="button" title="Tell this worktree's session to start this step">▶ Start</button>
+    </div>
+  </section>
+
+  <!-- ============ progress log — append a <li> as each step lands ============ -->
+  <section class="log">
+    <div class="phead"><span>Progress log</span><span class="n">·</span></div>
+    <ul id="log">
+      <li class="empty">No steps completed yet.</li>
+      <!-- <li><b>P2</b> — did X; commit <code>abc1234</code> pushed. Next: P1.</li> -->
+    </ul>
+  </section>
+
+  <div class="foot">Living plan · re-run <code>preview .claude/plans/active-plan.html</code> after each update.</div>
+
+<script>
+  // Purely cosmetic: reflect each checkbox into done-styling + the top counter. State of record is
+  // the `checked` attributes in the HTML (which the agent edits); ticking in the panel is ephemeral.
+  // The ▶ Start buttons are wired by the preview panel host, not here.
+  function sync(){
+    var items = Array.prototype.slice.call(document.querySelectorAll('.item'));
+    var done = 0;
+    items.forEach(function(it){
+      var on = it.querySelector('input[type=checkbox]').checked;
+      it.classList.toggle('is-done', on);
+      if(on) done++;
+    });
+    document.getElementById('ndone').textContent = done;
+    document.getElementById('ntot').textContent = items.length;
+    document.getElementById('fill').style.width = items.length ? (done/items.length*100)+'%' : '0%';
+  }
+  document.addEventListener('change', function(e){ if(e.target.matches('input[type=checkbox]')) sync(); });
+  sync();
+</script>
+</body>
+</html>
