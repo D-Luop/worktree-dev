@@ -256,7 +256,7 @@ class DevSummaryProvider {
   // open (or refresh) the design preview for a worktree in an editor-side webview panel. The HTML is
   // agent-authored, so it renders under a CSP: inline styles/scripts and data/https images only — no
   // network fetch. Self-contained mockups (inline CSS, data-URI images) are the intended input.
-  showPreview(slug, name) {
+  showPreview(slug, name, reveal = true) {
     const file = path.join(WTD, 'state', 'previews', slug, name + '.html');
     let raw; try { raw = fs.readFileSync(file, 'utf8'); }
     catch { vscode.window.showInformationMessage('claude-status: no preview staged for ' + slug + ' ' + name); return; }
@@ -270,22 +270,58 @@ class DevSummaryProvider {
         if (this._pvAutoClosing) this._pvAutoClosing = false;   // we closed it to follow focus → keep following
         else this._pvFollow = false;                            // the user closed it → stop following
       });
-      this._pvPanel.webview.onDidReceiveMessage((msg) => { if (msg && msg.cmd === 'close' && this._pvPanel) this._pvPanel.dispose(); });
+      this._pvPanel.webview.onDidReceiveMessage((msg) => {
+        if (!msg) return;
+        if (msg.cmd === 'close' && this._pvPanel) this._pvPanel.dispose();
+        else if (msg.cmd === 'planAction' && msg.title) this.startPlanItem(msg.id || '', msg.title);
+      });
     }
     const csp = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; '
       + 'img-src data: https:; style-src \'unsafe-inline\' https:; font-src data: https:; script-src \'unsafe-inline\';">';
     // floating Close button overlaid on the mockup (in addition to the editor-tab X). acquireVsCodeApi
     // is one-shot per webview, so grab it once in a script and wire the click to it.
+    // acquireVsCodeApi is one-shot per webview — grab it once here and wire BOTH the floating Close
+    // button and any ".go" (▶ Start) buttons the staged HTML may contain (the /plan living checklist).
+    // A ".go" click posts planAction with the item's id + title so the host can hand it to the session.
     const closeBtn = '<div id="__wtclose" title="Close preview" '
       + 'style="position:fixed;top:10px;right:12px;z-index:2147483647;background:#21262d;color:#e6edf3;'
       + 'border:1px solid #444c56;border-radius:6px;padding:4px 10px;font:600 12px system-ui;cursor:pointer;opacity:.9;">✕ Close</div>'
-      + '<script>(function(){var b=document.getElementById("__wtclose");if(b){var v=acquireVsCodeApi();b.addEventListener("click",function(){v.postMessage({cmd:"close"});});}})();</script>';
+      + '<script>(function(){var v=acquireVsCodeApi();'
+      + 'var b=document.getElementById("__wtclose");if(b)b.addEventListener("click",function(){v.postMessage({cmd:"close"});});'
+      + 'document.addEventListener("click",function(e){var g=e.target.closest&&e.target.closest(".go");if(!g)return;'
+      + 'e.preventDefault();e.stopPropagation();var it=g.closest(".item");if(!it)return;'
+      + 'var idn=it.querySelector(".id"),tn=it.querySelector(".ttl");'
+      + 'v.postMessage({cmd:"planAction",id:((idn&&idn.textContent)||"").trim(),title:((tn&&tn.textContent)||"").trim()});'
+      + 'g.classList.add("go-fired");setTimeout(function(){g.classList.remove("go-fired");},1200);});'
+      + '})();</script>';
     let html = /<head[^>]*>/i.test(raw) ? raw.replace(/<head[^>]*>/i, (m) => m + csp) : csp + raw;
     html = /<\/body>/i.test(html) ? html.replace(/<\/body>/i, closeBtn + '</body>') : html + closeBtn;
     this._pvPanel.title = slug + '/' + name + ' — preview';
     this._pvPanel.webview.html = html;
     this._pvShownKey = this._key(slug, name);
-    this._pvPanel.reveal(vscode.ViewColumn.Beside, true);
+    if (reveal) this._pvPanel.reveal(vscode.ViewColumn.Beside, true);
+  }
+
+  // A ▶ Start button in the living-plan preview was clicked: hand that step to the worktree the panel
+  // is currently showing (_pvShownKey). Send a prompt into its Claude session — open the session first
+  // if it isn't live yet (then wait for Claude to boot before typing).
+  startPlanItem(id, title) {
+    const key = this._pvShownKey; if (!key) return;
+    const i = key.indexOf('\x01'); if (i < 0) return;
+    const slug = key.slice(0, i), name = key.slice(i + 1);
+    const label = (id ? id + ': ' : '') + title;
+    const prompt = 'Start plan item ' + label
+      + ' — when it lands, tick it in .claude/plans/active-plan.html and re-run `preview` to refresh the plan.';
+    const send = (term) => { term.show(); term.sendText(prompt, true); this._current = term; };
+    let t = this._terms.get(key);
+    if (!t || t.exitStatus !== undefined) t = vscode.window.terminals.find((x) => x.name === name && x.exitStatus === undefined);
+    if (t && t.exitStatus === undefined) { this._terms.set(key, t); send(t); }
+    else {
+      this.openOrFocus(slug, name);                     // launches `agent <slug> <name>`
+      const created = this._terms.get(key);
+      if (created) setTimeout(() => send(created), 2500);   // give Claude a moment to come up before typing
+    }
+    setTimeout(() => this._postRoster(), 1500);
   }
 
   _showPreviewByKey(key) { const i = key.indexOf('\x01'); if (i >= 0) this.showPreview(key.slice(0, i), key.slice(i + 1)); }
@@ -894,7 +930,14 @@ function activate(context) {
   // watch that tree so a 🖼 appears on the worktree's roster row, and clears when the file is removed.
   const pvDir = path.join(WTD, 'state', 'previews');
   const pvWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(pvDir, '**/*.html'));
-  const pvSet = (uri) => { const k = dev._previewKey(uri.fsPath); if (k) { dev._preview[dev._key(k.slug, k.name)] = uri.fsPath; dev._postRoster(); } };
+  const pvSet = (uri) => {
+    const k = dev._previewKey(uri.fsPath); if (!k) return;
+    const key = dev._key(k.slug, k.name);
+    dev._preview[key] = uri.fsPath; dev._postRoster();
+    // live-refresh the open panel in place when the preview it's showing changes on disk (e.g. an
+    // agent re-stages its living plan after ticking a step) — no reveal, so focus isn't stolen.
+    if (dev._pvPanel && dev._pvShownKey === key) dev.showPreview(k.slug, k.name, false);
+  };
   const pvDel = (uri) => { const k = dev._previewKey(uri.fsPath); if (k) { delete dev._preview[dev._key(k.slug, k.name)]; dev._postRoster(); } };
   pvWatcher.onDidCreate(pvSet); pvWatcher.onDidChange(pvSet); pvWatcher.onDidDelete(pvDel);
   context.subscriptions.push(pvWatcher);
