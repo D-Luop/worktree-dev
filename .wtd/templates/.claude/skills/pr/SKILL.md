@@ -43,7 +43,11 @@ the ACTUAL changes — inspect the unpushed diff if needed:
 
 Format — clean, terse markdown. **Heading levels: `##` for the title, `###` for every section**
 (never `#`):
-- `## <branch>` title (`git branch --show-current`).
+- `## <type>: <description>` — a **Conventional Commits** title (this becomes the squash-merge commit
+  subject, and its `type` renders as the colored pill in the GitHub commit list). Derive `<type>` from
+  the branch prefix (`docs/…` → `docs:`, `fix/…` → `fix:`, `feat/…` → `feat:`, etc.; use
+  `type(scope):` when a package/area sharpens it) and write a terse `<description>`. e.g. branch
+  `docs/readme-tighten` → `## docs: tighten README — single-line rows, correct apps/services paths`.
 - One lead sentence: what changed + why (bold the key qualifier if apt, e.g. **Test-only change**).
 - `### Why` — a few sentences of context/motivation.
 - One `###` section per change area (e.g. `### Test fixes`, `### Tooling`, `### Build`), each a list

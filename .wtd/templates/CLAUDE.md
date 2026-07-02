@@ -81,14 +81,15 @@ worktree root, run `pwd` and prefix with it.
 
 ## Commit messages
 
-Every commit gets a **terse, descriptive subject** with the detail in the **body** — never cram it all
-onto the subject line, never use vague subjects (`update`, `fix`, `wip`, `changes`). Use `/commit` to
-do this, or follow it by hand:
+Every commit uses **Conventional Commits**: a `type: ` prefix + terse subject, with detail in the
+**body**. The `type` renders as the colored pill in the GitHub commit list, so it's required. Use
+`/commit`, or follow it by hand:
 
-- **Subject** — one line, ≤~70 chars, no trailing period; concretely name the change
-  (`tighten README — single-line rows, correct apps/services paths`). Lead with the scope when it
-  sharpens it. **No `type:` prefix, no AI attribution.** It becomes the one-line log entry and, after
-  squash-merge, the PR title + `#N` — so make it stand on its own.
+- **Subject** — `type: description` (or `type(scope): description`), one line, ≤~70 chars, no trailing
+  period; the description concretely names the change (`docs: tighten README — single-line rows,
+  correct apps/services paths`), never vague (`update`, `wip`, `changes`). **Always lead with a type;
+  no AI attribution.** Types: `feat` `fix` `docs` `refactor` `perf` `test` `build` `ci` `chore`
+  `style` `revert`. It becomes the one-line log entry and, after squash-merge, the PR title + `#N`.
 - **Blank line**, then a wrapped **body** explaining *what changed and why* — the motivation/tradeoff a
   reviewer can't see from the diff. Prose and/or `-` bullets. Don't restate the diff.
 - **One commit = one coherent change** — split unrelated work. Same terse, factual voice as the
@@ -103,7 +104,9 @@ command printing `marked <name> as '<status>'` — don't claim the status withou
 (re)write it whenever asked. `pr-notes.md` is git-ignored — a scratch artifact for the PR body.
 
 Format — clean, terse markdown. **Heading levels: `##` for the title, `###` for sections (never `#`):**
-- `## <branch>` title.
+- `## <type>: <description>` — a **Conventional Commits** title (becomes the squash-merge subject; its
+  `type` renders as the colored pill). Derive `<type>` from the branch prefix (`docs/…` → `docs:`,
+  `fix/…` → `fix:`, `feat/…` → `feat:`; use `type(scope):` when apt).
 - One lead sentence: what changed + why (bold the key qualifier if apt, e.g. **Test-only change**).
 - `### Why` — a few sentences of context/motivation.
 - One `###` section per area of change (e.g. `### Test fixes`, `### Tooling`, `### Build`), each a
