@@ -20,12 +20,17 @@ squash-merge PR title. Run for real — actually stage and commit; never just de
   **one commit = one coherent change**; split unrelated work into separate commits.
 
 ## 2. Write the message
-The format mirrors the user's merged history — a terse **subject**, then the detail in the **body**:
+**Conventional Commits** format — a `type: ` prefix, a terse subject, then the detail in the **body**.
+The type is what renders as the colored pill in the GitHub commit list, so it's required.
 
-- **Subject** — one line, ≤~70 chars, no trailing period. Concretely describe the change
-  (`tighten README — single-line rows, correct apps/services paths`), never vague (`update`, `fix`,
-  `wip`, `changes`, `misc`). Lead with the scope/area when it sharpens it. **No `type:` prefix, no AI
-  attribution.**
+- **Subject** — `type: description` (or `type(scope): description`), one line, ≤~70 chars, no trailing
+  period. The **description** concretely names the change (`docs: tighten README — single-line rows,
+  correct apps/services paths`), never vague (`update`, `wip`, `changes`, `misc`). **Always lead with
+  a type; no AI attribution.** Types:
+  - `feat` new feature · `fix` bug fix · `docs` docs only · `refactor` no behavior change ·
+    `perf` performance · `test` tests · `build` build system/deps · `ci` CI config · `chore`
+    maintenance/tooling · `style` formatting only · `revert` a revert.
+  - Use `(scope)` for the package/area when it sharpens it: `fix(ui-kit): …`.
 - **Blank line**, then the **body** (wrap ~72 cols): explain *what changed and why* — the motivation,
   the tradeoff, the thing a reviewer can't infer from the diff. Prose and/or `-` bullets; a few lines
   is good. Don't narrate the diff line-by-line.
@@ -33,13 +38,13 @@ The format mirrors the user's merged history — a terse **subject**, then the d
 Multi-paragraph messages don't survive `-m` cleanly — **write the message to a temp file and commit
 with `-F`**:
 ```
-printf '%s\n\n%s\n' "<subject line>" "<body…>" > "$(git rev-parse --git-dir)/WTD_COMMITMSG"
+printf '%s\n\n%s\n' "<type: subject>" "<body…>" > "$(git rev-parse --git-dir)/WTD_COMMITMSG"
 git commit -F "$(git rev-parse --git-dir)/WTD_COMMITMSG"
 ```
 
 Example (subject + body):
 ```
-untrack dev-session scratch files leaked into repo
+chore: untrack dev-session scratch files leaked into repo
 
 CLAUDE.md, pr-notes.md and the .claude-status sentinels were getting
 committed from worktree sessions. Add them to .gitignore and git rm
