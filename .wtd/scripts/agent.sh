@@ -60,7 +60,7 @@ if [ "${1:-}" = "rm" ]; then
     case "$ans" in y|Y|yes|YES) ;; *) echo "aborted"; exit 1;; esac
   fi
 
-  wtd_session_kill "$rmsession" "$rmwt" && echo "killed session $rmsession" || echo "no running session $rmsession"
+  wtd_session_kill "$rmsession" "$rmwt" "$rmrepo" "$rmname" && echo "killed session $rmsession" || echo "no running session $rmsession"
   if [ -d "$rmwt" ]; then
     # A session we just killed can keep file handles open for a moment on Windows, so `git worktree
     # remove` fails with "Permission denied"/"used by another process". Retry a few times to let the
@@ -71,6 +71,9 @@ if [ "${1:-}" = "rm" ]; then
       case "$out" in *"Permission denied"*|*"used by another process"*) sleep 1 ;; *) break ;; esac
     done
     if [ "$removed" = 1 ]; then
+      # git normally deletes the dir too, but a briefly-held handle can leave an empty shell behind —
+      # clear it if so (rmdir only, so a non-empty dir is never silently discarded).
+      [ -d "$rmwt" ] && rmdir "$rmwt" 2>/dev/null || true
       echo "removed worktree $rmwt"
     else
       echo "worktree remove failed: $out"
@@ -148,9 +151,10 @@ if [ "${1:-}" = "stop" ] || [ "${1:-}" = "kill" ]; then
   swt="$DEV/worktrees/$sslug/$sname"
   [ -d "$swt" ] && CLAUDE_PROJECT_DIR="$swt" "$WTD/hooks/wt-status.sh" sessionend </dev/null
   if wtd_session_exists "$ssession"; then
-    wtd_session_kill "$ssession" "$swt"
+    wtd_session_kill "$ssession" "$swt" "$sslug" "$sname"
     echo "stopped session '$ssession' (worktree kept → red 'stopped' unless done). Re-open: agent $sslug $sname"
   else
+    wtd_session_kill_stragglers "$sslug" "$sname"   # registry gone but launcher shells may linger
     echo "no running session '$ssession'."
   fi
   exit 0
