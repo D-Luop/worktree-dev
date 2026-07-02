@@ -671,15 +671,19 @@ class DevSummaryProvider {
   .counts{opacity:.8;}
   .btn{cursor:pointer;border:none;background:var(--vscode-button-secondaryBackground,rgba(127,127,127,.18));color:var(--vscode-button-secondaryForeground,inherit);border-radius:3px;padding:2px 6px;font-size:12px;display:inline-flex;align-items:center;justify-content:center;}
   .btn:hover{background:var(--vscode-button-secondaryHoverBackground,rgba(127,127,127,.3));}
-  .wt{display:flex;align-items:center;gap:5px;height:21px;cursor:pointer;border-radius:3px;padding:0 3px;font-size:13px;}
+  .wt{position:relative;display:flex;align-items:center;gap:5px;height:21px;cursor:pointer;border-radius:3px;padding:0 3px;font-size:13px;}
   .wt:hover{background:var(--vscode-list-hoverBackground,rgba(127,127,127,.12));}
   .wt .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .wt .git{opacity:.6;font-size:12px;font-variant-numeric:tabular-nums;}
   .ahead{color:var(--vscode-charts-blue,#4aa3ff);} .dirty{color:var(--vscode-charts-yellow,#d2a000);}
   .repo{font-size:10px;text-transform:uppercase;letter-spacing:.6px;opacity:.5;margin:5px 0 1px;}
   .repo:first-child{margin-top:1px;}
-  .wt .arch,.wt .term,.wt .unr,.wt .del{opacity:0;cursor:pointer;padding:0 2px;font-size:12px;}
-  .wt:hover .arch,.wt:hover .term,.wt:hover .unr,.wt:hover .del{opacity:.55;} .wt .arch:hover,.wt .term:hover,.wt .unr:hover,.wt .del:hover{opacity:1;}
+  /* actions overlay the right edge (out of flex flow) so the name gets the full row width;
+     a left gradient fades the name out underneath them on hover. */
+  .wt .acts{position:absolute;right:3px;top:0;height:21px;display:flex;align-items:center;gap:0;opacity:0;pointer-events:none;padding-left:14px;background:linear-gradient(to right,transparent,var(--vscode-sideBar-background,#181818) 40%);}
+  .wt:hover .acts{opacity:1;pointer-events:auto;}
+  .wt .arch,.wt .term,.wt .unr,.wt .del{opacity:.55;cursor:pointer;padding:0 2px;font-size:12px;}
+  .wt .arch:hover,.wt .term:hover,.wt .unr:hover,.wt .del:hover{opacity:1;}
   .wt .term:hover,.wt .del:hover{color:var(--vscode-charts-red,#e5534b);}
   .wt .unr:hover{color:var(--vscode-charts-yellow,#d2a000);}
   .wt.sep{margin-top:7px;}   /* gap between status groups */
@@ -759,10 +763,11 @@ class DevSummaryProvider {
       return '<div class="wt'+(sep?' sep':'')+(w.active?' active':'')+(w.unread?' unread':'')+(w.current?' current':'')+'" data-slug="'+esc(w.slug)+'" data-name="'+esc(w.name)+'" data-glyph="'+g+'" title="'+esc(w.slug+' '+w.name)+(w.status?(' — '+w.status):'')+(w.active?' · active':'')+(w.current?' · selected':'')+(w.unread?' · unread':'')+' · click to open">'
         +'<span style="color:'+gc+'">'+gd+'</span><span class="nm">'+esc(w.name)+'</span>'
         +'<span class="git">'+git+'</span>'
+        +'<span class="acts">'
         +(w.active&&!w.unread?'<span class="unr" title="Mark unread (flag it yellow to revisit)">✉</span>':'')
         +(w.active?'<span class="term" title="End the tmux session (worktree stays)">⏹</span>':'')
         +'<span class="arch" title="Archive '+esc(w.name)+'">📦</span>'
-        +'<span class="del" title="Delete '+esc(w.name)+' (remove worktree)">🗑</span></div>';
+        +'<span class="del" title="Delete '+esc(w.name)+' (remove worktree)">🗑</span></span></div>';
     };
     // pinned plain-terminal row, just above the assistant — an ordinary shell for ad-hoc commands
     const termRow='<div class="wt asst'+(termState.current?' current':'')+(termState.active?' active':'')+'" id="termRow" title="plain terminal — a login shell in the dev base · click to open">'
