@@ -667,11 +667,12 @@ class DevSummaryProvider {
   .none{opacity:.5;font-size:12px;padding:2px 0;}
   .stale{opacity:.45;} .staleNote{font-size:10px;opacity:.6;font-style:italic;color:var(--vscode-charts-yellow,#d2a000);margin-top:1px;}
   hr{border:none;border-top:1px solid var(--vscode-panel-border,rgba(127,127,127,.2));margin:5px 0 4px;}
-  .head{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:4px;font-size:12px;margin-bottom:3px;}
-  .counts{opacity:.8;}
-  .btn{cursor:pointer;border:none;background:var(--vscode-button-secondaryBackground,rgba(127,127,127,.18));color:var(--vscode-button-secondaryForeground,inherit);border-radius:3px;padding:2px 6px;font-size:12px;display:inline-flex;align-items:center;justify-content:center;}
+  .head{display:flex;align-items:center;justify-content:space-between;flex-wrap:nowrap;gap:6px;font-size:12px;margin-bottom:3px;}
+  .counts{opacity:.8;flex:none;white-space:nowrap;}
+  .btns{display:flex;align-items:center;gap:3px;flex:none;}
+  .btn{cursor:pointer;border:none;white-space:nowrap;background:var(--vscode-button-secondaryBackground,rgba(127,127,127,.18));color:var(--vscode-button-secondaryForeground,inherit);border-radius:3px;padding:2px 5px;font-size:12px;display:inline-flex;align-items:center;justify-content:center;}
   .btn:hover{background:var(--vscode-button-secondaryHoverBackground,rgba(127,127,127,.3));}
-  .wt{position:relative;display:flex;align-items:center;gap:5px;height:21px;cursor:pointer;border-radius:3px;padding:0 3px;font-size:13px;}
+  .wt{position:relative;display:flex;align-items:center;gap:5px;height:21px;cursor:pointer;border-radius:3px;padding:0 3px 0 8px;font-size:13px;}
   .wt:hover{background:var(--vscode-list-hoverBackground,rgba(127,127,127,.12));}
   .wt .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .wt .git{opacity:.6;font-size:12px;font-variant-numeric:tabular-nums;}
@@ -708,7 +709,7 @@ class DevSummaryProvider {
 </style></head><body>
 <div id="lim"><div class="none">waiting for a session…</div></div>
 <hr>
-<div class="head"><span class="counts" id="counts"></span><span class="btn" id="img" title="Add an image to the focused session — pastes a clipboard screenshot, or pick a file (works around native-Windows terminal paste)">📷</span><span class="btn" id="bell" title="Turn-end sound alert — click to mute/unmute">🔔</span><span class="btn" id="prev" title="Open the focused worktree's design preview">🖼</span><span class="btn" id="tests" title="Include/exclude test files in the diff panes">tests ✓</span><span class="btn" id="add" title="Launch a new agent">+ agent</span></div>
+<div class="head"><span class="counts" id="counts"></span><span class="btns"><span class="btn" id="img" title="Add an image to the focused session — pastes a clipboard screenshot, or pick a file (works around native-Windows terminal paste)">📷</span><span class="btn" id="bell" title="Turn-end sound alert — click to mute/unmute">🔔</span><span class="btn" id="prev" title="Open the focused worktree's design preview">🖼</span><span class="btn" id="tests" title="Include/exclude test files in the diff panes">tests ✓</span><span class="btn" id="add" title="Launch a new agent">+ agent</span></span></div>
 <div id="roster"></div>
 <div id="monwrap">
 <hr>
