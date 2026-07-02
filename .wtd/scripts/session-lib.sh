@@ -106,15 +106,50 @@ wtd_session_current() {
 }
 
 # --- teardown -------------------------------------------------------------------------------
-# wtd_session_kill <session> [wt]  → end the session, keep the worktree
+# wtd_session_kill_stragglers <slug> <name>  → (vscode/Windows only) kill lingering launcher shells
+# for a worktree. The liveness registry is dropped the instant Claude's process exits (the EXIT trap
+# in wtd_session_run_claude), but the VSCode terminal's outer `bash -lc "agent '<slug>' '<name>'"`
+# shells can outlive it with the worktree as their cwd — which strands a locked (often empty) folder
+# on `git worktree remove`. Match those shells by command line and kill them; never touch this call's
+# OWN ancestor chain (the running rm/stop/archive), so we don't kill ourselves.
+wtd_session_kill_stragglers() {
+  [ "$(wtd_session_backend)" = tmux ] && return 0
+  command -v powershell >/dev/null 2>&1 || return 0
+  local slug="$1" name="$2"
+  [ -n "$slug" ] && [ -n "$name" ] || return 0
+  WTD_KSLUG="$slug" WTD_KNAME="$name" powershell -NoProfile -NonInteractive -Command '
+    $slug = ($env:WTD_KSLUG).ToLower(); $name = ($env:WTD_KNAME).ToLower()
+    $procs = Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine
+    $byId = @{}; foreach ($p in $procs) { $byId[[int]$p.ProcessId] = $p }
+    # walk up from THIS powershell so the whole rm/stop/archive call chain is spared
+    $skip = New-Object "System.Collections.Generic.HashSet[int]"
+    $cur = $PID
+    while ($cur -and $byId.ContainsKey([int]$cur) -and $skip.Add([int]$cur)) { $cur = [int]$byId[[int]$cur].ParentProcessId }
+    foreach ($p in $procs) {
+      if (-not $p.CommandLine) { continue }
+      if ($skip.Contains([int]$p.ProcessId)) { continue }
+      $c = $p.CommandLine.ToLower()
+      # the OPEN launcher: an `agent <slug> <name>` invocation that is not itself rm/stop/archive
+      if ($c.Contains("agent") -and $c.Contains($slug) -and $c.Contains($name) `
+          -and -not $c.Contains(" rm ") -and -not $c.Contains(" stop ") -and -not $c.Contains("archive")) {
+        try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop } catch {}
+      }
+    }
+  ' 2>/dev/null || true
+}
+
+# wtd_session_kill <session> [wt] [slug] [name]  → end the session, keep the worktree.
+# slug/name are optional but SHOULD be passed by callers that know them (agent rm/stop): the straggler
+# sweep still needs them after the registry file is already gone (the common case once Claude exited).
 wtd_session_kill() {
-  local session="$1" wt="${2:-}"
+  local session="$1" wt="${2:-}" slug="${3:-}" name="${4:-}"
   case "$(wtd_session_backend)" in
     tmux) tmux kill-session -t "=$session" 2>/dev/null ;;
     *)
-      local f pid; f="$(wtd_session_keyfile "$session")"
+      local f pid rslug rname; f="$(wtd_session_keyfile "$session")"
       if [ -f "$f" ]; then
-        IFS=$'\t' read -r _ _ _ pid _ < "$f"
+        IFS=$'\t' read -r rslug rname _ pid _ < "$f"
+        [ -z "$slug" ] && slug="$rslug"; [ -z "$name" ] && name="$rname"
         # best-effort stop the claude process tree so the VSCode terminal returns to a shell.
         if [ -n "${pid:-}" ]; then
           if command -v taskkill >/dev/null 2>&1; then taskkill //PID "$pid" //T //F >/dev/null 2>&1 || true
@@ -122,6 +157,8 @@ wtd_session_kill() {
         fi
       fi
       wtd_session_deregister "$session"
+      # sweep any launcher shells that outlived the registry (they hold the worktree dir open on Windows)
+      wtd_session_kill_stragglers "$slug" "$name"
       ;;
   esac
 }
