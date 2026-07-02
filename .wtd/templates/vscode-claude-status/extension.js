@@ -169,6 +169,7 @@ class DevSummaryProvider {
       t.show();
     }
     this._asstTerm = t; this._current = t;
+    this._unread[ASST_NAME] = false;   // opening/focusing the assistant clears its unread (like a worktree)
     setTimeout(() => this._postRoster(), 800);
   }
 
@@ -612,9 +613,17 @@ class DevSummaryProvider {
       w.active = live.has(w.slug + '-' + w.name);   // has a live tmux session (vs. closed/inactive)
       w.current = !!cur && (curKey ? key === curKey : (!!cur.name && cur.name === w.name));   // focused session
     }
-    // pinned assistant row state: live if a terminal named "assistant" exists; selected if it's focused
+    // pinned assistant row state: live if a terminal named "assistant" exists; selected if it's focused.
+    // Unread works exactly like a worktree row: the assistant's status sentinel (in the dev base) flips
+    // to 'input' (your turn) while you're not focused on it → highlight yellow; cleared when you focus it.
     const asstTerm = vscode.window.terminals.find((x) => x.name === ASST_NAME);
-    const assistant = { active: !!asstTerm, current: !!cur && cur.name === ASST_NAME };
+    const asstCurrent = !!cur && cur.name === ASST_NAME;
+    let asstStatus = ''; try { asstStatus = fs.readFileSync(path.join(DEV, STATUS_FILE), 'utf8').trim(); } catch {}
+    const aprev = this._lastStatus[ASST_NAME];
+    if (asstStatus === 'input' && aprev !== undefined && aprev !== 'input' && !asstCurrent) this._unread[ASST_NAME] = true;
+    this._lastStatus[ASST_NAME] = asstStatus;
+    if (asstCurrent) this._unread[ASST_NAME] = false;   // focused → clear (mirrors clearUnread on worktrees)
+    const assistant = { active: !!asstTerm, current: asstCurrent, unread: !!this._unread[ASST_NAME] };
     // pinned plain-terminal row state (same idea, for the "terminal" row above the assistant)
     const plainTerm = vscode.window.terminals.find((x) => x.name === TERM_NAME);
     const terminal = { active: !!plainTerm, current: !!cur && cur.name === TERM_NAME };
@@ -810,7 +819,7 @@ class DevSummaryProvider {
     const termRow='<div class="wt asst'+(termState.current?' current':'')+(termState.active?' active':'')+'" id="termRow" title="plain terminal — a login shell in the dev base · click to open">'
       +'<span class="agly">🖥️</span><span class="nm">terminal</span></div>';
     // pinned assistant row — separated from the worktrees, no status indicators
-    const asstRow='<div class="wt asst'+(asstState.current?' current':'')+(asstState.active?' active':'')+'" id="asstRow" title="worktree-dev assistant — fleet management · click to open">'
+    const asstRow='<div class="wt asst'+(asstState.current?' current':'')+(asstState.active?' active':'')+(asstState.unread?' unread':'')+'" id="asstRow" title="worktree-dev assistant — fleet management · click to open">'
       +'<span class="agly">🤖</span><span class="nm">assistant</span></div><div class="asstsep"></div>';
     document.getElementById('roster').innerHTML = termRow + asstRow + slugs.map(slug=>{
       const rows=groups[slug].sort((a,b)=>(PRIO[a.status]??9)-(PRIO[b.status]??9) || a.name.localeCompare(b.name));
