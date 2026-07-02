@@ -79,6 +79,21 @@ this session runs inside tmux, which doesn't report cwd to VSCode — so a relat
 `.claude/plans/active-plan.md` is NOT clickable. Absolute paths always are. If unsure of the
 worktree root, run `pwd` and prefix with it.
 
+## Commit messages
+
+Every commit gets a **terse, descriptive subject** with the detail in the **body** — never cram it all
+onto the subject line, never use vague subjects (`update`, `fix`, `wip`, `changes`). Use `/commit` to
+do this, or follow it by hand:
+
+- **Subject** — one line, ≤~70 chars, no trailing period; concretely name the change
+  (`tighten README — single-line rows, correct apps/services paths`). Lead with the scope when it
+  sharpens it. **No `type:` prefix, no AI attribution.** It becomes the one-line log entry and, after
+  squash-merge, the PR title + `#N` — so make it stand on its own.
+- **Blank line**, then a wrapped **body** explaining *what changed and why* — the motivation/tradeoff a
+  reviewer can't see from the diff. Prose and/or `-` bullets. Don't restate the diff.
+- **One commit = one coherent change** — split unrelated work. Same terse, factual voice as the
+  `pr-notes.md` spec below.
+
 ## PR messages
 
 When the user readies a PR or says the work is complete: first **actually run the matching status
