@@ -11,7 +11,7 @@ fp="$(printf '%s' "$in" | jq -r '.tool_input.file_path // .tool_input.path // em
 case "$fp" in
   */.claude/plans/*.html|*active-plan.html)
     pv="$HOME/.local/bin/preview"; [ -x "$pv" ] || pv=preview
-    ( "$pv" "$fp" >/dev/null 2>&1 || true ) &    # re-stage in the background; PWD is the worktree here
+    ( "$pv" "$fp" plan >/dev/null 2>&1 || true ) &    # re-stage the `plan` tab; PWD is the worktree here
     jq -n '{systemMessage: "🗺 living plan updated — preview panel refreshed", suppressOutput: true}' ;;
   */.claude/plans/*.md|*active-plan.md)
     jq -n '{systemMessage: "📋 plan updated — double-click  view_plan  to render it in the diff pane", suppressOutput: true}' ;;

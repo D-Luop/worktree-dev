@@ -307,6 +307,14 @@ fi
 mkdir -p "$wt/.claude/skills"
 cp -r "$WTD/templates/.claude/skills/." "$wt/.claude/skills/" 2>/dev/null || true
 
+# ensure the always-present living-plan preview tab exists (seed a placeholder until the agent writes a
+# real plan via /plan). Every worktree gets a 'plan' tab in the preview panel this way.
+pvplan="$WTD/state/previews/$repo/$name/plan.html"
+if [ ! -f "$pvplan" ]; then
+  mkdir -p "$(dirname "$pvplan")"
+  cp "$WTD/templates/plan-placeholder.html" "$pvplan" 2>/dev/null || true
+fi
+
 # --- per-repo hooks: merge .wtd/repo-hooks/<slug>.json into the worktree (idempotent) ---
 hookfrag="$WTD/repo-hooks/$repo.json"
 if [ -f "$hookfrag" ]; then

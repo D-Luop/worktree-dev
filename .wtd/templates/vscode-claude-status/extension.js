@@ -127,13 +127,15 @@ class DevSummaryProvider {
     this._current = null;         // the Terminal of the worktree session currently focused (marked in roster)
     this._asstTerm = null;        // the pinned assistant session's Terminal (focus instead of duplicate)
     this._term = null;            // the pinned plain terminal's Terminal (focus instead of duplicate)
-    this._preview = {};           // roster key -> staged design-preview .html path (🖼 on the row)
+    this._preview = {};           // roster key -> { label: staged-.html-path } (multiple previews/worktree)
     this._pvPanel = null;         // the design-preview WebviewPanel (follows the focused worktree)
     this._pvShownKey = null;      // roster key currently displayed in that panel
+    this._pvLabel = null;         // which preview label (tab) is currently rendered
+    this._pvLabelByKey = {};      // remembered tab selection per worktree key
     this._pvFollow = false;       // true once the user engages a preview → panel tracks focus
     this._pvAutoClosing = false;  // transient: distinguish a follow-driven close from a user close
-    this._pvTimer = null;         // mtime poll so an open panel live-refreshes when its file changes
-    this._pvMtimeMs = 0;          // last-rendered mtime of the shown preview file
+    this._pvTimer = null;         // poll so an open panel live-refreshes when its files change
+    this._pvSig = '';             // signature (labels+mtimes) of the last render, to detect changes
   }
   _key(slug, name) { return slug + '' + name; }
   clearUnread(key) { if (this._unread[key]) { this._unread[key] = false; this._postRoster(); } }
@@ -246,23 +248,59 @@ class DevSummaryProvider {
     });
   }
 
-  // map a staged preview file (…/state/previews/<slug>/<name>.html) back to a roster row key
+  // map a staged preview file (…/state/previews/<slug>/<name…>/<label>.html) back to slug/name/label.
+  // name may contain '/', so: first segment = slug, last = label, the middle = name. Needs ≥3 segments
+  // (old single-file layout has ≤2 and is ignored).
   _previewKey(fsPath) {
     let rel = path.relative(path.join(WTD, 'state', 'previews'), fsPath).replace(/\\/g, '/');
     if (rel.startsWith('..')) return null;
     rel = rel.replace(/\.html$/i, '');
-    const i = rel.indexOf('/');
-    if (i < 0) return null;
-    return { slug: rel.slice(0, i), name: rel.slice(i + 1) };
+    const segs = rel.split('/');
+    if (segs.length < 3) return null;
+    const slug = segs.shift(), label = segs.pop(), name = segs.join('/');
+    if (!slug || !name || !label) return null;
+    return { slug, name, label };
   }
+
+  // read all preview tabs for a worktree straight from disk into this._preview[key]; returns {label:path}
+  _scanPreviews(slug, name) {
+    const key = this._key(slug, name);
+    const dir = path.join(WTD, 'state', 'previews', slug, name);
+    const out = {};
+    try { for (const e of fs.readdirSync(dir, { withFileTypes: true }))
+      if (e.isFile() && /\.html$/i.test(e.name)) out[e.name.replace(/\.html$/i, '')] = path.join(dir, e.name); } catch {}
+    if (Object.keys(out).length) this._preview[key] = out; else delete this._preview[key];
+    return out;
+  }
+  // tab order: the living plan first, then alphabetical
+  _previewLabels(previews) {
+    return Object.keys(previews).sort((a, b) => (a === 'plan' ? -1 : b === 'plan' ? 1 : a.localeCompare(b)));
+  }
+  // which tab to show: explicit request → remembered selection → 'plan' → first
+  _pickLabel(key, want, previews) {
+    if (want && previews[want]) return want;
+    const rem = this._pvLabelByKey[key];
+    if (rem && previews[rem]) return rem;
+    if (previews.plan) return 'plan';
+    return this._previewLabels(previews)[0] || null;
+  }
+  _previewSig(previews) {
+    return this._previewLabels(previews).map((l) => {
+      let m = 0; try { m = fs.statSync(previews[l]).mtimeMs; } catch {} return l + ':' + m;
+    }).join('|');
+  }
+  _pvHtmlEsc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
 
   // open (or refresh) the design preview for a worktree in an editor-side webview panel. The HTML is
   // agent-authored, so it renders under a CSP: inline styles/scripts and data/https images only — no
   // network fetch. Self-contained mockups (inline CSS, data-URI images) are the intended input.
-  showPreview(slug, name, reveal = true) {
-    const file = path.join(WTD, 'state', 'previews', slug, name + '.html');
-    let raw; try { raw = fs.readFileSync(file, 'utf8'); }
-    catch { vscode.window.showInformationMessage('claude-status: no preview staged for ' + slug + ' ' + name); return; }
+  showPreview(slug, name, label, reveal = true) {
+    const key = this._key(slug, name);
+    const previews = this._scanPreviews(slug, name);
+    const labels = this._previewLabels(previews);
+    if (!labels.length) { vscode.window.showInformationMessage('claude-status: no preview staged for ' + slug + ' ' + name); return; }
+    const chosen = this._pickLabel(key, label, previews);
+    let raw; try { raw = fs.readFileSync(previews[chosen], 'utf8'); } catch { return; }
     this._pvFollow = true;   // engaging a preview → the panel now tracks the focused worktree
     if (!this._pvPanel) {
       this._pvPanel = vscode.window.createWebviewPanel('claudeStatus.preview', 'Design preview',
@@ -278,23 +316,34 @@ class DevSummaryProvider {
         if (!msg) return;
         if (msg.cmd === 'close' && this._pvPanel) this._pvPanel.dispose();
         else if (msg.cmd === 'planAction' && msg.title) this.startPlanItem(msg.id || '', msg.title);
+        else if (msg.cmd === 'pvSwitch' && msg.label && this._pvShownKey) {   // switcher tab clicked
+          const j = this._pvShownKey.indexOf('\x01');
+          if (j >= 0) this.showPreview(this._pvShownKey.slice(0, j), this._pvShownKey.slice(j + 1), msg.label);
+        }
       });
     }
     const csp = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; '
-      + 'img-src data: https:; style-src \'unsafe-inline\' https:; font-src data: https:; script-src \'unsafe-inline\';">';
-    // floating Close button overlaid on the mockup (in addition to the editor-tab X). acquireVsCodeApi
-    // is one-shot per webview, so grab it once in a script and wire the click to it.
-    // acquireVsCodeApi is one-shot per webview — grab it once here and wire BOTH the floating Close
-    // button and any ".go" (▶ Start) buttons the staged HTML may contain (the /plan living checklist).
-    // A ".go" click posts planAction with the item's id + title so the host can hand it to the session.
-    const closeBtn = '<div id="__wtclose" title="Close preview" '
-      + 'style="position:fixed;top:10px;right:12px;z-index:2147483647;background:#21262d;color:#e6edf3;'
-      + 'border:1px solid #444c56;border-radius:6px;padding:4px 10px;font:600 12px system-ui;cursor:pointer;opacity:.9;">✕ Close</div>'
+      + 'img-src data: https:; style-src \'unsafe-inline\' https:; font-src data: https:; script-src \'unsafe-inline\';">'
+      + '<style>body{padding-top:44px !important}</style>';   // clear the fixed switcher bar
+    // Fixed switcher bar at the very top: one button per preview this worktree has staged (living plan
+    // first), the active one highlighted, plus Close on the right. acquireVsCodeApi is one-shot per
+    // webview — grab it once and wire the tab switch, any ".go" (▶ Start) plan buttons, and Close.
+    const tab = (l) => '<button class="__wttab" data-label="' + this._pvHtmlEsc(l) + '" '
+      + 'style="cursor:pointer;white-space:nowrap;border-radius:6px;padding:3px 11px;font:600 12px system-ui;border:1px solid '
+      + (l === chosen ? '#2f81f7;background:#1f6feb;color:#fff' : '#30363d;background:#161b22;color:#adbac7') + ';">'
+      + this._pvHtmlEsc(l) + '</button>';
+    const bar = '<div id="__wtbar" style="position:fixed;top:0;left:0;right:0;z-index:2147483647;display:flex;align-items:center;'
+      + 'gap:6px;padding:6px 10px;background:#0d1117;border-bottom:1px solid #30363d;overflow-x:auto;">'
+      + labels.map(tab).join('') + '<span style="flex:1"></span>'
+      + '<div id="__wtclose" title="Close preview" style="cursor:pointer;white-space:nowrap;background:#21262d;color:#e6edf3;'
+      + 'border:1px solid #444c56;border-radius:6px;padding:3px 11px;font:600 12px system-ui;">✕ Close</div></div>'
       + '<script>(function(){var v=acquireVsCodeApi();'
       + 'var b=document.getElementById("__wtclose");if(b)b.addEventListener("click",function(){v.postMessage({cmd:"close"});});'
-      + 'document.addEventListener("click",function(e){var g=e.target.closest&&e.target.closest(".go");if(!g)return;'
-      + 'e.preventDefault();e.stopPropagation();var it=g.closest(".item");if(!it)return;'
-      + 'var idn=it.querySelector(".id"),tn=it.querySelector(".ttl");'
+      + 'document.addEventListener("click",function(e){'
+      + 'var tb=e.target.closest&&e.target.closest(".__wttab");'
+      + 'if(tb){e.preventDefault();v.postMessage({cmd:"pvSwitch",label:tb.getAttribute("data-label")});return;}'
+      + 'var g=e.target.closest&&e.target.closest(".go");if(!g)return;e.preventDefault();e.stopPropagation();'
+      + 'var it=g.closest(".item");if(!it)return;var idn=it.querySelector(".id"),tn=it.querySelector(".ttl");'
       + 'v.postMessage({cmd:"planAction",id:((idn&&idn.textContent)||"").trim(),title:((tn&&tn.textContent)||"").trim()});'
       + 'g.classList.add("go-fired");setTimeout(function(){g.classList.remove("go-fired");},1200);});'
       // preserve scroll position across live re-renders (setState survives an html swap on the same panel)
@@ -302,26 +351,26 @@ class DevSummaryProvider {
       + 'try{var st=v.getState&&v.getState();if(st&&st.y)window.scrollTo(0,st.y);}catch(e){}'
       + '})();</script>';
     let html = /<head[^>]*>/i.test(raw) ? raw.replace(/<head[^>]*>/i, (m) => m + csp) : csp + raw;
-    html = /<\/body>/i.test(html) ? html.replace(/<\/body>/i, closeBtn + '</body>') : html + closeBtn;
-    this._pvPanel.title = slug + '/' + name + ' — preview';
+    html = /<\/body>/i.test(html) ? html.replace(/<\/body>/i, bar + '</body>') : html + bar;
+    this._pvPanel.title = slug + '/' + name + ' — ' + chosen;
     this._pvPanel.webview.html = html;
-    this._pvShownKey = this._key(slug, name);
-    try { this._pvMtimeMs = fs.statSync(file).mtimeMs; } catch { this._pvMtimeMs = 0; }
-    // poll the shown file's mtime so an OPEN panel live-refreshes when an agent re-stages it — VSCode's
-    // file watcher misses the .wtd/state copy on Windows, so don't depend on it. Cleared on dispose.
+    this._pvShownKey = key; this._pvLabel = chosen; this._pvLabelByKey[key] = chosen;
+    this._pvSig = this._previewSig(previews);
+    // poll disk so an OPEN panel live-refreshes when files change (new tab / re-stage) — VSCode's file
+    // watcher misses the .wtd/state copy on Windows, so don't depend on it. Cleared on dispose.
     if (!this._pvTimer) this._pvTimer = setInterval(() => this._pollPreview(), 1000);
     if (reveal) this._pvPanel.reveal(vscode.ViewColumn.Beside, true);
   }
 
-  // refresh poll: if the shown preview's file changed on disk, re-render the open panel in place
-  // (no reveal → no focus steal; the injected script restores scroll so it doesn't jump).
+  // refresh poll: re-scan the shown worktree's preview dir; if a tab was added/removed or the shown
+  // file changed, re-render in place (no reveal → no focus steal; injected script restores scroll).
   _pollPreview() {
     if (!this._pvPanel || !this._pvShownKey) return;
     const i = this._pvShownKey.indexOf('\x01'); if (i < 0) return;
     const slug = this._pvShownKey.slice(0, i), name = this._pvShownKey.slice(i + 1);
-    const file = path.join(WTD, 'state', 'previews', slug, name + '.html');
-    let m = 0; try { m = fs.statSync(file).mtimeMs; } catch { return; }
-    if (m && m !== this._pvMtimeMs) this.showPreview(slug, name, false);   // showPreview updates _pvMtimeMs
+    const previews = this._scanPreviews(slug, name);
+    if (!Object.keys(previews).length) return;   // keep last content if the dir momentarily empties
+    if (this._previewSig(previews) !== this._pvSig) this.showPreview(slug, name, this._pvLabel, false);
   }
 
   // A ▶ Start button in the living-plan preview was clicked: hand that step to the worktree the panel
@@ -360,8 +409,8 @@ class DevSummaryProvider {
   // header 🖼 button: open the design preview for the worktree you're focused on (then it follows focus)
   previewFocused() {
     const key = this._focusedWorktreeKey();
-    if (key && this._preview[key]) this._showPreviewByKey(key);
-    else vscode.window.showInformationMessage('claude-status: no design preview for the focused session — an agent stages one with `preview <file>`.');
+    if (key && Object.keys(this._preview[key] || {}).length) this._showPreviewByKey(key);
+    else vscode.window.showInformationMessage('claude-status: no design preview for the focused session — an agent stages one with `preview <file> [label]`.');
   }
 
   // Keep the preview panel reflecting the focused worktree: show that worktree's staged preview, hide
@@ -372,7 +421,7 @@ class DevSummaryProvider {
     if (!this._pvFollow) return;
     let want = null;
     if (t && t.name !== ASST_NAME && t.name !== TERM_NAME) {
-      for (const [k, v] of this._terms) if (v === t && this._preview[k]) { want = k; break; }
+      for (const [k, v] of this._terms) if (v === t && Object.keys(this._preview[k] || {}).length) { want = k; break; }
       if (!want) for (const k of Object.keys(this._preview)) if (k.split('\x01')[1] === t.name) { want = k; break; }
     }
     if (want === this._pvShownKey) return;
@@ -960,22 +1009,22 @@ function activate(context) {
   // watch that tree so a 🖼 appears on the worktree's roster row, and clears when the file is removed.
   const pvDir = path.join(WTD, 'state', 'previews');
   const pvWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(pvDir, '**/*.html'));
-  const pvSet = (uri) => {
+  const pvChange = (uri) => {
     const k = dev._previewKey(uri.fsPath); if (!k) return;
     const key = dev._key(k.slug, k.name);
-    dev._preview[key] = uri.fsPath; dev._postRoster();
-    // live-refresh the open panel in place when the preview it's showing changes on disk (e.g. an
-    // agent re-stages its living plan after ticking a step) — no reveal, so focus isn't stolen.
-    if (dev._pvPanel && dev._pvShownKey === key) dev.showPreview(k.slug, k.name, false);
+    dev._scanPreviews(k.slug, k.name); dev._postRoster();   // refresh the worktree's tab set
+    // live-refresh the open panel in place when a preview it's showing changes (e.g. an agent re-stages
+    // its living plan, or adds a new tab) — no reveal, so focus isn't stolen. (Poll is the backstop.)
+    if (dev._pvPanel && dev._pvShownKey === key) dev.showPreview(k.slug, k.name, dev._pvLabel, false);
   };
-  const pvDel = (uri) => { const k = dev._previewKey(uri.fsPath); if (k) { delete dev._preview[dev._key(k.slug, k.name)]; dev._postRoster(); } };
-  pvWatcher.onDidCreate(pvSet); pvWatcher.onDidChange(pvSet); pvWatcher.onDidDelete(pvDel);
+  pvWatcher.onDidCreate(pvChange); pvWatcher.onDidChange(pvChange); pvWatcher.onDidDelete(pvChange);
   context.subscriptions.push(pvWatcher);
   // seed from any previews already on disk (so they survive a window reload)
   try { for (const slug of fs.readdirSync(pvDir, { withFileTypes: true }).filter((d) => d.isDirectory())) {
     const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) {
       const fp = path.join(d, e.name);
-      if (e.isDirectory()) walk(fp); else if (e.name.endsWith('.html')) { const k = dev._previewKey(fp); if (k) dev._preview[dev._key(k.slug, k.name)] = fp; }
+      if (e.isDirectory()) walk(fp);
+      else if (e.name.endsWith('.html')) { const k = dev._previewKey(fp); if (k) (dev._preview[dev._key(k.slug, k.name)] = dev._preview[dev._key(k.slug, k.name)] || {})[k.label] = fp; }
     } };
     walk(path.join(pvDir, slug.name));
   } } catch {}
