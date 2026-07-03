@@ -132,6 +132,8 @@ class DevSummaryProvider {
     this._pvShownKey = null;      // roster key currently displayed in that panel
     this._pvFollow = false;       // true once the user engages a preview → panel tracks focus
     this._pvAutoClosing = false;  // transient: distinguish a follow-driven close from a user close
+    this._pvTimer = null;         // mtime poll so an open panel live-refreshes when its file changes
+    this._pvMtimeMs = 0;          // last-rendered mtime of the shown preview file
   }
   _key(slug, name) { return slug + '' + name; }
   clearUnread(key) { if (this._unread[key]) { this._unread[key] = false; this._postRoster(); } }
@@ -268,6 +270,7 @@ class DevSummaryProvider {
         { enableScripts: true, retainContextWhenHidden: true });
       this._pvPanel.onDidDispose(() => {
         this._pvPanel = null; this._pvShownKey = null;
+        if (this._pvTimer) { clearInterval(this._pvTimer); this._pvTimer = null; }   // stop the refresh poll
         if (this._pvAutoClosing) this._pvAutoClosing = false;   // we closed it to follow focus → keep following
         else this._pvFollow = false;                            // the user closed it → stop following
       });
@@ -294,13 +297,31 @@ class DevSummaryProvider {
       + 'var idn=it.querySelector(".id"),tn=it.querySelector(".ttl");'
       + 'v.postMessage({cmd:"planAction",id:((idn&&idn.textContent)||"").trim(),title:((tn&&tn.textContent)||"").trim()});'
       + 'g.classList.add("go-fired");setTimeout(function(){g.classList.remove("go-fired");},1200);});'
+      // preserve scroll position across live re-renders (setState survives an html swap on the same panel)
+      + 'window.addEventListener("scroll",function(){try{v.setState({y:window.scrollY});}catch(e){}},{passive:true});'
+      + 'try{var st=v.getState&&v.getState();if(st&&st.y)window.scrollTo(0,st.y);}catch(e){}'
       + '})();</script>';
     let html = /<head[^>]*>/i.test(raw) ? raw.replace(/<head[^>]*>/i, (m) => m + csp) : csp + raw;
     html = /<\/body>/i.test(html) ? html.replace(/<\/body>/i, closeBtn + '</body>') : html + closeBtn;
     this._pvPanel.title = slug + '/' + name + ' — preview';
     this._pvPanel.webview.html = html;
     this._pvShownKey = this._key(slug, name);
+    try { this._pvMtimeMs = fs.statSync(file).mtimeMs; } catch { this._pvMtimeMs = 0; }
+    // poll the shown file's mtime so an OPEN panel live-refreshes when an agent re-stages it — VSCode's
+    // file watcher misses the .wtd/state copy on Windows, so don't depend on it. Cleared on dispose.
+    if (!this._pvTimer) this._pvTimer = setInterval(() => this._pollPreview(), 1000);
     if (reveal) this._pvPanel.reveal(vscode.ViewColumn.Beside, true);
+  }
+
+  // refresh poll: if the shown preview's file changed on disk, re-render the open panel in place
+  // (no reveal → no focus steal; the injected script restores scroll so it doesn't jump).
+  _pollPreview() {
+    if (!this._pvPanel || !this._pvShownKey) return;
+    const i = this._pvShownKey.indexOf('\x01'); if (i < 0) return;
+    const slug = this._pvShownKey.slice(0, i), name = this._pvShownKey.slice(i + 1);
+    const file = path.join(WTD, 'state', 'previews', slug, name + '.html');
+    let m = 0; try { m = fs.statSync(file).mtimeMs; } catch { return; }
+    if (m && m !== this._pvMtimeMs) this.showPreview(slug, name, false);   // showPreview updates _pvMtimeMs
   }
 
   // A ▶ Start button in the living-plan preview was clicked: hand that step to the worktree the panel
