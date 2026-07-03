@@ -21,12 +21,15 @@ so it opens with one click from the roster.
    - Any JS inline in a `<script>` block (keep it minimal — these are mockups).
    Put it anywhere convenient (e.g. the scratchpad or the worktree root).
 
-2. **Stage it** from inside the worktree:
+2. **Stage it** from inside the worktree, with a short **label** (the switcher-button name):
    ```
-   preview <file.html>
+   preview <file.html> <label>
    ```
-   This copies it to `.wtd/state/previews/<slug>/<name>.html`; the extension shows a 🖼 on this
-   worktree's roster row.
+   e.g. `preview dashboard.html dashboard`. A worktree can hold **many** previews at once — each label
+   is its own tab along the top of the preview panel, so staging a new label **adds a tab** rather than
+   replacing the plan or another mockup. (`label` defaults to the filename if omitted; the living plan
+   uses the reserved label `plan`.) This stages to `.wtd/state/previews/<slug>/<name>/<label>.html`.
 
-3. **Tell the user** it's ready: "Staged a preview — click the 🖼 on this worktree's row to open it."
-   Re-run `preview` with the same/updated file to refresh; the open panel updates in place.
+3. **Tell the user** it's ready: "Staged a preview — open the panel (🖼) and pick the '<label>' tab."
+   Re-run `preview` with the same file+label to refresh; the open panel updates live (no reopen). Use a
+   **new label** for an additional preview, the **same label** to update an existing one.

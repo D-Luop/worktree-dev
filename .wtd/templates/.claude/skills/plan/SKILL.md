@@ -55,7 +55,7 @@ panel. You don't wire anything for this; the panel host does. Just write clear t
 ## 3. Stage it in the panel
 From the worktree root:
 ```
-preview .claude/plans/active-plan.html
+preview .claude/plans/active-plan.html plan
 ```
 A 🖼 appears on this worktree's roster row. Tell the user: **"Living plan staged — click the 🖼 on
 this worktree's row to watch it; hit ▶ Start on any step to kick it off."**
