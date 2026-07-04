@@ -155,10 +155,12 @@ class DevSummaryProvider {
   openOrFocus(slug, name, glyph) {
     const key = this._key(slug, name);
     let t = this._terms.get(key);
+    // Only reuse a LIVE terminal. After a window reload the tab may be revived but its agent/claude
+    // process already exited (exitStatus set) — reusing it would focus a dead tab that never relaunches.
     if (!t || t.exitStatus !== undefined) {
-      t = vscode.window.terminals.find((x) => x.name === name);
+      t = vscode.window.terminals.find((x) => x.name === name && x.exitStatus === undefined);
     }
-    if (t) { t.show(); }
+    if (t && t.exitStatus === undefined) { t.show(); }
     else {
       const nm = name;   // tab = worktree name only (no slug, no status glyph — status shows in the roster)
       t = vscode.window.createTerminal({ name: nm, location: vscode.TerminalLocation.Editor,
@@ -175,8 +177,8 @@ class DevSummaryProvider {
   // no slug/worktree of its own; `assistant` (the PATH command) handles resume.
   openOrFocusAssistant() {
     let t = this._asstTerm;
-    if (!t || t.exitStatus !== undefined) t = vscode.window.terminals.find((x) => x.name === ASST_NAME);
-    if (t) { t.show(); }
+    if (!t || t.exitStatus !== undefined) t = vscode.window.terminals.find((x) => x.name === ASST_NAME && x.exitStatus === undefined);
+    if (t && t.exitStatus === undefined) { t.show(); }
     else {
       t = vscode.window.createTerminal({ name: ASST_NAME, location: vscode.TerminalLocation.Editor,
         shellPath: bashShell(), shellArgs: ['-lc', 'assistant'] });
@@ -191,8 +193,8 @@ class DevSummaryProvider {
   // ad-hoc commands. Like the assistant row, but runs no Claude session — just an interactive shell.
   openOrFocusTerminal() {
     let t = this._term;
-    if (!t || t.exitStatus !== undefined) t = vscode.window.terminals.find((x) => x.name === TERM_NAME);
-    if (t) { t.show(); }
+    if (!t || t.exitStatus !== undefined) t = vscode.window.terminals.find((x) => x.name === TERM_NAME && x.exitStatus === undefined);
+    if (t && t.exitStatus === undefined) { t.show(); }
     else {
       t = vscode.window.createTerminal({ name: TERM_NAME, location: vscode.TerminalLocation.Editor,
         shellPath: bashShell(), shellArgs: ['-l', '-i'] });
