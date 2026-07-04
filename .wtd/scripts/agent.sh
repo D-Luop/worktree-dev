@@ -45,10 +45,34 @@ if [ "${1:-}" = "rm" ]; then
   if [ -z "$rmrepo" ] || [ -z "$rmname" ]; then
     echo "usage: agent rm <slug> <name> [--branch] [--force] [-y]"; exit 1
   fi
-  registered "$rmrepo" || { echo "error: repo slug '$rmrepo' is not registered."; exit 1; }
-  rmbare="$DEV/repos/$rmrepo/.bare"
   rmwt="$DEV/worktrees/$rmrepo/$rmname"
   rmsession="${rmrepo}-${rmname}"; rmsession="${rmsession//[.:]/-}"
+
+  # --- planning agent (reserved 'plan' slug): a standalone git-init folder, not a bare-backed worktree.
+  # Kill its session and just delete the folder — there's no bare repo or branch to prune.
+  if [ "$rmrepo" = plan ]; then
+    echo "About to remove planning agent:"
+    printf '  session      : %-32s %s\n' "$rmsession" "$(wtd_session_exists "$rmsession" && echo '(running)' || echo '(none)')"
+    printf '  folder       : %-32s %s\n' "$rmwt" "$([ -d "$rmwt" ] && echo '' || echo '(missing)')"
+    if [ "$assume_yes" != 1 ]; then
+      printf 'Proceed? [y/N] '; read -r ans || ans=""
+      case "$ans" in y|Y|yes|YES) ;; *) echo "aborted"; exit 1;; esac
+    fi
+    wtd_session_kill "$rmsession" "$rmwt" "$rmrepo" "$rmname" && echo "killed session $rmsession" || echo "no running session $rmsession"
+    if [ -d "$rmwt" ]; then
+      rm -rf "$rmwt" 2>/dev/null && echo "removed $rmwt" || { echo "could not remove $rmwt (a process may still hold it — close its terminal tab, then retry)"; exit 1; }
+      rmdir "$(dirname "$rmwt")" 2>/dev/null || true   # tidy an empty worktrees/plan parent
+    else
+      echo "folder not present."
+    fi
+    wtd_session_id_forget "$rmsession"
+    rm -rf "$DEV/.wtd/state/previews/plan/$rmname" 2>/dev/null || true
+    echo "done."
+    exit 0
+  fi
+
+  registered "$rmrepo" || { echo "error: repo slug '$rmrepo' is not registered."; exit 1; }
+  rmbare="$DEV/repos/$rmrepo/.bare"
 
   echo "About to remove:"
   printf '  session      : %-32s %s\n' "$rmsession" "$(wtd_session_exists "$rmsession" && echo '(running)' || echo '(none)')"
@@ -214,18 +238,27 @@ if [ -z "$repo" ] || [ -z "$name" ]; then
   exit 1
 fi
 
-# repo must be registered + cloned
-if ! registered "$repo"; then
-  echo "error: repo slug '$repo' is not registered."; echo
-  list_repos
-  exit 1
-fi
-bare="$DEV/repos/$repo/.bare"
-if [ ! -d "$bare" ]; then
-  url="$(awk -F'\t' -v s="$repo" '!/^#/ && $1==s{print $2; exit}' "$REG")"
-  echo "error: repo '$repo' is registered but not cloned yet."
-  echo "       run: add-repo $repo ${url:-<git-url>}"
-  exit 1
+# The reserved 'plan' slug is a REPO-LESS planning agent: a standalone git-init folder under
+# worktrees/plan/<name> (no bare repo, no branch tracking) for scoping a brand-new application before
+# it has a repo. Everything else below (skills, plan preview, session) is shared with real worktrees.
+is_plan=0; [ "$repo" = plan ] && is_plan=1
+
+# repo must be registered + cloned (planning agents skip this — they have no bare repo)
+if [ "$is_plan" != 1 ]; then
+  if ! registered "$repo"; then
+    echo "error: repo slug '$repo' is not registered."; echo
+    list_repos
+    exit 1
+  fi
+  bare="$DEV/repos/$repo/.bare"
+  if [ ! -d "$bare" ]; then
+    url="$(awk -F'\t' -v s="$repo" '!/^#/ && $1==s{print $2; exit}' "$REG")"
+    echo "error: repo '$repo' is registered but not cloned yet."
+    echo "       run: add-repo $repo ${url:-<git-url>}"
+    exit 1
+  fi
+else
+  bare=""
 fi
 
 # tmux session names can't contain '.' or ':'; namespace by repo so names can repeat across repos
@@ -234,8 +267,9 @@ session="${session//[.:]/-}"
 wt="$DEV/worktrees/$repo/$name"
 
 # --- if this name is ARCHIVED, offer to reopen it instead of creating a new worktree ---
+# (planning agents aren't archived — they have no bare repo to `worktree move` from)
 arc="$DEV/worktrees/$repo/archive/$name"
-if [ ! -d "$wt" ] && [ -d "$arc" ]; then
+if [ "$is_plan" != 1 ] && [ ! -d "$wt" ] && [ -d "$arc" ]; then
   echo "An archived worktree for '$name' exists at: $arc"
   printf 'Reopen it (move it back into the active worktrees)? [Y/n] '
   read -r ans </dev/tty || ans=""
@@ -252,24 +286,39 @@ fi
 
 # --- create worktree on first call ---
 if [ ! -d "$wt" ]; then
-  git -c safe.bareRepository=all -C "$bare" fetch origin
-  if git -c safe.bareRepository=all -C "$bare" show-ref --verify --quiet "refs/heads/$name"; then
-    [ -n "$from" ] && echo "note: local branch '$name' already exists; ignoring --from"
-    git -c safe.bareRepository=all -C "$bare" worktree add "$wt" "$name"                        # existing local branch
-  elif git -c safe.bareRepository=all -C "$bare" show-ref --verify --quiet "refs/remotes/origin/$name"; then
-    [ -n "$from" ] && echo "note: remote branch 'origin/$name' already exists; ignoring --from"
-    git -c safe.bareRepository=all -C "$bare" worktree add --track -b "$name" "$wt" "origin/$name"   # premade remote branch
+  if [ "$is_plan" = 1 ]; then
+    # planning agent: a plain git-init folder (no bare, no branch off a remote). Any scaffolding the
+    # agent produces is version-controlled here and can later become the new app's real repo.
+    mkdir -p "$wt"
+    git -C "$wt" init -q
+    git -C "$wt" symbolic-ref HEAD refs/heads/main 2>/dev/null || true
   else
-    # brand-new branch: base off --from if given, else the remote's default branch
-    if [ -n "$from" ]; then
-      if   git -c safe.bareRepository=all -C "$bare" rev-parse --verify --quiet "refs/remotes/origin/$from" >/dev/null; then base="origin/$from"
-      elif git -c safe.bareRepository=all -C "$bare" rev-parse --verify --quiet "$from" >/dev/null;                      then base="$from"
-      else echo "error: --from ref '$from' not found in '$repo' (tried origin/$from and $from)"; exit 1; fi
-    else
-      base="$(git -c safe.bareRepository=all -C "$bare" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/@@')"
-      base="${base:-origin/main}"
+    # local-only repos (add-repo --new) have no origin yet — skip the fetch.
+    if git -c safe.bareRepository=all -C "$bare" remote get-url origin >/dev/null 2>&1; then
+      git -c safe.bareRepository=all -C "$bare" fetch origin
     fi
-    git -c safe.bareRepository=all -C "$bare" worktree add "$wt" -b "$name" "$base"            # new branch off "$base"
+    if git -c safe.bareRepository=all -C "$bare" show-ref --verify --quiet "refs/heads/$name"; then
+      [ -n "$from" ] && echo "note: local branch '$name' already exists; ignoring --from"
+      git -c safe.bareRepository=all -C "$bare" worktree add "$wt" "$name"                        # existing local branch
+    elif git -c safe.bareRepository=all -C "$bare" show-ref --verify --quiet "refs/remotes/origin/$name"; then
+      [ -n "$from" ] && echo "note: remote branch 'origin/$name' already exists; ignoring --from"
+      git -c safe.bareRepository=all -C "$bare" worktree add --track -b "$name" "$wt" "origin/$name"   # premade remote branch
+    else
+      # brand-new branch: base off --from if given, else the repo's default branch
+      if [ -n "$from" ]; then
+        if   git -c safe.bareRepository=all -C "$bare" rev-parse --verify --quiet "refs/remotes/origin/$from" >/dev/null; then base="origin/$from"
+        elif git -c safe.bareRepository=all -C "$bare" rev-parse --verify --quiet "$from" >/dev/null;                      then base="$from"
+        else echo "error: --from ref '$from' not found in '$repo' (tried origin/$from and $from)"; exit 1; fi
+      elif git -c safe.bareRepository=all -C "$bare" remote get-url origin >/dev/null 2>&1; then
+        base="$(git -c safe.bareRepository=all -C "$bare" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/@@')"
+        base="${base:-origin/main}"
+      else
+        # local-only repo: branch off the bare's local default (its HEAD, seeded by add-repo --new)
+        base="$(git -c safe.bareRepository=all -C "$bare" symbolic-ref --quiet HEAD 2>/dev/null | sed 's@^refs/heads/@@')"
+        base="${base:-main}"
+      fi
+      git -c safe.bareRepository=all -C "$bare" worktree add "$wt" -b "$name" "$base"            # new branch off "$base"
+    fi
   fi
   # seed: stub CLAUDE.md + .claude scaffolding (plans dir); template skills are refreshed below on
   # EVERY open (not just creation), so new skills reach existing worktrees too.
@@ -291,8 +340,10 @@ if [ ! -d "$wt" ]; then
     done < <(find "$envsrc" -type f -print0)
   fi
 
-  # never commit worktree-dev scratch artifacts: add them to this repo's bare exclude (idempotent)
-  exclude="$bare/info/exclude"
+  # never commit worktree-dev scratch artifacts: add them to git's exclude (idempotent). For a real
+  # worktree that's the bare's info/exclude; for a planning agent it's the git-init repo's own.
+  if [ "$is_plan" = 1 ]; then exclude="$wt/.git/info/exclude"; else exclude="$bare/info/exclude"; fi
+  mkdir -p "$(dirname "$exclude")"; [ -f "$exclude" ] || : > "$exclude"
   if [ -f "$exclude" ]; then
     for ign in CLAUDE.md pr-notes.md .claude-status .claude-status.resume; do
       grep -qxF "$ign" "$exclude" && continue
