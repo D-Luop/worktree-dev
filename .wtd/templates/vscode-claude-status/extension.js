@@ -71,6 +71,15 @@ function bashShell() {
   return 'bash.exe';
 }
 
+// Dispose any terminals with this name whose process has already exited (exitStatus set). A window
+// reload revives editor terminal tabs but not their agent/claude process, leaving dead tabs behind;
+// reaping them before re-launching keeps a stale dead tab from shadowing (or being focused instead of)
+// a fresh live session — the "clicking a stopped worktree does nothing" symptom.
+function disposeDeadTerminals(name) {
+  for (const x of vscode.window.terminals)
+    if (x.name === name && x.exitStatus !== undefined) { try { x.dispose(); } catch {} }
+}
+
 // Slugs registered in .wtd/repos.tsv (first tab-separated field of each non-comment line). Lets the
 // roster tell a known repo from a brand-new one when you launch an agent with a slug it's never seen.
 function registeredSlugs() {
@@ -162,6 +171,7 @@ class DevSummaryProvider {
     }
     if (t && t.exitStatus === undefined) { t.show(); }
     else {
+      disposeDeadTerminals(name);   // reap reload-orphaned dead tabs so they can't be focused instead
       const nm = name;   // tab = worktree name only (no slug, no status glyph — status shows in the roster)
       t = vscode.window.createTerminal({ name: nm, location: vscode.TerminalLocation.Editor,
         shellPath: bashShell(), shellArgs: ['-lc', 'agent ' + shq(slug) + ' ' + shq(name)] });
@@ -180,6 +190,7 @@ class DevSummaryProvider {
     if (!t || t.exitStatus !== undefined) t = vscode.window.terminals.find((x) => x.name === ASST_NAME && x.exitStatus === undefined);
     if (t && t.exitStatus === undefined) { t.show(); }
     else {
+      disposeDeadTerminals(ASST_NAME);
       t = vscode.window.createTerminal({ name: ASST_NAME, location: vscode.TerminalLocation.Editor,
         shellPath: bashShell(), shellArgs: ['-lc', 'assistant'] });
       t.show();
@@ -196,6 +207,7 @@ class DevSummaryProvider {
     if (!t || t.exitStatus !== undefined) t = vscode.window.terminals.find((x) => x.name === TERM_NAME && x.exitStatus === undefined);
     if (t && t.exitStatus === undefined) { t.show(); }
     else {
+      disposeDeadTerminals(TERM_NAME);
       t = vscode.window.createTerminal({ name: TERM_NAME, location: vscode.TerminalLocation.Editor,
         shellPath: bashShell(), shellArgs: ['-l', '-i'] });
       t.show();
