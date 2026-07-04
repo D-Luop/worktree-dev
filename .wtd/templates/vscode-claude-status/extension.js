@@ -71,6 +71,16 @@ function bashShell() {
   return 'bash.exe';
 }
 
+// Slugs registered in .wtd/repos.tsv (first tab-separated field of each non-comment line). Lets the
+// roster tell a known repo from a brand-new one when you launch an agent with a slug it's never seen.
+function registeredSlugs() {
+  try {
+    return fs.readFileSync(path.join(WTD, 'repos.tsv'), 'utf8')
+      .split('\n').map((l) => l.trim()).filter((l) => l && l[0] !== '#')
+      .map((l) => l.split('\t')[0]).filter(Boolean);
+  } catch { return []; }
+}
+
 // Run a .wtd shell script or a shebang wrapper (archive/agent/refresh-diffs/monitor-stats). On Windows
 // these aren't directly spawnable — cp.execFile throws EFTYPE — so route them through Git Bash (with
 // forward-slash paths it can stat); elsewhere exec them directly. Crucially this NEVER throws
@@ -510,16 +520,46 @@ class DevSummaryProvider {
         });
       } else if (m.cmd === 'newAgent') {
         vscode.window.showInputBox({
-          prompt: 'New agent — enter: <slug> <name> [ref-tokens…]',
-          placeHolder: '<slug> feat/my-thing',
+          prompt: 'New agent — enter: <slug> <name> [ref-tokens…]   (slug "plan" = a repo-less planning agent)',
+          placeHolder: 'plan my-new-app    ·    <slug> feat/my-thing',
         }).then((v) => {
-          if (v && v.trim()) {
-            const nm = (v.trim().split(/\s+/)[1] || v.trim().split(/\s+/)[0] || 'agent');   // tab = the <name> token (no slug)
+          if (!v || !v.trim()) return;
+          const raw = v.trim();
+          const toks = raw.split(/\s+/);
+          const slug = toks[0], name = toks[1] || '';
+          const launch = () => {
+            const nm = name || slug || 'agent';   // tab = the <name> token (no slug)
             const t = vscode.window.createTerminal({ name: nm, location: vscode.TerminalLocation.Editor,
-              shellPath: bashShell(), shellArgs: ['-lc', 'agent ' + v.trim()] });
+              shellPath: bashShell(), shellArgs: ['-lc', 'agent ' + raw] });
             t.show();
             setTimeout(() => this._postRoster(), 2500);
-          }
+          };
+          // 'plan' is the reserved repo-less planning slug; a registered slug launches straight away.
+          // A brand-new slug (with a name to open) offers to create the repo for a new application.
+          const known = new Set(registeredSlugs());
+          if (slug === 'plan' || known.has(slug) || !name) { launch(); return; }
+          vscode.window.showWarningMessage(
+            "'" + slug + "' isn't a registered repo. Create it for a new application?",
+            { modal: true, detail: 'New empty repo: a fresh local git repo (no remote yet) — start scaffolding immediately, add a GitHub remote later.\nClone from URL: bare-clone an existing remote.\nOr use the reserved "plan" slug for a repo-less planning agent.' },
+            'New empty repo', 'Clone from URL…'
+          ).then((ch) => {
+            const addRepo = path.join(HOME, '.local', 'bin', 'add-repo');
+            if (ch === 'New empty repo') {
+              execScript(addRepo, ['--new', slug], { timeout: 30000 }, (e, so, se) => {
+                if (e) { vscode.window.showErrorMessage('create repo failed: ' + ((se || '').trim() || e.message)); return; }
+                launch();
+              });
+            } else if (ch === 'Clone from URL…') {
+              vscode.window.showInputBox({ prompt: 'Git URL to clone for "' + slug + '"', placeHolder: 'https://github.com/you/repo.git' })
+                .then((url) => {
+                  if (!url || !url.trim()) return;
+                  execScript(addRepo, [slug, url.trim()], { timeout: 120000 }, (e, so, se) => {
+                    if (e) { vscode.window.showErrorMessage('clone failed: ' + ((se || '').trim() || e.message)); return; }
+                    launch();
+                  });
+                });
+            }
+          });
         });
       } else if (m.cmd === 'newAssistant') {
         this.openOrFocusAssistant();
