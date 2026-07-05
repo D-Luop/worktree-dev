@@ -71,6 +71,16 @@ function bashShell() {
   return 'bash.exe';
 }
 
+// TEMP diagnostic: append a line to .wtd/state/open-debug.log so we can see exactly what the open path
+// does at click time (which branch, terminal name/liveness, the full terminal list). Remove once fixed.
+function _dbg(msg) {
+  try { fs.appendFileSync(path.join(WTD, 'state', 'open-debug.log'), new Date().toISOString() + ' ' + msg + '\n'); } catch {}
+}
+function _termDump() {
+  try { return vscode.window.terminals.map((x) => x.name + ':' + (x.exitStatus === undefined ? 'live' : 'dead')).join(' | '); }
+  catch (e) { return 'ERR ' + (e && e.message); }
+}
+
 // Dispose any terminals with this name whose process has already exited (exitStatus set). A window
 // reload revives editor terminal tabs but not their agent/claude process, leaving dead tabs behind;
 // reaping them before re-launching keeps a stale dead tab from shadowing (or being focused instead of)
@@ -159,18 +169,85 @@ class DevSummaryProvider {
   _key(slug, name) { return slug + '' + name; }
   clearUnread(key) { if (this._unread[key]) { this._unread[key] = false; this._postRoster(); } }
   markUnread(key) { if (!this._unread[key]) { this._unread[key] = true; this._postRoster(); } }
+  // The Claude account a worktree session currently runs under: its durable binding (set by
+  // `account switch`) if any, else 'default'. Mirrors agent.sh's resolution for display/target-picking.
+  _bindingAccount(slug, name) {
+    const session = (slug + '-' + name).replace(/[.:]/g, '-').replace(/\//g, '__');
+    try { return (fs.readFileSync(path.join(WTD, 'state', 'session-accounts', session), 'utf8').trim()) || 'default'; }
+    catch { return 'default'; }
+  }
+  // Pick the switch target: the logged-in account with the MOST remaining capacity (lowest max 5h/7d
+  // utilization), excluding the current one and any fully-maxed. Uses the usage the panel already
+  // polled (this._lastUsage) so we don't re-hit the rate-limited usage endpoint. null if none qualify.
+  _pickSwitchTarget(currentName) {
+    let best = null, bestUtil = 101;
+    for (const a of this._accounts()) {
+      if (a.name === currentName) continue;
+      let email = '', tok = '';
+      try { email = (JSON.parse(fs.readFileSync(a.json, 'utf8')).oauthAccount || {}).emailAddress || ''; } catch {}
+      try { tok = (JSON.parse(fs.readFileSync(path.join(a.dir, '.credentials.json'), 'utf8')).claudeAiOauth || {}).accessToken || ''; } catch {}
+      if (!email || !tok) continue;                       // not logged in → skip
+      const u = this._lastUsage[a.name];
+      const util = u ? Math.max((u.five_hour && u.five_hour.used) || 0, (u.seven_day && u.seven_day.used) || 0) : 0;
+      if (util >= 100) continue;                          // fully maxed → skip
+      if (util < bestUtil) { bestUtil = util; best = a.name; }
+    }
+    return best;
+  }
+  // Roster ⇄ action: move this session to the account with the most capacity, then reopen it there and
+  // compact. Claude can't hot-swap accounts in place, so `account switch` copies the transcript into the
+  // target account's store + records the binding; we then relaunch (agent resumes under the new account)
+  // and auto-/compact to shrink context. Compaction runs on the TARGET account because the source is
+  // typically exhausted (can't compact) — end state is: new account, compacted chat.
+  switchAccount(slug, name) {
+    const cur = this._bindingAccount(slug, name);
+    const target = this._pickSwitchTarget(cur);
+    if (!target) {
+      vscode.window.showWarningMessage('No other logged-in account with remaining capacity to switch to. Add one with `account add <name>` (then log in), or check `account ls`.');
+      return;
+    }
+    vscode.window.showWarningMessage(
+      'Switch ' + slug + ' ' + name + " from '" + cur + "' to '" + target + "'?",
+      { modal: true, detail: 'The session reopens under ' + target + " (same conversation, via transcript copy) and auto-compacts to shrink context. Claude can't swap accounts in place, so the terminal restarts." },
+      'Switch account'
+    ).then((ch) => {
+      if (ch !== 'Switch account') return;
+      execScript(path.join(HOME, '.local', 'bin', 'account'), ['switch', slug, name, '--to', target], { timeout: 60000 }, (e, so, se) => {
+        const out = ((se || '') + (so || '')).trim();
+        if (e) { vscode.window.showErrorMessage('account switch failed: ' + (out || e.message)); return; }
+        vscode.window.showInformationMessage('Switched ' + name + " → '" + target + "'. Reopening under it and compacting…");
+        this._relaunchAndCompact(slug, name);
+      });
+    });
+  }
+  // Kill the session's terminal and reopen it (agent.sh now reads the new binding → resumes under the
+  // target account), then send /compact once it's back up.
+  _relaunchAndCompact(slug, name) {
+    const key = this._key(slug, name);
+    const t = this._terms.get(key) || vscode.window.terminals.find((x) => x.name === name);
+    if (t) { try { t.dispose(); } catch {} this._terms.delete(key); }
+    setTimeout(() => {
+      this.openOrFocus(slug, name);
+      setTimeout(() => { const nt = this._terms.get(key); if (nt && nt.exitStatus === undefined) nt.sendText('/compact', true); }, 7000);
+    }, 1400);
+  }
   // a roster row was opened: focus the existing terminal if we have one (incl. a reload-revived tab
   // matched by name), otherwise launch a new one.
   openOrFocus(slug, name, glyph) {
     const key = this._key(slug, name);
+    let branch = '?';
+    try {
+    _dbg(`OPEN slug=${JSON.stringify(slug)} name=${JSON.stringify(name)} | terms=[${_termDump()}]`);
     let t = this._terms.get(key);
+    const inMap = !!t;
     // Only reuse a LIVE terminal. After a window reload the tab may be revived but its agent/claude
     // process already exited (exitStatus set) — reusing it would focus a dead tab that never relaunches.
     if (!t || t.exitStatus !== undefined) {
       t = vscode.window.terminals.find((x) => x.name === name && x.exitStatus === undefined);
     }
-    if (t && t.exitStatus === undefined) { t.show(); }
+    if (t && t.exitStatus === undefined) { branch = inMap ? 'reuse-map' : 'reuse-byname'; t.show(); }
     else {
+      branch = 'create';
       disposeDeadTerminals(name);   // reap reload-orphaned dead tabs so they can't be focused instead
       const nm = name;   // tab = worktree name only (no slug, no status glyph — status shows in the roster)
       t = vscode.window.createTerminal({ name: nm, location: vscode.TerminalLocation.Editor,
@@ -180,7 +257,12 @@ class DevSummaryProvider {
     this._terms.set(key, t);
     this._current = t;            // the just-opened session is now the selected one
     this.clearUnread(key);
+    _dbg(`  -> branch=${branch} tname=${JSON.stringify(t && t.name)} exit=${t && t.exitStatus} shell=${JSON.stringify(bashShell())}`);
     setTimeout(() => this._postRoster(), 1500);
+    } catch (e) {
+      _dbg(`  -> THREW branch=${branch}: ${e && (e.stack || e.message)}`);
+      vscode.window.showErrorMessage('claude-status open failed (' + slug + ' ' + name + '): ' + (e && e.message));
+    }
   }
   // Open (or focus) the pinned fleet assistant: one durable Claude session in the dev base that
   // manages worktrees via the wtd PATH commands. Mirrors openOrFocus but with a reserved name and
@@ -521,6 +603,8 @@ class DevSummaryProvider {
           };
           run(false);
         });
+      } else if (m.cmd === 'switchAccount' && m.slug && m.name) {
+        this.switchAccount(m.slug, m.name);
       } else if (m.cmd === 'terminate' && m.slug && m.name) {
         vscode.window.showWarningMessage(
           'End the session for ' + m.slug + ' ' + m.name + '?  The worktree (branch, changes, reviews) stays — only the live Claude session ends. Reopen it from the roster.',
@@ -653,8 +737,36 @@ class DevSummaryProvider {
     const accts = this._accounts();
     if (!accts.length) { this.view.webview.postMessage({ type: 'limits', accounts: [] }); return; }
     const out = new Array(accts.length); let pending = accts.length;
-    const done = () => { if (--pending === 0 && this.view && this.view.visible) this.view.webview.postMessage({ type: 'limits', accounts: out.filter(Boolean) }); };
+    const done = () => {
+      if (--pending) return;
+      const list = out.filter(Boolean);
+      if (this.view && this.view.visible) this.view.webview.postMessage({ type: 'limits', accounts: list });
+      this._maybeNotifyLimit(list);
+    };
     accts.forEach((a, i) => this._usageFor(a, (u) => { out[i] = u; done(); }));
+  }
+
+  // When a logged-in account crosses ~95% of a limit, nudge the user ONCE per reset window (deduped by
+  // account + reset time) to switch a session off it — the assist half of the one-click switch feature.
+  _maybeNotifyLimit(list) {
+    this._notified = this._notified || {};
+    try {
+      for (const a of list) {
+        if (!a || a.nologin) continue;
+        const util = Math.max((a.five_hour && a.five_hour.used) || 0, (a.seven_day && a.seven_day.used) || 0);
+        if (util < 95) continue;
+        const rk = (a.five_hour && a.five_hour.resets_at) || (a.seven_day && a.seven_day.resets_at) || '';
+        const key = a.name + '@' + rk;
+        if (this._notified[key]) continue;
+        this._notified[key] = true;
+        const tgt = this._pickSwitchTarget(a.name);
+        vscode.window.showWarningMessage(
+          'Claude account "' + a.name + '" is at ' + Math.round(util) + '% of its limit. ' +
+          (tgt ? 'Click ⇄ on a session to move it to "' + tgt + '" (reopens there + compacts).'
+               : 'No other logged-in account has capacity to switch to.')
+        );
+      }
+    } catch {}
   }
 
   // usage for one account: LIVE-FETCH FIRST from the same endpoint the /usage panel uses (authoritative,
@@ -751,7 +863,8 @@ class DevSummaryProvider {
     // pinned plain-terminal row state (same idea, for the "terminal" row above the assistant)
     const plainTerm = vscode.window.terminals.find((x) => x.name === TERM_NAME);
     const terminal = { active: !!plainTerm, current: !!cur && cur.name === TERM_NAME };
-    if (this.view && this.view.visible) this.view.webview.postMessage({ type: 'roster', rows, assistant, terminal });
+    let multiAccount = false; try { multiAccount = this._accounts().length > 1; } catch {}
+    if (this.view && this.view.visible) this.view.webview.postMessage({ type: 'roster', rows, assistant, terminal, multiAccount });
   }
 
   // names of worktrees with a live session (session name = "<slug>-<name>"). On Windows there's no
@@ -852,10 +965,11 @@ class DevSummaryProvider {
      a left gradient fades the name out underneath them on hover. */
   .wt .acts{position:absolute;right:3px;top:0;height:21px;display:flex;align-items:center;gap:0;opacity:0;pointer-events:none;padding-left:14px;background:linear-gradient(to right,transparent,var(--vscode-sideBar-background,#181818) 40%);}
   .wt:hover .acts{opacity:1;pointer-events:auto;}
-  .wt .arch,.wt .term,.wt .unr,.wt .del{opacity:.55;cursor:pointer;padding:0 2px;font-size:12px;}
-  .wt .arch:hover,.wt .term:hover,.wt .unr:hover,.wt .del:hover{opacity:1;}
+  .wt .arch,.wt .term,.wt .unr,.wt .del,.wt .acc{opacity:.55;cursor:pointer;padding:0 2px;font-size:12px;}
+  .wt .arch:hover,.wt .term:hover,.wt .unr:hover,.wt .del:hover,.wt .acc:hover{opacity:1;}
   .wt .term:hover,.wt .del:hover{color:var(--vscode-charts-red,#e5534b);}
   .wt .unr:hover{color:var(--vscode-charts-yellow,#d2a000);}
+  .wt .acc:hover{color:var(--vscode-charts-blue,#4aa3ff);}
   .wt.sep{margin-top:7px;}   /* gap between status groups */
   /* pinned assistant row: above the worktree groups, no status glyph/git, with a divider below it */
   .wt.asst{margin-top:9px;}   /* breathing room between the header buttons and the first pinned row */
@@ -887,7 +1001,7 @@ class DevSummaryProvider {
 </div>
 <script>
   const vsc = acquireVsCodeApi();
-  let accts=[], ros=[], mon=null, asstState={}, termState={};
+  let accts=[], ros=[], mon=null, asstState={}, termState={}, multiAcct=false;
   const GLYPH={working:'🔵',input:'🟡',reviewing:'🟣',pr:'🔹',done:'🟢',stopped:'🔴'};   // emoji -> editor tab name
   const GLYPHD={working:'◐',input:'!',reviewing:'⋯',pr:'◆',done:'✓',stopped:'○'};        // explorer-style glyph for the roster
   const COL={working:'#4aa3ff',input:'#ffd83d',reviewing:'#c586f0',pr:'#5cc8ff',done:'#3fd35f',stopped:'#ff5c57'};
@@ -935,6 +1049,7 @@ class DevSummaryProvider {
         +'<span class="git">'+git+'</span>'
         +'<span class="acts">'
         +(w.active&&!w.unread?'<span class="unr" title="Mark unread (flag it yellow to revisit)">✉</span>':'')
+        +(w.active&&multiAcct?'<span class="acc" title="Switch to the account with the most capacity (reopens under it + compacts)">⇄</span>':'')
         +(w.active?'<span class="term" title="End the tmux session (worktree stays)">⏹</span>':'')
         +'<span class="arch" title="Archive '+esc(w.name)+'">📦</span>'
         +'<span class="del" title="Delete '+esc(w.name)+' (remove worktree)">🗑</span></span></div>';
@@ -957,6 +1072,7 @@ class DevSummaryProvider {
     document.querySelectorAll('.del').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'delete',slug:p.dataset.slug,name:p.dataset.name}); });
     document.querySelectorAll('.term').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'terminate',slug:p.dataset.slug,name:p.dataset.name}); });
     document.querySelectorAll('.unr').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'markunread',slug:p.dataset.slug,name:p.dataset.name}); });
+    document.querySelectorAll('.acc').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'switchAccount',slug:p.dataset.slug,name:p.dataset.name}); });
   }
   function renderMonitor(){
     const el=document.getElementById('mon'); if(!el) return;
@@ -997,7 +1113,7 @@ class DevSummaryProvider {
   window.addEventListener('message', e => {
     const m=e.data; if(!m) return;
     if(m.type==='limits'){ accts=m.accounts||[]; renderLim(); }
-    else if(m.type==='roster'){ ros=m.rows||[]; asstState=m.assistant||{}; termState=m.terminal||{}; renderRoster(); }
+    else if(m.type==='roster'){ ros=m.rows||[]; asstState=m.assistant||{}; termState=m.terminal||{}; multiAcct=!!m.multiAccount; renderRoster(); }
     else if(m.type==='monitor'){ mon=m.m; renderMonitor(); }
     else if(m.type==='teststate'){ renderTests(m.excluded); }
     else if(m.type==='bell'){ renderBell(m.muted); }

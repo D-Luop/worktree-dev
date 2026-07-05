@@ -24,6 +24,19 @@ wtd_session_idsdir()  { printf '%s/session-ids' "$(wtd_state_dir)"; }
 wtd_session_idfile()  { printf '%s/%s' "$(wtd_session_idsdir)" "${1//\//__}"; }
 wtd_session_id_forget() { rm -f "$(wtd_session_idfile "$1")" 2>/dev/null || true; }
 
+# --- durable per-session ACCOUNT binding (for `account switch`) -------------------------------
+# Which Claude account a session runs under, when it's been switched off its default. Read by agent.sh
+# on (re)launch so reopening the worktree keeps using the switched-to account. Empty file / absent =
+# no override (fall back to the --account flag, then the 'dev' role, then ~/.claude).
+wtd_session_acctdir()  { printf '%s/session-accounts' "$(wtd_state_dir)"; }
+wtd_session_acctfile() { printf '%s/%s' "$(wtd_session_acctdir)" "${1//\//__}"; }
+wtd_session_account_get() { cat "$(wtd_session_acctfile "$1")" 2>/dev/null || true; }
+wtd_session_account_set() {
+  mkdir -p "$(wtd_session_acctdir)"
+  printf '%s\n' "$2" > "$(wtd_session_acctfile "$1")"
+}
+wtd_session_account_forget() { rm -f "$(wtd_session_acctfile "$1")" 2>/dev/null || true; }
+
 # wtd_uuid → a fresh UUID, using whatever's available (python on Windows; else uuidgen/kernel/PowerShell)
 wtd_uuid() {
   if command -v python  >/dev/null 2>&1; then python  -c 'import uuid;print(uuid.uuid4())' && return; fi
@@ -37,10 +50,11 @@ wtd_uuid() {
 # worktree. Claude writes ~/.claude/projects/<cwd, every non-alphanumeric char replaced by '-'>/<id>.jsonl
 # (the cwd is the WINDOWS path on the vscode backend, so convert it). Lets us tell resume from start-new.
 wtd_claude_transcript() {
-  local wt="$1" id="$2" cwd enc
+  local wt="$1" id="$2" ccdir="${3:-}" root cwd enc
+  root="${ccdir:-$HOME/.claude}"          # named account → its CLAUDE_CONFIG_DIR; default → ~/.claude
   cwd="$(cygpath -w "$wt" 2>/dev/null || printf '%s' "$wt")"
   enc="$(printf '%s' "$cwd" | sed 's/[^A-Za-z0-9]/-/g')"
-  printf '%s/.claude/projects/%s/%s.jsonl' "$HOME" "$enc" "$id"
+  printf '%s/projects/%s/%s.jsonl' "$root" "$enc" "$id"
 }
 
 # wtd_session_register <session> <slug> <name> <wt> [pid]
@@ -196,7 +210,7 @@ wtd_session_run_claude() {
   idf="$(wtd_session_idfile "$session")"
   [ -f "$idf" ] && id="$(cat "$idf" 2>/dev/null || true)"
   if [ -n "$id" ]; then
-    if [ -f "$(wtd_claude_transcript "$wt" "$id")" ]; then
+    if [ -f "$(wtd_claude_transcript "$wt" "$id" "$ccdir")" ]; then
       exec claude --permission-mode "$pmode" --resume "$id"
     fi
     exec claude --permission-mode "$pmode" --session-id "$id"
