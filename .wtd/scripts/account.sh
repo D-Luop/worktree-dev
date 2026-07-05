@@ -15,8 +15,13 @@
 # the account, then exit. After that: `agent <slug> some-branch --account <name>`.
 set -euo pipefail
 WTD="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+DEV="$(dirname "$WTD")"
 # shellcheck source=account-lib.sh
-. "$WTD/scripts/account-lib.sh"          # ACCROOT, ROLES, account_dir/name_for_role/name
+. "$WTD/scripts/account-lib.sh"          # ACCROOT, ROLES, account_dir/name_for_role/name, best_other
+# shellcheck source=platform-lib.sh
+. "$WTD/scripts/platform-lib.sh"         # wtd_state_dir (for the switch subcommand's session lookups)
+# shellcheck source=session-lib.sh
+. "$WTD/scripts/session-lib.sh"          # wtd_session_account_*, wtd_session_idfile, wtd_claude_transcript
 DEFAULT="$HOME/.claude"
 
 # the .claude.json (holds oauthAccount) for an account dir. The DEFAULT account keeps it at
@@ -76,6 +81,48 @@ case "$cmd" in
     read -r a </dev/tty || a=""
     case "$a" in y|Y|yes|YES) rm -rf "$dir"; echo "removed '$name'";; *) echo "kept";; esac
     ;;
+  switch)
+    # account switch <slug> <name>  — move a worktree session to the logged-in account with the MOST
+    # remaining capacity. Copies the session transcript into the target account's store so reopening
+    # resumes the SAME conversation there, and records a durable per-session binding. Prints the target
+    # account NAME on stdout (the extension reads it, then compacts + relaunches the session). This does
+    # NOT itself kill/relaunch the live session.
+    slug="${1:-}"; wtname="${2:-}"; shift 2 2>/dev/null || true
+    to=""
+    while [ "$#" -gt 0 ]; do case "$1" in --to) to="${2:-}"; shift 2;; --to=*) to="${1#*=}"; shift;; *) shift;; esac; done
+    [ -n "$slug" ] && [ -n "$wtname" ] || { echo "usage: account switch <slug> <name> [--to <account>]" >&2; exit 1; }
+    session="${slug}-${wtname}"; session="${session//[.:]/-}"
+    wt="$DEV/worktrees/$slug/$wtname"
+    [ -d "$wt" ] || { echo "error: no worktree at $wt" >&2; exit 1; }
+    cur="$(wtd_session_account_get "$session")"; [ -n "$cur" ] || cur=default
+    curdir="$(account_dir_of "$cur")"
+    if [ -n "$to" ]; then            # extension pre-picked the target from its cached usage numbers
+      [ "$to" != "$cur" ] || { echo "error: session is already on account '$to'" >&2; exit 1; }
+      tgtdir="$(account_dir_of "$to")"
+      { [ -n "$tgtdir" ] && [ -d "$tgtdir" ] && [ -n "$(account_token_of "$tgtdir")" ]; } \
+        || { echo "error: target account '$to' is not a logged-in account" >&2; exit 1; }
+      tgt="$to"
+    else
+      echo "checking account capacity…" >&2
+      tgt="$(account_best_other "$cur")"
+      [ -n "$tgt" ] || { echo "error: no other logged-in account with remaining capacity (add one: account add <name>, or log in: account login <name>)" >&2; exit 1; }
+      tgtdir="$(account_dir_of "$tgt")"
+    fi
+    id="$(cat "$(wtd_session_idfile "$session")" 2>/dev/null || true)"
+    if [ -n "$id" ]; then
+      src="$(wtd_claude_transcript "$wt" "$id" "$curdir")"
+      dst="$(wtd_claude_transcript "$wt" "$id" "$tgtdir")"
+      if [ -f "$src" ]; then
+        mkdir -p "$(dirname "$dst")"; cp -f "$src" "$dst"
+        echo "copied conversation transcript into '$tgt' (resume keeps the same chat)" >&2
+      else
+        echo "note: no transcript yet for this session — the target starts fresh" >&2
+      fi
+    fi
+    wtd_session_account_set "$session" "$tgt"
+    echo "bound session '$session' → account '$tgt' ($(account_email_of "$tgtdir"))" >&2
+    printf '%s\n' "$tgt"
+    ;;
   usage)
     name="${1:-default}"
     [ "$name" = default ] && dir="$DEFAULT" || dir="$ACCROOT/$name"
@@ -97,6 +144,7 @@ case "$cmd" in
     ;;
   *)
     echo "usage: account ls | add <name> | login <name> | rm <name> | use <role> <name|default> | usage [name]"
+    echo "       account switch <slug> <name>    (move a session to the account with the most capacity)"
     echo "  per-session: agent <slug> <name> --account <name>"
     echo "  per-role:    account use dev <name>   /   account use review <name>"
     exit 1

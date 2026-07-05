@@ -210,12 +210,21 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-# Resolve the account's config dir (a separate Claude login). Precedence: --account flag, else the
-# configured 'dev' role (account use dev <name>), else empty = the default ~/.claude account.
+# Resolve the account's config dir (a separate Claude login). Precedence: --account flag, else this
+# session's switched-to account (`account switch`, a durable per-session binding), else the configured
+# 'dev' role (account use dev <name>), else empty = the default ~/.claude account.
+bind_session="${repo}-${name}"; bind_session="${bind_session//[.:]/-}"
+bound_acct="$(wtd_session_account_get "$bind_session")"
 ccdir=""; account_label="$account"
 if [ -n "$account" ]; then
   ccdir="$(account_dir_for_name "$account")"
   [ -n "$ccdir" ] || { echo "error: no Claude account '$account'."; echo "       create it with:  account add $account"; exit 1; }
+elif [ -n "$bound_acct" ] && [ "$bound_acct" != default ]; then
+  ccdir="$(account_dir_for_name "$bound_acct")"
+  if [ -n "$ccdir" ]; then account_label="$bound_acct"
+  else echo "note: session's bound account '$bound_acct' is gone; falling back"; wtd_session_account_forget "$bind_session"; fi
+elif [ "$bound_acct" = default ]; then
+  : # switched back to default explicitly → ~/.claude (ccdir stays empty)
 else
   ccdir="$(account_dir_for_role dev)"        # configured default for dev sessions (empty = ~/.claude)
   [ -n "$ccdir" ] && account_label="$(account_name_for_role dev)"
