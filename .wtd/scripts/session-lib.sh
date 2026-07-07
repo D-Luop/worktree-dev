@@ -152,6 +152,71 @@ wtd_session_kill_stragglers() {
   ' 2>/dev/null || true
 }
 
+# wtd_session_reap_cwd <wt>  → (vscode/Windows only) kill any process whose CURRENT DIRECTORY is inside
+# the worktree <wt>. This is the backstop that makes stop/archive/rm reliable: the registry only records
+# the launcher pid, and once that file is gone (a prior failed stop already deregistered it) the pid-based
+# kill in wtd_session_kill has nothing to target — but the real `claude`/node process is still alive with
+# the worktree as its cwd, holding the folder open so `git worktree move/remove` fails with Permission
+# denied on Windows. We find those processes by reading each one's PEB CurrentDirectory and kill the ones
+# rooted in <wt>. The running stop/archive/rm call chain is walked from $PID and spared, so we never kill
+# ourselves (or the shell that invoked us, even if it's cwd'd in the worktree).
+wtd_session_reap_cwd() {
+  [ "$(wtd_session_backend)" = tmux ] && return 0
+  command -v powershell >/dev/null 2>&1 || return 0
+  local wt="$1"; [ -n "$wt" ] || return 0
+  # normalize to a Windows path for comparison against each process's PEB cwd
+  local wtwin; wtwin="$(cygpath -w "$wt" 2>/dev/null || printf '%s' "$wt")"
+  WTD_REAP_WT="$wtwin" powershell -NoProfile -NonInteractive -Command '
+    $src = @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class Peb {
+  [DllImport("ntdll.dll")]
+  static extern int NtQueryInformationProcess(IntPtr h, int cls, ref PBI pbi, int len, out int ret);
+  [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(int a, bool i, int pid);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+  [DllImport("kernel32.dll")] static extern bool ReadProcessMemory(IntPtr h, IntPtr b, byte[] buf, int size, out int read);
+  [StructLayout(LayoutKind.Sequential)] struct PBI { public IntPtr R1; public IntPtr Peb; public IntPtr R2a; public IntPtr R2b; public IntPtr Pid; public IntPtr R3; }
+  static IntPtr RP(IntPtr h, IntPtr a){ byte[] b=new byte[8]; int r; ReadProcessMemory(h,a,b,8,out r); return (IntPtr)BitConverter.ToInt64(b,0); }
+  public static string Cwd(int pid){
+    IntPtr h=OpenProcess(0x0410,false,pid); if(h==IntPtr.Zero) return null;
+    try{
+      var pbi=new PBI(); int ret;
+      if(NtQueryInformationProcess(h,0,ref pbi,Marshal.SizeOf(pbi),out ret)!=0) return null;
+      IntPtr pp=RP(h,(IntPtr)((long)pbi.Peb+0x20));
+      byte[] us=new byte[16]; int rr; ReadProcessMemory(h,(IntPtr)((long)pp+0x38),us,16,out rr);
+      ushort len=BitConverter.ToUInt16(us,0); IntPtr buf=(IntPtr)BitConverter.ToInt64(us,8);
+      if(len==0||len>1024) return "";
+      byte[] sb=new byte[len]; ReadProcessMemory(h,buf,sb,len,out rr);
+      return Encoding.Unicode.GetString(sb,0,rr);
+    } finally { CloseHandle(h); }
+  }
+}
+"@
+    try { Add-Type -TypeDefinition $src -ErrorAction Stop } catch { exit 0 }
+    $wt = ($env:WTD_REAP_WT).TrimEnd("\").ToLower()
+    if (-not $wt) { exit 0 }
+    $procs = Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name
+    $byId = @{}; foreach ($p in $procs) { $byId[[int]$p.ProcessId] = $p }
+    # spare the whole running stop/archive/rm call chain (walk up from THIS powershell)
+    $skip = New-Object "System.Collections.Generic.HashSet[int]"
+    $cur = $PID
+    while ($cur -and $byId.ContainsKey([int]$cur) -and $skip.Add([int]$cur)) { $cur = [int]$byId[[int]$cur].ParentProcessId }
+    foreach ($p in $procs) {
+      $pid2 = [int]$p.ProcessId
+      if ($skip.Contains($pid2)) { continue }
+      if ($p.Name -notmatch "claude|node|bash|sh\.exe|powershell|pwsh") { continue }
+      $cwd = $null; try { $cwd = [Peb]::Cwd($pid2) } catch {}
+      if (-not $cwd) { continue }
+      $cwd = $cwd.TrimEnd("\").ToLower()
+      if ($cwd -eq $wt -or $cwd.StartsWith($wt + "\")) {
+        try { Stop-Process -Id $pid2 -Force -ErrorAction Stop } catch {}
+      }
+    }
+  ' 2>/dev/null || true
+}
+
 # wtd_session_kill <session> [wt] [slug] [name]  → end the session, keep the worktree.
 # slug/name are optional but SHOULD be passed by callers that know them (agent rm/stop): the straggler
 # sweep still needs them after the registry file is already gone (the common case once Claude exited).
@@ -162,8 +227,9 @@ wtd_session_kill() {
     *)
       local f pid rslug rname; f="$(wtd_session_keyfile "$session")"
       if [ -f "$f" ]; then
-        IFS=$'\t' read -r rslug rname _ pid _ < "$f"
+        IFS=$'\t' read -r rslug rname rwt pid _ < "$f"
         [ -z "$slug" ] && slug="$rslug"; [ -z "$name" ] && name="$rname"
+        [ -z "$wt" ] && wt="$rwt"
         # best-effort stop the claude process tree so the VSCode terminal returns to a shell.
         if [ -n "${pid:-}" ]; then
           if command -v taskkill >/dev/null 2>&1; then taskkill //PID "$pid" //T //F >/dev/null 2>&1 || true
@@ -173,6 +239,9 @@ wtd_session_kill() {
       wtd_session_deregister "$session"
       # sweep any launcher shells that outlived the registry (they hold the worktree dir open on Windows)
       wtd_session_kill_stragglers "$slug" "$name"
+      # backstop: reap any claude/node/shell still cwd'd in the worktree (the pid-based kill above can't
+      # find them once the registry file is gone — this is what left orphans holding the folder locked).
+      [ -n "$wt" ] && wtd_session_reap_cwd "$wt"
       ;;
   esac
 }
