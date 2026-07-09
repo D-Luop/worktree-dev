@@ -42,7 +42,7 @@ out = os.path.join(HERE, f"{NAME}-{VERSION}.vsix")
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
     z.writestr("[Content_Types].xml", CONTENT_TYPES)
     z.writestr("extension.vsixmanifest", MANIFEST)
-    for f in ("package.json", "extension.js", "README.md", "LICENSE"):
+    for f in ("package.json", "extension.js", "diffview.js", "README.md", "LICENSE"):
         z.write(os.path.join(HERE, f), f"extension/{f}")
 
 print(f"wrote {out}")

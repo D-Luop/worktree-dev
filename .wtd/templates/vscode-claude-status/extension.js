@@ -4,6 +4,7 @@ const os = require('os');
 const path = require('path');
 const cp = require('child_process');
 const https = require('https');
+const dv = require('./diffview.js');   // the `commits` tab: branch commits + filterable diffs
 
 const STATUS_FILE = '.claude-status';
 const HOME = os.homedir();
@@ -165,7 +166,10 @@ class DevSummaryProvider {
     this._pvAutoClosing = false;  // transient: distinguish a follow-driven close from a user close
     this._pvTimer = null;         // poll so an open panel live-refreshes when its files change
     this._pvSig = '';             // signature (labels+mtimes) of the last render, to detect changes
+    this._pvTabs = '';            // '|'-joined tab labels of the last render (commits tab re-render trigger)
+    this._cvSel = {};             // roster key -> selected commit sha in the `commits` tab (survives re-render)
   }
+  _wtPath(slug, name) { return path.join(DEV, 'worktrees', slug, name); }
   _key(slug, name) { return slug + '' + name; }
   clearUnread(key) { if (this._unread[key]) { this._unread[key] = false; this._postRoster(); } }
   markUnread(key) { if (!this._unread[key]) { this._unread[key] = true; this._postRoster(); } }
@@ -382,13 +386,26 @@ class DevSummaryProvider {
   _previewLabels(previews) {
     return Object.keys(previews).sort((a, b) => (a === 'plan' ? -1 : b === 'plan' ? 1 : a.localeCompare(b)));
   }
+  // Every git worktree gets a built-in `commits` tab (the diff viewer) after its staged previews, so
+  // the panel has something to show even when no agent has staged a design.
+  _tabs(slug, name, previews) {
+    const labels = this._previewLabels(previews);
+    if (dv.isGitWorktree(this._wtPath(slug, name))) labels.push(dv.COMMITS_LABEL);
+    return labels;
+  }
   // which tab to show: explicit request → remembered selection → 'plan' → first
-  _pickLabel(key, want, previews) {
-    if (want && previews[want]) return want;
+  _pickLabel(key, want, previews, labels) {
+    if (want && labels.includes(want)) return want;
     const rem = this._pvLabelByKey[key];
-    if (rem && previews[rem]) return rem;
+    if (rem && labels.includes(rem)) return rem;
     if (previews.plan) return 'plan';
-    return this._previewLabels(previews)[0] || null;
+    return labels[0] || null;
+  }
+  // does this worktree have anything the panel can render? (a staged preview, or a git repo → commits)
+  _hasPanelContent(key) {
+    if (Object.keys(this._preview[key] || {}).length) return true;
+    const i = key.indexOf('\x01'); if (i < 0) return false;
+    return dv.isGitWorktree(this._wtPath(key.slice(0, i), key.slice(i + 1)));
   }
   _previewSig(previews) {
     return this._previewLabels(previews).map((l) => {
@@ -403,10 +420,16 @@ class DevSummaryProvider {
   showPreview(slug, name, label, reveal = true) {
     const key = this._key(slug, name);
     const previews = this._scanPreviews(slug, name);
-    const labels = this._previewLabels(previews);
-    if (!labels.length) { vscode.window.showInformationMessage('claude-status: no preview staged for ' + slug + ' ' + name); return; }
-    const chosen = this._pickLabel(key, label, previews);
-    let raw; try { raw = fs.readFileSync(previews[chosen], 'utf8'); } catch { return; }
+    const labels = this._tabs(slug, name, previews);
+    if (!labels.length) { vscode.window.showInformationMessage('claude-status: nothing to show for ' + slug + ' ' + name); return; }
+    const chosen = this._pickLabel(key, label, previews, labels);
+    let raw;
+    if (chosen === dv.COMMITS_LABEL) {
+      let hideTests = false; try { hideTests = fs.existsSync(TESTS_FLAG); } catch {}
+      raw = dv.commitsHtml(slug, name, hideTests);      // skeleton; commits arrive over postMessage
+    } else {
+      try { raw = fs.readFileSync(previews[chosen], 'utf8'); } catch { return; }
+    }
     this._pvFollow = true;   // engaging a preview → the panel now tracks the focused worktree
     if (!this._pvPanel) {
       this._pvPanel = vscode.window.createWebviewPanel('claudeStatus.preview', 'Design preview',
@@ -426,6 +449,8 @@ class DevSummaryProvider {
           const j = this._pvShownKey.indexOf('\x01');
           if (j >= 0) this.showPreview(this._pvShownKey.slice(0, j), this._pvShownKey.slice(j + 1), msg.label);
         }
+        else if (msg.cmd === 'cvReady' && msg.slug) this._cvList(msg.slug, msg.name);
+        else if (msg.cmd === 'cvSelect' && msg.slug && msg.sha) this._cvDiff(msg.slug, msg.name, msg.sha);
       });
     }
     const csp = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; '
@@ -443,7 +468,8 @@ class DevSummaryProvider {
       + labels.map(tab).join('') + '<span style="flex:1"></span>'
       + '<div id="__wtclose" title="Close preview" style="cursor:pointer;white-space:nowrap;background:#21262d;color:#e6edf3;'
       + 'border:1px solid #444c56;border-radius:6px;padding:3px 11px;font:600 12px system-ui;">✕ Close</div></div>'
-      + '<script>(function(){var v=acquireVsCodeApi();'
+      // acquireVsCodeApi is one-shot per webview; the commits tab needs it too, so both go via __wtapi
+      + '<script>(function(){var v=window.__wtapi||(window.__wtapi=acquireVsCodeApi());'
       + 'var b=document.getElementById("__wtclose");if(b)b.addEventListener("click",function(){v.postMessage({cmd:"close"});});'
       + 'document.addEventListener("click",function(e){'
       + 'var tb=e.target.closest&&e.target.closest(".__wttab");'
@@ -462,6 +488,7 @@ class DevSummaryProvider {
     this._pvPanel.webview.html = html;
     this._pvShownKey = key; this._pvLabel = chosen; this._pvLabelByKey[key] = chosen;
     this._pvSig = this._previewSig(previews);
+    this._pvTabs = labels.join('|');
     // poll disk so an OPEN panel live-refreshes when files change (new tab / re-stage) — VSCode's file
     // watcher misses the .wtd/state copy on Windows, so don't depend on it. Cleared on dispose.
     if (!this._pvTimer) this._pvTimer = setInterval(() => this._pollPreview(), 1000);
@@ -470,13 +497,44 @@ class DevSummaryProvider {
 
   // refresh poll: re-scan the shown worktree's preview dir; if a tab was added/removed or the shown
   // file changed, re-render in place (no reveal → no focus steal; injected script restores scroll).
+  // The commits tab is git-backed, not file-backed: a preview re-stage must not blow away the diff
+  // you're reading, so it only re-renders when the tab set itself changes.
   _pollPreview() {
     if (!this._pvPanel || !this._pvShownKey) return;
     const i = this._pvShownKey.indexOf('\x01'); if (i < 0) return;
     const slug = this._pvShownKey.slice(0, i), name = this._pvShownKey.slice(i + 1);
     const previews = this._scanPreviews(slug, name);
+    if (this._pvLabel === dv.COMMITS_LABEL) {
+      const tabs = this._tabs(slug, name, previews).join('|');
+      if (tabs !== this._pvTabs) this.showPreview(slug, name, this._pvLabel, false);
+      return;
+    }
     if (!Object.keys(previews).length) return;   // keep last content if the dir momentarily empties
     if (this._previewSig(previews) !== this._pvSig) this.showPreview(slug, name, this._pvLabel, false);
+  }
+
+  // git is async, so a reply can arrive after the panel has switched tab or worktree — drop it rather
+  // than paint one worktree's commits over another's.
+  _cvPost(key, payload) {
+    if (!this._pvPanel || this._pvLabel !== dv.COMMITS_LABEL || this._pvShownKey !== key) return;
+    this._pvPanel.webview.postMessage(payload);
+  }
+
+  // the commits tab asked for its branch history (sent on load)
+  _cvList(slug, name) {
+    const wt = this._wtPath(slug, name);
+    if (!dv.isGitWorktree(wt)) return;
+    const key = this._key(slug, name);
+    dv.listCommits(wt, (res) => this._cvPost(key, Object.assign({ type: 'cvList', selected: this._cvSel[key] || '' }, res)));
+  }
+
+  // the commits tab asked for one commit's patch (or the working tree, sha === dv.WORKING)
+  _cvDiff(slug, name, sha) {
+    const wt = this._wtPath(slug, name);
+    if (!dv.isGitWorktree(wt)) return;
+    const key = this._key(slug, name);
+    this._cvSel[key] = sha;   // so switching to a design tab and back reopens the same commit
+    dv.commitDiff(wt, sha, (res) => this._cvPost(key, Object.assign({ type: 'cvDiff' }, res)));
   }
 
   // A ▶ Start button in the living-plan preview was clicked: hand that step to the worktree the panel
@@ -512,11 +570,12 @@ class DevSummaryProvider {
     return null;
   }
 
-  // header 🖼 button: open the design preview for the worktree you're focused on (then it follows focus)
+  // header 🖼 button: open the panel for the worktree you're focused on (then it follows focus). Every
+  // git worktree has at least the `commits` tab, so this only fails on a non-worktree focus.
   previewFocused() {
     const key = this._focusedWorktreeKey();
-    if (key && Object.keys(this._preview[key] || {}).length) this._showPreviewByKey(key);
-    else vscode.window.showInformationMessage('claude-status: no design preview for the focused session — an agent stages one with `preview <file> [label]`.');
+    if (key && this._hasPanelContent(key)) this._showPreviewByKey(key);
+    else vscode.window.showInformationMessage('claude-status: focus a worktree session first — the panel shows its commits, plus any design an agent staged with `preview <file> [label]`.');
   }
 
   // Keep the preview panel reflecting the focused worktree: show that worktree's staged preview, hide
@@ -527,7 +586,7 @@ class DevSummaryProvider {
     if (!this._pvFollow) return;
     let want = null;
     if (t && t.name !== ASST_NAME && t.name !== TERM_NAME) {
-      for (const [k, v] of this._terms) if (v === t && Object.keys(this._preview[k] || {}).length) { want = k; break; }
+      for (const [k, v] of this._terms) if (v === t && this._hasPanelContent(k)) { want = k; break; }
       if (!want) for (const k of Object.keys(this._preview)) if (k.split('\x01')[1] === t.name) { want = k; break; }
     }
     if (want === this._pvShownKey) return;
@@ -665,6 +724,8 @@ class DevSummaryProvider {
         this.openOrFocusTerminal();
       } else if (m.cmd === 'previewFocused') {
         this.previewFocused();
+      } else if (m.cmd === 'openCommits' && m.slug) {
+        this.showPreview(m.slug, m.name, dv.COMMITS_LABEL);
       } else if (m.cmd === 'pasteImage') {
         this.pasteImage();
       } else if (m.cmd === 'toggleTests') {
@@ -965,11 +1026,13 @@ class DevSummaryProvider {
      a left gradient fades the name out underneath them on hover. */
   .wt .acts{position:absolute;right:3px;top:0;height:21px;display:flex;align-items:center;gap:0;opacity:0;pointer-events:none;padding-left:14px;background:linear-gradient(to right,transparent,var(--vscode-sideBar-background,#181818) 40%);}
   .wt:hover .acts{opacity:1;pointer-events:auto;}
-  .wt .arch,.wt .term,.wt .unr,.wt .del,.wt .acc{opacity:.55;cursor:pointer;padding:0 2px;font-size:12px;}
-  .wt .arch:hover,.wt .term:hover,.wt .unr:hover,.wt .del:hover,.wt .acc:hover{opacity:1;}
+  .wt .arch,.wt .term,.wt .unr,.wt .del,.wt .acc,.wt .dif{opacity:.55;cursor:pointer;padding:0 2px;font-size:12px;}
+  .wt .arch:hover,.wt .term:hover,.wt .unr:hover,.wt .del:hover,.wt .acc:hover,.wt .dif:hover{opacity:1;}
   .wt .term:hover,.wt .del:hover{color:var(--vscode-charts-red,#e5534b);}
   .wt .unr:hover{color:var(--vscode-charts-yellow,#d2a000);}
   .wt .acc:hover{color:var(--vscode-charts-blue,#4aa3ff);}
+  .wt .dif{font-weight:700;}
+  .wt .dif:hover{color:var(--vscode-charts-purple,#c586f0);}
   .wt.sep{margin-top:7px;}   /* gap between status groups */
   /* pinned assistant row: above the worktree groups, no status glyph/git, with a divider below it */
   .wt.asst{margin-top:9px;}   /* breathing room between the header buttons and the first pinned row */
@@ -1048,6 +1111,7 @@ class DevSummaryProvider {
         +'<span style="color:'+gc+'">'+gd+'</span><span class="nm">'+esc(w.name)+'</span>'
         +'<span class="git">'+git+'</span>'
         +'<span class="acts">'
+        +'<span class="dif" title="Browse this branch\'s commits and diffs">Δ</span>'
         +(w.active&&!w.unread?'<span class="unr" title="Mark unread (flag it yellow to revisit)">✉</span>':'')
         +(w.active&&multiAcct?'<span class="acc" title="Switch to the account with the most capacity (reopens under it + compacts)">⇄</span>':'')
         +(w.active?'<span class="term" title="End the tmux session (worktree stays)">⏹</span>':'')
@@ -1073,6 +1137,7 @@ class DevSummaryProvider {
     document.querySelectorAll('.term').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'terminate',slug:p.dataset.slug,name:p.dataset.name}); });
     document.querySelectorAll('.unr').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'markunread',slug:p.dataset.slug,name:p.dataset.name}); });
     document.querySelectorAll('.acc').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'switchAccount',slug:p.dataset.slug,name:p.dataset.name}); });
+    document.querySelectorAll('.dif').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'openCommits',slug:p.dataset.slug,name:p.dataset.name}); });
   }
   function renderMonitor(){
     const el=document.getElementById('mon'); if(!el) return;
