@@ -151,6 +151,7 @@ function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
 class DevSummaryProvider {
   constructor() {
     this.view = null; this.limTimer = null; this.rosTimer = null; this._tick = null; this._lastUsage = {};
+    this._postAll = null;         // set in resolveWebviewView; replayed on the webview's 'ready' handshake
     this._terms = new Map();      // worktree key -> Terminal we opened (to focus instead of duplicate)
     this._lastStatus = {};        // worktree key -> last status seen (to detect transitions)
     this._unread = {};            // worktree key -> true when it flipped to "your turn" and not yet opened
@@ -168,6 +169,7 @@ class DevSummaryProvider {
     this._pvSig = '';             // signature (labels+mtimes) of the last render, to detect changes
     this._pvTabs = '';            // '|'-joined tab labels of the last render (commits tab re-render trigger)
     this._cvSel = {};             // roster key -> selected commit sha in the `commits` tab (survives re-render)
+    this._cvWidth = 0;            // commit-list width the user dragged to (0 = the tab's default)
   }
   _wtPath(slug, name) { return path.join(DEV, 'worktrees', slug, name); }
   _key(slug, name) { return slug + '' + name; }
@@ -459,7 +461,7 @@ class DevSummaryProvider {
     let raw;
     if (chosen === dv.COMMITS_LABEL) {
       let hideTests = false; try { hideTests = fs.existsSync(TESTS_FLAG); } catch {}
-      raw = dv.commitsHtml(slug, name, hideTests);      // skeleton; commits arrive over postMessage
+      raw = dv.commitsHtml(slug, name, hideTests, this._cvWidth);   // skeleton; commits arrive over postMessage
     } else {
       try { raw = fs.readFileSync(previews[chosen], 'utf8'); } catch { return; }
     }
@@ -484,6 +486,7 @@ class DevSummaryProvider {
         }
         else if (msg.cmd === 'cvReady' && msg.slug) this._cvList(msg.slug, msg.name);
         else if (msg.cmd === 'cvSelect' && msg.slug && msg.sha) this._cvDiff(msg.slug, msg.name, msg.sha);
+        else if (msg.cmd === 'cvWidth' && msg.w) this._cvWidth = msg.w;   // remember the dragged divider
       });
     }
     const csp = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; '
@@ -644,7 +647,14 @@ class DevSummaryProvider {
 
     view.webview.onDidReceiveMessage((m) => {
       if (!m) return;
-      if (m.cmd === 'open' && m.slug && m.name) {
+      if (m.cmd === 'ready') {
+        // The webview's script just finished loading. Messages posted before that (the initial posts
+        // fire the instant html is set, and a window reload re-parses the webview from scratch) are
+        // silently dropped — so the script announces itself and we replay the full state.
+        if (this._postAll) this._postAll();
+      } else if (m.cmd === 'jsError') {
+        _dbg('webview script error: ' + m.msg);
+      } else if (m.cmd === 'open' && m.slug && m.name) {
         this.openOrFocus(m.slug, m.name, m.glyph);   // focus an existing tab instead of duplicating
       } else if (m.cmd === 'markunread' && m.slug && m.name) {
         this.markUnread(this._key(m.slug, m.name));   // flag the row yellow to revisit (clears on open/focus)
@@ -774,20 +784,32 @@ class DevSummaryProvider {
       }
     });
 
-    const tick = () => this._postLimits();
-    tick(); this._postRoster(); this._postMonitor(); this._postTests(); this._postBell();
+    // Each post is independently fire-walled: a throw in one (a failing fetch, a bad file, a patched
+    // https that throws synchronously) must not take down the others or the refresh timers — an
+    // unguarded throw here aborts resolveWebviewView and leaves the panel permanently on its static
+    // HTML ("waiting for a session…"). Failures land in .wtd/state/open-debug.log.
+    const safe = (tag, fn) => {
+      try {
+        const r = fn();
+        if (r && typeof r.catch === 'function') r.catch((e) => _dbg('panel ' + tag + ' FAILED: ' + ((e && e.stack) || e)));
+      } catch (e) { _dbg('panel ' + tag + ' FAILED: ' + ((e && e.stack) || e)); }
+    };
+    const postAll = () => { safe('limits', () => this._postLimits()); safe('roster', () => this._postRoster());
+      safe('monitor', () => this._postMonitor()); safe('tests', () => this._postTests()); safe('bell', () => this._postBell()); };
+    this._postAll = postAll;   // re-run on the webview's 'ready' handshake (initial posts can beat the script)
+    postAll();
     // refresh accounts' usage every 60s. Active accounts come from their (free) statusline file; only
     // idle accounts hit the endpoint — 60s keeps API calls low enough to avoid 429. Roster every 12s,
     // system monitor every 5s.
-    this.limTimer = setInterval(tick, 60000);
-    this.rosTimer = setInterval(() => this._postRoster(), 12000);
-    this.monTimer = setInterval(() => this._postMonitor(), 5000);
-    view.onDidChangeVisibility(() => { if (view.visible) { tick(); this._postRoster(); this._postMonitor(); this._postTests(); this._postBell(); } });
+    this.limTimer = setInterval(() => safe('limits', () => this._postLimits()), 60000);
+    this.rosTimer = setInterval(() => safe('roster', () => this._postRoster()), 12000);
+    this.monTimer = setInterval(() => safe('monitor', () => this._postMonitor()), 5000);
+    view.onDidChangeVisibility(() => { if (view.visible) postAll(); });
     view.onDidDispose(() => {
       if (this.limTimer) clearInterval(this.limTimer);
       if (this.rosTimer) clearInterval(this.rosTimer);
       if (this.monTimer) clearInterval(this.monTimer);
-      this.limTimer = this.rosTimer = this.monTimer = this.view = null;
+      this.limTimer = this.rosTimer = this.monTimer = this.view = this._postAll = null;
     });
   }
 
@@ -902,22 +924,27 @@ class DevSummaryProvider {
   _fetchUsage(tok, cb) {
     const num = (x) => (typeof x === 'number' && isFinite(x)) ? Math.round(x) : null;
     const epoch = (s) => { const t = Date.parse(s); return isNaN(t) ? 0 : Math.floor(t / 1000); };
-    const req = https.get({
-      host: 'api.anthropic.com', path: '/api/oauth/usage', timeout: 10000,
-      headers: { 'Authorization': 'Bearer ' + tok, 'anthropic-beta': 'oauth-2025-04-20', 'Content-Type': 'application/json' },
-    }, (res) => {
-      if (res.statusCode !== 200) { res.resume(); return cb(null); }
-      let b = ''; res.on('data', (d) => b += d);
-      res.on('end', () => {
-        try {
-          const j = JSON.parse(b), f = j.five_hour || {}, s = j.seven_day || {};
-          cb({ five_hour: { used: num(f.utilization), resets_at: epoch(f.resets_at) },
-               seven_day: { used: num(s.utilization), resets_at: epoch(s.resets_at) } });
-        } catch { cb(null); }
+    // In the extension host, https is monkey-patched by VSCode's proxy agent — a bad proxy config can
+    // make get() throw SYNCHRONOUSLY, so the whole call is guarded; any failure just means fallback.
+    let req;
+    try {
+      req = https.get({
+        host: 'api.anthropic.com', path: '/api/oauth/usage', timeout: 10000,
+        headers: { 'Authorization': 'Bearer ' + tok, 'anthropic-beta': 'oauth-2025-04-20', 'Content-Type': 'application/json' },
+      }, (res) => {
+        if (res.statusCode !== 200) { res.resume(); return cb(null); }
+        let b = ''; res.on('data', (d) => b += d);
+        res.on('end', () => {
+          try {
+            const j = JSON.parse(b), f = j.five_hour || {}, s = j.seven_day || {};
+            cb({ five_hour: { used: num(f.utilization), resets_at: epoch(f.resets_at) },
+                 seven_day: { used: num(s.utilization), resets_at: epoch(s.resets_at) } });
+          } catch { cb(null); }
+        });
       });
-    });
-    req.on('error', () => cb(null));
-    req.on('timeout', () => { req.destroy(); cb(null); });
+      req.on('error', () => cb(null));
+      req.on('timeout', () => { req.destroy(); cb(null); });
+    } catch (e) { _dbg('usage fetch threw: ' + ((e && e.stack) || e)); cb(null); }
   }
 
   async _postRoster() {
@@ -1097,6 +1124,9 @@ class DevSummaryProvider {
 </div>
 <script>
   const vsc = acquireVsCodeApi();
+  // any script error in here is invisible (webview devtools only) — report it to the host, which
+  // logs it to .wtd/state/open-debug.log
+  window.addEventListener('error', e => { try{ vsc.postMessage({cmd:'jsError', msg: String(e.message||e)+' @'+(e.lineno||'?')}); }catch(_){} });
   let accts=[], ros=[], mon=null, asstState={}, termState={}, multiAcct=false;
   const GLYPH={working:'🔵',input:'🟡',reviewing:'🟣',pr:'🔹',done:'🟢',stopped:'🔴'};   // emoji -> editor tab name
   const GLYPHD={working:'◐',input:'!',reviewing:'⋯',pr:'◆',done:'✓',stopped:'○'};        // explorer-style glyph for the roster
@@ -1144,7 +1174,7 @@ class DevSummaryProvider {
         +'<span style="color:'+gc+'">'+gd+'</span><span class="nm">'+esc(w.name)+'</span>'
         +'<span class="git">'+git+'</span>'
         +'<span class="acts">'
-        +'<span class="dif" title="Browse this branch\'s commits and diffs">Δ</span>'
+        +'<span class="dif" title="Browse this branch\\'s commits and diffs">Δ</span>'
         +(w.active&&!w.unread?'<span class="unr" title="Mark unread (flag it yellow to revisit)">✉</span>':'')
         +(w.active&&multiAcct?'<span class="acc" title="Switch to the account with the most capacity (reopens under it + compacts)">⇄</span>':'')
         +(w.active?'<span class="term" title="End the tmux session (worktree stays)">⏹</span>':'')
@@ -1217,6 +1247,9 @@ class DevSummaryProvider {
     else if(m.type==='bell'){ renderBell(m.muted); }
   });
   setInterval(renderLim, 15000);   // keep the reset countdown ticking
+  vsc.postMessage({cmd:'ready'});  // handshake: tell the host to (re)send state — posts sent before
+                                   // this script loaded were dropped, which left the panel stuck on
+                                   // its static "waiting for a session…" HTML after a window reload
 </script></body></html>`;
   }
 }

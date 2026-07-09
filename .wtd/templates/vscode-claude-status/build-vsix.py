@@ -9,9 +9,17 @@ claude-status-<version>.vsix next to this script. install.sh installs that file 
 `code --install-extension`."""
 import json
 import os
+import subprocess
+import sys
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+# Gate: the webviews' inline <script> blocks must parse. A syntax error there (e.g. an unescaped
+# apostrophe in a concatenated HTML string) ships a panel that renders but is silently dead.
+if subprocess.call(["node", os.path.join(HERE, "check-webview.js")]) != 0:
+    sys.exit("ABORT: webview script parse check failed — not building the vsix")
+
 pkg = json.load(open(os.path.join(HERE, "package.json"), encoding="utf-8"))
 VERSION = pkg["version"]
 NAME, PUBLISHER = pkg["name"], pkg["publisher"]

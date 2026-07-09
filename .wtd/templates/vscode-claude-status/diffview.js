@@ -206,13 +206,16 @@ function commitDiff(wt, sha, cb) {
 //
 // It must NOT call acquireVsCodeApi() outright: extension.js appends a switcher-bar script that also
 // needs the handle, and the API is one-shot per webview. Both sides go through window.__wtapi.
-function commitsHtml(slug, name, hideTests) {
+function commitsHtml(slug, name, hideTests, sideWidth) {
+  const sw = Math.max(150, Math.min(Number(sideWidth) || 230, 700));
   return `<!doctype html><html><head><meta charset="utf-8"><title>commits</title><style>
 :root{--bg:#0d1117;--fg:#e6edf3;--dim:#8b949e;--line:#30363d;--panel:#161b22;--accent:#2f81f7;--add:#2ea043;--del:#f85149}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}
 #cv{display:flex;height:calc(100vh - 44px);overflow:hidden}
-#side{width:320px;min-width:220px;border-right:1px solid var(--line);display:flex;flex-direction:column;background:var(--panel)}
+#side{width:${sw}px;flex:0 0 auto;min-width:150px;border-right:1px solid var(--line);display:flex;flex-direction:column;background:var(--panel)}
+#grip{flex:0 0 5px;cursor:col-resize;background:transparent;transition:background .12s}
+#grip:hover,#grip.drag{background:var(--accent)}
 #sidehead{padding:8px 10px;border-bottom:1px solid var(--line);font-size:11px;color:var(--dim)}
 #sidehead b{color:var(--fg);font-size:12px}
 #clist{overflow-y:auto;flex:1}
@@ -247,13 +250,14 @@ pre.d .hh{background:#1e2a3a;color:#79c0ff}
 pre.d .ct{color:#adbac7}
 .note{color:var(--dim);padding:8px 10px;font-size:12px;font-style:italic}
 .empty{color:var(--dim);padding:24px;text-align:center}
-@media(max-width:720px){#cv{flex-direction:column;height:auto}#side{width:auto;max-height:34vh;border-right:0;border-bottom:1px solid var(--line)}}
+@media(max-width:720px){#cv{flex-direction:column;height:auto}#side{width:auto;max-height:34vh;border-right:0;border-bottom:1px solid var(--line)}#grip{display:none}}
 </style></head><body>
 <div id="cv">
   <div id="side">
     <div id="sidehead"><b id="branch">…</b><div id="baseline">loading commits…</div></div>
     <div id="clist"></div>
   </div>
+  <div id="grip" title="Drag to resize"></div>
   <div id="main">
     <div id="bar">
       <input type="search" id="q" placeholder="filter files by path…" autocomplete="off">
@@ -346,6 +350,24 @@ pre.d .ct{color:#adbac7}
 
   document.getElementById('q').addEventListener('input',renderFiles);
   document.getElementById('notest').addEventListener('change',renderFiles);
+
+  // drag the divider to resize the commit list. The width is sent back to the extension rather than
+  // kept in webview state, because setState is shared with the switcher bar's scroll restore.
+  (function(){
+    var grip=document.getElementById('grip'), side=document.getElementById('side'), on=false;
+    grip.addEventListener('mousedown',function(e){ on=true; grip.classList.add('drag'); e.preventDefault(); });
+    window.addEventListener('mousemove',function(e){
+      if(!on) return;
+      var w=e.clientX-side.getBoundingClientRect().left;
+      w=Math.max(150,Math.min(w,Math.round(window.innerWidth*0.6)));
+      side.style.width=w+'px';
+    });
+    window.addEventListener('mouseup',function(){
+      if(!on) return;
+      on=false; grip.classList.remove('drag');
+      vsc.postMessage({cmd:'cvWidth',w:side.offsetWidth});
+    });
+  })();
 
   window.addEventListener('message',function(ev){
     var m=ev.data||{};

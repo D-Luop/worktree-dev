@@ -5,7 +5,8 @@ BASE="$(dirname "$WTD")"                                                  # ~/de
 BASHRC="$HOME/.bashrc"
 SETTINGS="$HOME/.claude/settings.json"
 HOOKS_TMPL="$WTD/templates/claude-hooks.json"
-VSIX="$WTD/templates/vscode-claude-status/claude-status-0.0.70.vsix"
+# newest built .vsix (build-vsix.py names them claude-status-<version>.vsix)
+VSIX="$(ls -1v "$WTD"/templates/vscode-claude-status/claude-status-*.vsix 2>/dev/null | tail -1)"
 # Shipped templates carry __DEV__/__USER__/__DISTRO__ placeholders so they're machine-agnostic;
 # render them to this host's real values at install time.
 WTD_USER="$(id -un)"
