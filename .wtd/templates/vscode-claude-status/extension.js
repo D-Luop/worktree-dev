@@ -175,10 +175,42 @@ class DevSummaryProvider {
   markUnread(key) { if (!this._unread[key]) { this._unread[key] = true; this._postRoster(); } }
   // The Claude account a worktree session currently runs under: its durable binding (set by
   // `account switch`) if any, else 'default'. Mirrors agent.sh's resolution for display/target-picking.
+  // Which account a session is running under. The binding file is authoritative (agent.sh writes it on
+  // every launch), but sessions started before that existed have none — infer those from where Claude
+  // is actually writing their transcript, rather than assuming 'default' and offering to "switch" a
+  // session to the account it's already on.
   _bindingAccount(slug, name) {
-    const session = (slug + '-' + name).replace(/[.:]/g, '-').replace(/\//g, '__');
-    try { return (fs.readFileSync(path.join(WTD, 'state', 'session-accounts', session), 'utf8').trim()) || 'default'; }
-    catch { return 'default'; }
+    const file = (slug + '-' + name).replace(/[.:]/g, '-').replace(/\//g, '__');
+    try {
+      const v = fs.readFileSync(path.join(WTD, 'state', 'session-accounts', file), 'utf8').trim();
+      if (v) return v;
+    } catch {}
+    return this._inferAccount(slug, name, file) || 'default';
+  }
+
+  // Claude stores a session's transcript under <CLAUDE_CONFIG_DIR>/projects/<mangled cwd>/<id>.jsonl.
+  // A worktree that has run under two accounts has a copy in each, so take the freshest — the stale
+  // one is from before the switch.
+  _inferAccount(slug, name, file) {
+    let id = '';
+    try { id = fs.readFileSync(path.join(WTD, 'state', 'session-ids', file), 'utf8').trim(); } catch {}
+    if (!id) return null;
+    const enc = this._wtPath(slug, name).replace(/\//g, '\\').replace(/[^A-Za-z0-9]/g, '-');
+    let best = null, bestM = -1;
+    for (const a of this._accounts()) {
+      try {
+        const m = fs.statSync(path.join(a.dir, 'projects', enc, id + '.jsonl')).mtimeMs;
+        if (m > bestM) { bestM = m; best = a.name; }
+      } catch {}
+    }
+    return best;
+  }
+
+  // max(5h, 7d) utilization % for an account, from the panel's cached usage poll (null = unknown)
+  _utilOf(accName) {
+    const u = this._lastUsage[accName];
+    if (!u) return null;
+    return Math.round(Math.max((u.five_hour && u.five_hour.used) || 0, (u.seven_day && u.seven_day.used) || 0));
   }
   // Pick the switch target: the logged-in account with the MOST remaining capacity (lowest max 5h/7d
   // utilization), excluding the current one and any fully-maxed. Uses the usage the panel already
@@ -191,8 +223,7 @@ class DevSummaryProvider {
       try { email = (JSON.parse(fs.readFileSync(a.json, 'utf8')).oauthAccount || {}).emailAddress || ''; } catch {}
       try { tok = (JSON.parse(fs.readFileSync(path.join(a.dir, '.credentials.json'), 'utf8')).claudeAiOauth || {}).accessToken || ''; } catch {}
       if (!email || !tok) continue;                       // not logged in → skip
-      const u = this._lastUsage[a.name];
-      const util = u ? Math.max((u.five_hour && u.five_hour.used) || 0, (u.seven_day && u.seven_day.used) || 0) : 0;
+      const util = this._utilOf(a.name) ?? 0;             // unknown usage → assume fresh
       if (util >= 100) continue;                          // fully maxed → skip
       if (util < bestUtil) { bestUtil = util; best = a.name; }
     }
@@ -210,9 +241,11 @@ class DevSummaryProvider {
       vscode.window.showWarningMessage('No other logged-in account with remaining capacity to switch to. Add one with `account add <name>` (then log in), or check `account ls`.');
       return;
     }
+    const pct = (n) => { const u = this._utilOf(n); return u === null ? 'usage unknown' : u + '% used'; };
     vscode.window.showWarningMessage(
       'Switch ' + slug + ' ' + name + " from '" + cur + "' to '" + target + "'?",
-      { modal: true, detail: 'The session reopens under ' + target + " (same conversation, via transcript copy) and auto-compacts to shrink context. Claude can't swap accounts in place, so the terminal restarts." },
+      { modal: true, detail: cur + ': ' + pct(cur) + '  →  ' + target + ': ' + pct(target)
+        + '\n\nThe session reopens under ' + target + " (same conversation, via transcript copy) and auto-compacts to shrink context. Claude can't swap accounts in place, so the terminal restarts." },
       'Switch account'
     ).then((ch) => {
       if (ch !== 'Switch account') return;
