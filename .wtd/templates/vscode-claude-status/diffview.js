@@ -243,7 +243,10 @@ body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.5 system-ui,-appl
 .fh .n .a{color:var(--add)}.fh .n .d{color:var(--del)}
 .fh .tw{color:var(--dim);width:10px;text-align:center}
 pre.d{margin:0;overflow-x:auto;font:12px/1.45 ui-monospace,Consolas,monospace;background:#0d1117;border-top:1px solid var(--line)}
-pre.d span{display:block;padding:0 10px;white-space:pre}
+/* width:max-content so a line's +/- background paints the whole scroll width, not just the visible
+   box — a plain block stops at the container edge and the colour cuts off when you scroll right.
+   min-width:100% keeps short lines full-bleed. */
+pre.d span{display:block;width:max-content;min-width:100%;box-sizing:border-box;padding:0 10px;white-space:pre}
 pre.d .pl{background:#1f4d2a4d;color:#aff5b4}
 pre.d .mi{background:#5d1c1c4d;color:#ffdcd7}
 pre.d .hh{background:#1e2a3a;color:#79c0ff}
