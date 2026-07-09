@@ -30,6 +30,23 @@ cfgjson() { [ "$1" = "$DEFAULT" ] && echo "$HOME/.claude.json" || echo "$1/.clau
 emailof() { jq -r '.oauthAccount.emailAddress // "(not logged in)"' "$(cfgjson "$1")" 2>/dev/null || echo "(not logged in)"; }
 seed()    { [ -f "$DEFAULT/settings.json" ] && cp "$DEFAULT/settings.json" "$1/settings.json" || true; }  # share hooks/statusline/attribution (absolute paths)
 
+# Which account a session is really on when it has no binding — i.e. it was launched before agent.sh
+# started recording one. Claude writes the live transcript into the config dir it runs under, so the
+# account whose store holds the most recently written copy of this session's id is the one in use.
+infer_account() {
+  local wt="$1" session="$2" id f m name dir best="" bestm=0
+  id="$(cat "$(wtd_session_idfile "$session")" 2>/dev/null || true)"
+  [ -n "$id" ] || return 0
+  while IFS= read -r name; do
+    dir="$(account_dir_of "$name")"
+    f="$(wtd_claude_transcript "$wt" "$id" "$dir")"
+    [ -f "$f" ] || continue
+    m="$(stat -c %Y "$f" 2>/dev/null || echo 0)"
+    if [ "$m" -gt "$bestm" ]; then bestm="$m"; best="$name"; fi
+  done < <(account_names)
+  printf '%s' "$best"
+}
+
 cmd="${1:-ls}"; shift || true
 case "$cmd" in
   ls|list)
@@ -94,7 +111,9 @@ case "$cmd" in
     session="${slug}-${wtname}"; session="${session//[.:]/-}"
     wt="$DEV/worktrees/$slug/$wtname"
     [ -d "$wt" ] || { echo "error: no worktree at $wt" >&2; exit 1; }
-    cur="$(wtd_session_account_get "$session")"; [ -n "$cur" ] || cur=default
+    cur="$(wtd_session_account_get "$session")"
+    [ -n "$cur" ] || cur="$(infer_account "$wt" "$session")"
+    [ -n "$cur" ] || cur=default
     curdir="$(account_dir_of "$cur")"
     if [ -n "$to" ]; then            # extension pre-picked the target from its cached usage numbers
       [ "$to" != "$cur" ] || { echo "error: session is already on account '$to'" >&2; exit 1; }

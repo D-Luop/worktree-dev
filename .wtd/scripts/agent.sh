@@ -229,6 +229,11 @@ else
   ccdir="$(account_dir_for_role dev)"        # configured default for dev sessions (empty = ~/.claude)
   [ -n "$ccdir" ] && account_label="$(account_name_for_role dev)"
 fi
+# Record what this session actually runs under, whatever route decided it. Without this the binding
+# only ever existed after an `account switch`, so a session launched with `--account X` still looked
+# like it was on the default — and the roster's ⇄ would offer to "switch" it to the account it was
+# already using. The binding is now the single source of truth for both agent.sh and the panel.
+wtd_session_account_set "$bind_session" "${account_label:-default}"
 
 list_repos() {
   echo "registered repos:"
