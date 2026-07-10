@@ -82,13 +82,23 @@ function _termDump() {
   catch (e) { return 'ERR ' + (e && e.message); }
 }
 
+// The name a terminal was CREATED with. Terminal.name tracks the tab title, and Claude Code rewrites
+// that title as it works ("✳ Thinking…"), so matching a session by t.name silently stops working the
+// moment its agent starts — the roster then can't find, focus, reap, or highlight it. creationOptions
+// is fixed at creation and survives a window reload, so it's the stable identity. Falls back to
+// t.name for terminals we didn't create (a user's own shell).
+function termName(t) {
+  try { const n = t && t.creationOptions && t.creationOptions.name; if (n) return n; } catch {}
+  return (t && t.name) || '';
+}
+
 // Dispose any terminals with this name whose process has already exited (exitStatus set). A window
 // reload revives editor terminal tabs but not their agent/claude process, leaving dead tabs behind;
 // reaping them before re-launching keeps a stale dead tab from shadowing (or being focused instead of)
 // a fresh live session — the "clicking a stopped worktree does nothing" symptom.
 function disposeDeadTerminals(name) {
   for (const x of vscode.window.terminals)
-    if (x.name === name && x.exitStatus !== undefined) { try { x.dispose(); } catch {} }
+    if (termName(x) === name && x.exitStatus !== undefined) { try { x.dispose(); } catch {} }
 }
 
 // Slugs registered in .wtd/repos.tsv (first tab-separated field of each non-comment line). Lets the
@@ -263,7 +273,7 @@ class DevSummaryProvider {
   // target account), then send /compact once it's back up.
   _relaunchAndCompact(slug, name) {
     const key = this._key(slug, name);
-    const t = this._terms.get(key) || vscode.window.terminals.find((x) => x.name === name);
+    const t = this._terms.get(key) || vscode.window.terminals.find((x) => termName(x) === name);
     if (t) { try { t.dispose(); } catch {} this._terms.delete(key); }
     setTimeout(() => {
       this.openOrFocus(slug, name);
@@ -282,7 +292,7 @@ class DevSummaryProvider {
     // Only reuse a LIVE terminal. After a window reload the tab may be revived but its agent/claude
     // process already exited (exitStatus set) — reusing it would focus a dead tab that never relaunches.
     if (!t || t.exitStatus !== undefined) {
-      t = vscode.window.terminals.find((x) => x.name === name && x.exitStatus === undefined);
+      t = vscode.window.terminals.find((x) => termName(x) === name && x.exitStatus === undefined);
     }
     if (t && t.exitStatus === undefined) { branch = inMap ? 'reuse-map' : 'reuse-byname'; t.show(); }
     else {
@@ -308,7 +318,7 @@ class DevSummaryProvider {
   // no slug/worktree of its own; `assistant` (the PATH command) handles resume.
   openOrFocusAssistant() {
     let t = this._asstTerm;
-    if (!t || t.exitStatus !== undefined) t = vscode.window.terminals.find((x) => x.name === ASST_NAME && x.exitStatus === undefined);
+    if (!t || t.exitStatus !== undefined) t = vscode.window.terminals.find((x) => termName(x) === ASST_NAME && x.exitStatus === undefined);
     if (t && t.exitStatus === undefined) { t.show(); }
     else {
       disposeDeadTerminals(ASST_NAME);
@@ -325,7 +335,7 @@ class DevSummaryProvider {
   // ad-hoc commands. Like the assistant row, but runs no Claude session — just an interactive shell.
   openOrFocusTerminal() {
     let t = this._term;
-    if (!t || t.exitStatus !== undefined) t = vscode.window.terminals.find((x) => x.name === TERM_NAME && x.exitStatus === undefined);
+    if (!t || t.exitStatus !== undefined) t = vscode.window.terminals.find((x) => termName(x) === TERM_NAME && x.exitStatus === undefined);
     if (t && t.exitStatus === undefined) { t.show(); }
     else {
       disposeDeadTerminals(TERM_NAME);
@@ -585,7 +595,7 @@ class DevSummaryProvider {
       + ' — when it lands, tick it in .claude/plans/active-plan.html and re-run `preview` to refresh the plan.';
     const send = (term) => { term.show(); term.sendText(prompt, true); this._current = term; };
     let t = this._terms.get(key);
-    if (!t || t.exitStatus !== undefined) t = vscode.window.terminals.find((x) => x.name === name && x.exitStatus === undefined);
+    if (!t || t.exitStatus !== undefined) t = vscode.window.terminals.find((x) => termName(x) === name && x.exitStatus === undefined);
     if (t && t.exitStatus === undefined) { this._terms.set(key, t); send(t); }
     else {
       this.openOrFocus(slug, name);                     // launches `agent <slug> <name>`
@@ -600,9 +610,9 @@ class DevSummaryProvider {
   // the worktree key of the currently-focused session (null for assistant/terminal/non-worktree)
   _focusedWorktreeKey() {
     const cur = this._current || vscode.window.activeTerminal;
-    if (!cur || cur.name === ASST_NAME || cur.name === TERM_NAME) return null;
+    if (!cur || termName(cur) === ASST_NAME || termName(cur) === TERM_NAME) return null;
     for (const [k, v] of this._terms) if (v === cur) return k;
-    for (const k of Object.keys(this._preview)) if (k.split('\x01')[1] === cur.name) return k;   // reload-revived
+    for (const k of Object.keys(this._preview)) if (k.split('\x01')[1] === termName(cur)) return k;   // reload-revived
     return null;
   }
 
@@ -621,9 +631,9 @@ class DevSummaryProvider {
   _syncPreviewPanel(t) {
     if (!this._pvFollow) return;
     let want = null;
-    if (t && t.name !== ASST_NAME && t.name !== TERM_NAME) {
+    if (t && termName(t) !== ASST_NAME && termName(t) !== TERM_NAME) {
       for (const [k, v] of this._terms) if (v === t && this._hasPanelContent(k)) { want = k; break; }
-      if (!want) for (const k of Object.keys(this._preview)) if (k.split('\x01')[1] === t.name) { want = k; break; }
+      if (!want) for (const k of Object.keys(this._preview)) if (k.split('\x01')[1] === termName(t)) { want = k; break; }
     }
     if (want === this._pvShownKey) return;
     if (want) this._showPreviewByKey(want);
@@ -637,7 +647,7 @@ class DevSummaryProvider {
     this._syncPreviewPanel(t);   // make the design-preview panel follow the worktree you switched to
     for (const [k, v] of this._terms) if (v === t) { this.clearUnread(k); return; }
     // also match a reload-revived terminal by name
-    for (const k of Object.keys(this._unread)) { const name = k.split('')[1]; if (this._unread[k] && t.name && t.name === name) { this.clearUnread(k); return; } }
+    for (const k of Object.keys(this._unread)) { const name = k.split('')[1]; if (this._unread[k] && termName(t) === name) { this.clearUnread(k); return; } }
   }
 
   resolveWebviewView(view) {
@@ -968,13 +978,13 @@ class DevSummaryProvider {
       this._lastStatus[key] = w.status;
       w.unread = !!this._unread[key];
       w.active = live.has(w.slug + '-' + w.name);   // has a live tmux session (vs. closed/inactive)
-      w.current = !!cur && (curKey ? key === curKey : (!!cur.name && cur.name === w.name));   // focused session
+      w.current = !!cur && (curKey ? key === curKey : termName(cur) === w.name);   // focused session
     }
     // pinned assistant row state: live if a terminal named "assistant" exists; selected if it's focused.
     // Unread works exactly like a worktree row: the assistant's status sentinel (in the dev base) flips
     // to 'input' (your turn) while you're not focused on it → highlight yellow; cleared when you focus it.
-    const asstTerm = vscode.window.terminals.find((x) => x.name === ASST_NAME);
-    const asstCurrent = !!cur && cur.name === ASST_NAME;
+    const asstTerm = vscode.window.terminals.find((x) => termName(x) === ASST_NAME);
+    const asstCurrent = !!cur && termName(cur) === ASST_NAME;
     let asstStatus = ''; try { asstStatus = fs.readFileSync(path.join(DEV, STATUS_FILE), 'utf8').trim(); } catch {}
     const aprev = this._lastStatus[ASST_NAME];
     if (asstStatus === 'input' && aprev !== undefined && aprev !== 'input' && !asstCurrent) this._unread[ASST_NAME] = true;
@@ -982,8 +992,8 @@ class DevSummaryProvider {
     if (asstCurrent) this._unread[ASST_NAME] = false;   // focused → clear (mirrors clearUnread on worktrees)
     const assistant = { active: !!asstTerm, current: asstCurrent, unread: !!this._unread[ASST_NAME] };
     // pinned plain-terminal row state (same idea, for the "terminal" row above the assistant)
-    const plainTerm = vscode.window.terminals.find((x) => x.name === TERM_NAME);
-    const terminal = { active: !!plainTerm, current: !!cur && cur.name === TERM_NAME };
+    const plainTerm = vscode.window.terminals.find((x) => termName(x) === TERM_NAME);
+    const terminal = { active: !!plainTerm, current: !!cur && termName(cur) === TERM_NAME };
     let multiAccount = false; try { multiAccount = this._accounts().length > 1; } catch {}
     if (this.view && this.view.visible) this.view.webview.postMessage({ type: 'roster', rows, assistant, terminal, multiAccount });
   }
