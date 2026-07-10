@@ -19,6 +19,7 @@ const MAX_COMMITS = 200;           // branch histories longer than this are rare
 const FALLBACK_COMMITS = 50;       // when the branch has no commits over its base (see listCommits)
 const MAX_FILES = 300;             // per commit
 const MAX_PATCH_LINES = 1200;      // per file — a 40k-line generated blob would freeze the webview
+const UNTRACKED_MAX_BYTES = 512 * 1024;   // above this an untracked file is listed, not inlined
 const US = '\x1f', RS = '\x1e';    // git --format field / record separators (never appear in messages)
 
 // Test-file globs mirror test_excludes() in .wtd/hooks/generated-filter.sh, so the `commits` tab
@@ -169,19 +170,43 @@ function parsePatch(text) {
   return { files: files.slice(0, MAX_FILES), omitted };
 }
 
-// Untracked files aren't in `git diff HEAD`; surface them as name-only rows rather than pretending
-// the working tree is clean. Their contents aren't diffed (they have no blob to diff against).
+// An untracked file has no blob to diff against, so git won't emit a patch for it. Reading it and
+// synthesising an all-adds hunk is what `git diff --no-index /dev/null <f>` would print, without one
+// git process per file — and it keeps these rows from claiming "+0 −0" when they're entirely new.
+function untrackedEntry(wt, file) {
+  const base = {
+    path: file, from: '', status: 'untracked', adds: 0, dels: 0, binary: false, untracked: true,
+    ext: (/\.([A-Za-z0-9_+-]+)$/.exec(file) || [, ''])[1].toLowerCase(),
+    test: TEST_RE.test(file), patch: '', truncated: 0,
+  };
+  let buf;
+  try {
+    const st = fs.statSync(path.join(wt, file));
+    if (!st.isFile()) return null;                                   // a symlink to a dir, say
+    if (st.size > UNTRACKED_MAX_BYTES) return Object.assign(base, { tooBig: true });
+    buf = fs.readFileSync(path.join(wt, file));
+  } catch { return Object.assign(base, { unreadable: true }); }
+  if (buf.includes(0)) return Object.assign(base, { binary: true });  // NUL ⇒ git would call it binary
+
+  const lines = buf.toString('utf8').replace(/\r\n/g, '\n').split('\n');
+  if (lines.length && lines[lines.length - 1] === '') lines.pop();    // trailing newline isn't a line
+  const adds = lines.length;
+  let body = lines, truncated = 0;
+  if (body.length > MAX_PATCH_LINES) { truncated = body.length - MAX_PATCH_LINES; body = body.slice(0, MAX_PATCH_LINES); }
+  return Object.assign(base, {
+    adds, truncated,
+    patch: ['@@ -0,0 +1,' + adds + ' @@'].concat(body.map((l) => '+' + l)).join('\n'),
+  });
+}
+
 function untrackedFiles(wt) {
   const out = gitSync(wt, ['status', '--porcelain', '--untracked-files=all']);
   if (!out) return [];
   return out.split('\n').filter((l) => l.startsWith('??')).map((l) => {
-    const file = l.slice(3).replace(/^"|"$/g, '');
-    return {
-      path: file, from: '', status: 'untracked', adds: 0, dels: 0, binary: false,
-      ext: (/\.([A-Za-z0-9_+-]+)$/.exec(file) || [, ''])[1].toLowerCase(),
-      test: TEST_RE.test(file), patch: '', truncated: 0, untracked: true,
-    };
-  });
+    let file = l.slice(3);
+    if (file.length > 1 && file[0] === '"' && file[file.length - 1] === '"') file = unquoteC(file.slice(1, -1));
+    return untrackedEntry(wt, file);
+  }).filter(Boolean);
 }
 
 // The patch for one entry: a real commit, or the uncommitted working tree (tracked edits vs HEAD,
@@ -238,6 +263,7 @@ body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.5 system-ui,-appl
 .fh{display:flex;gap:8px;align-items:center;padding:6px 10px;background:var(--panel);cursor:pointer;font:12px ui-monospace,Consolas,monospace}
 .fh:hover{background:#1c2128}
 .fh .p{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;color:var(--fg)}
+.fh .lang{flex:0 0 auto;min-width:28px;height:15px;line-height:15px;text-align:center;border-radius:3px;padding:0 4px;font:700 9px/15px ui-monospace,Consolas,monospace;letter-spacing:.3px}
 .fh .st{font-size:10px;text-transform:uppercase;letter-spacing:.4px;color:var(--dim);border:1px solid var(--line);border-radius:4px;padding:0 5px}
 .fh .n{white-space:nowrap}
 .fh .n .a{color:var(--add)}.fh .n .d{color:var(--del)}
@@ -279,6 +305,46 @@ pre.d .ct{color:#adbac7}
 
   function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 
+  // language badge: [label, background, full name]. Colours follow GitHub's linguist palette. Keyed by
+  // extension, with a few extensionless basenames (Dockerfile, Makefile) matched first.
+  var LANG={
+    ts:['TS','#3178c6','TypeScript'], tsx:['TSX','#3178c6','TypeScript React'], mts:['TS','#3178c6','TypeScript'],
+    js:['JS','#f1e05a','JavaScript'], jsx:['JSX','#f1e05a','JavaScript React'], mjs:['JS','#f1e05a','JavaScript'], cjs:['JS','#f1e05a','JavaScript'],
+    json:['{ }','#cbcb41','JSON'], jsonc:['{ }','#cbcb41','JSON'],
+    md:['MD','#4a5568','Markdown'], mdx:['MDX','#4a5568','MDX'], txt:['TXT','#6e7681','Text'],
+    html:['HTM','#e34c26','HTML'], htm:['HTM','#e34c26','HTML'],
+    css:['CSS','#563d7c','CSS'], scss:['SCS','#c6538c','Sass'], sass:['SCS','#c6538c','Sass'], less:['LES','#1d365d','Less'],
+    svelte:['SVE','#ff3e00','Svelte'], vue:['VUE','#41b883','Vue'], astro:['AST','#ff5a03','Astro'],
+    go:['GO','#00add8','Go'], rs:['RS','#dea584','Rust'], py:['PY','#3572a5','Python'], rb:['RB','#701516','Ruby'],
+    java:['JAV','#b07219','Java'], kt:['KT','#a97bff','Kotlin'], swift:['SWF','#f05138','Swift'],
+    c:['C','#555555','C'], h:['H','#555555','C header'], cpp:['C++','#f34b7d','C++'], cc:['C++','#f34b7d','C++'], hpp:['H++','#f34b7d','C++ header'],
+    cs:['C#','#178600','C#'], php:['PHP','#4f5d95','PHP'], lua:['LUA','#000080','Lua'], zig:['ZIG','#ec915c','Zig'],
+    sh:['SH','#89e051','Shell'], bash:['SH','#89e051','Shell'], zsh:['SH','#89e051','Shell'], ps1:['PS','#2b6ea3','PowerShell'],
+    sql:['SQL','#e38c00','SQL'], proto:['PB','#4b7bec','Protocol Buffers'], graphql:['GQL','#e10098','GraphQL'],
+    yml:['YML','#cb171e','YAML'], yaml:['YML','#cb171e','YAML'], toml:['TML','#9c4221','TOML'], ini:['INI','#6e7681','INI'],
+    xml:['XML','#0060ac','XML'], svg:['SVG','#ff9900','SVG'],
+    png:['IMG','#a074c4','Image'], jpg:['IMG','#a074c4','Image'], jpeg:['IMG','#a074c4','Image'],
+    gif:['IMG','#a074c4','Image'], webp:['IMG','#a074c4','Image'], ico:['IMG','#a074c4','Image'],
+    lock:['LCK','#6e7681','Lockfile'], gitignore:['GIT','#f14e32','Git']
+  };
+  var LANG_NAMED={dockerfile:['DK','#384d54','Dockerfile'], makefile:['MK','#427819','Makefile'], licence:['LIC','#6e7681','Licence'], license:['LIC','#6e7681','Licence']};
+
+  // white text on dark chips, black on light ones (relative luminance, sRGB coefficients)
+  function fgFor(hex){
+    var r=parseInt(hex.substr(1,2),16), g=parseInt(hex.substr(3,2),16), b=parseInt(hex.substr(5,2),16);
+    return (0.2126*r+0.7152*g+0.0722*b)>150 ? '#111' : '#fff';
+  }
+  function langOf(p){
+    var f=p.split('/').pop(), base=f.toLowerCase();
+    var l=LANG_NAMED[base] || LANG[(/\.([A-Za-z0-9_+-]+)$/.exec(f)||[,''])[1].toLowerCase()];
+    if(!l){ var e=((/\.([A-Za-z0-9_+-]+)$/.exec(f)||[,''])[1]||'').toUpperCase().slice(0,3); l=[e||'•','#6e7681','File']; }
+    return l;
+  }
+  function langChip(p){
+    var l=langOf(p);
+    return '<span class="lang" style="background:'+l[1]+';color:'+fgFor(l[1])+'" title="'+esc(l[2])+'">'+esc(l[0])+'</span>';
+  }
+
   function renderCommits(){
     var el=document.getElementById('clist');
     if(!commits.length){ el.innerHTML='<div class="empty">No commits.</div>'; return; }
@@ -319,9 +385,10 @@ pre.d .ct{color:#adbac7}
     });
   }
   function body(f){
-    if(f.untracked) return '<div class="note">Untracked — no previous version to diff against.</div>';
-    if(f.binary)    return '<div class="note">Binary file.</div>';
-    if(!f.patch)    return '<div class="note">No textual changes (mode or rename only).</div>';
+    if(f.binary)     return '<div class="note">Binary file.</div>';
+    if(f.tooBig)     return '<div class="note">Untracked file is too large to preview.</div>';
+    if(f.unreadable) return '<div class="note">Untracked — could not read the file.</div>';
+    if(!f.patch)     return '<div class="note">No textual changes (mode or rename only).</div>';
     var html=f.patch.split('\\n').map(function(l){
       var c = l[0]==='+' ? 'pl' : l[0]==='-' ? 'mi' : l[0]==='@' ? 'hh' : 'ct';
       return '<span class="'+c+'">'+esc(l||' ')+'</span>';
@@ -341,6 +408,7 @@ pre.d .ct{color:#adbac7}
       var key=f.path, open=!collapsed[key];
       return '<div class="f"><div class="fh" data-k="'+esc(key)+'">'
         +'<span class="tw">'+(open?'▾':'▸')+'</span>'
+        +langChip(f.path)
         +'<span class="st">'+esc(f.status)+'</span>'
         +'<span class="p">'+esc(f.from?f.from+' → '+f.path:f.path)+'</span>'
         +'<span class="n"><span class="a">+'+f.adds+'</span> <span class="d">−'+f.dels+'</span></span>'
