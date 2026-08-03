@@ -1080,13 +1080,22 @@ class DevSummaryProvider {
   .none{opacity:.5;font-size:12px;padding:2px 0;}
   .stale{opacity:.45;} .staleNote{font-size:10px;opacity:.6;font-style:italic;color:var(--vscode-charts-yellow,#d2a000);margin-top:1px;}
   hr{border:none;border-top:1px solid var(--vscode-panel-border,rgba(127,127,127,.2));margin:5px 0 4px;}
-  .head{display:flex;align-items:center;justify-content:space-between;flex-wrap:nowrap;gap:6px;font-size:12px;margin-bottom:3px;}
-  .counts{opacity:.8;flex:none;white-space:nowrap;}
-  .btns{display:flex;align-items:center;gap:3px;flex:none;}
-  .btn{cursor:pointer;border:none;white-space:nowrap;background:var(--vscode-button-secondaryBackground,rgba(127,127,127,.18));color:var(--vscode-button-secondaryForeground,inherit);border-radius:3px;padding:2px 5px;font-size:12px;display:inline-flex;align-items:center;justify-content:center;}
-  .btn:hover{background:var(--vscode-button-secondaryHoverBackground,rgba(127,127,127,.3));}
-  .wt{position:relative;display:flex;align-items:center;gap:5px;height:21px;cursor:pointer;border-radius:3px;padding:0 3px 0 8px;font-size:13px;}
+  /* unified toolbar: pinned terminal/assistant avatars + all non-worktree-specific buttons, one row */
+  .toolbar{display:flex;align-items:center;gap:4px;margin-bottom:7px;flex-wrap:nowrap;}
+  .avatar{width:22px;height:22px;border-radius:50%;background:rgba(127,127,127,.16);display:flex;align-items:center;justify-content:center;font-size:12px;position:relative;cursor:pointer;flex:none;}
+  .avatar:hover{background:rgba(127,127,127,.3);}
+  .avatar.ring{box-shadow:0 0 0 2px var(--vscode-charts-green,#3fd35f);}
+  .avatar .b{position:absolute;bottom:-2px;right:-2px;width:7px;height:7px;border-radius:50%;border:1.5px solid var(--vscode-sideBar-background,#181818);background:var(--vscode-charts-yellow,#d2a000);}
+  .ibtn{cursor:pointer;border:none;width:22px;height:22px;background:rgba(127,127,127,.14);color:inherit;border-radius:5px;font-size:12px;display:inline-flex;align-items:center;justify-content:center;flex:none;}
+  .ibtn:hover{background:rgba(127,127,127,.3);}
+  .ibtn.primary{background:var(--vscode-button-background,rgba(74,163,255,.22));color:var(--vscode-button-foreground,#7ebcff);}
+  .ibtn.primary:hover{background:var(--vscode-button-hoverBackground,rgba(74,163,255,.34));}
+  .divider{width:1px;align-self:stretch;background:var(--vscode-panel-border,rgba(127,127,127,.2));margin:1px 1px;flex:none;}
+  .tbspacer{flex:1;}
+  .wt{position:relative;display:flex;align-items:center;gap:6px;height:21px;cursor:pointer;border-radius:3px;padding:0 3px 0 5px;font-size:13px;}
   .wt:hover{background:var(--vscode-list-hoverBackground,rgba(127,127,127,.12));}
+  .wt .accentbar{width:2px;align-self:stretch;border-radius:2px;flex:none;}
+  .wt .mini{width:16px;height:16px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;font-size:8.5px;font-weight:700;}
   .wt .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .wt .git{opacity:.6;font-size:12px;font-variant-numeric:tabular-nums;}
   .ahead{color:var(--vscode-charts-blue,#4aa3ff);} .dirty{color:var(--vscode-charts-yellow,#d2a000);}
@@ -1104,12 +1113,6 @@ class DevSummaryProvider {
   .wt .dif{font-weight:700;}
   .wt .dif:hover{color:var(--vscode-charts-purple,#c586f0);}
   .wt.sep{margin-top:7px;}   /* gap between status groups */
-  /* pinned assistant row: above the worktree groups, no status glyph/git, with a divider below it */
-  .wt.asst{margin-top:9px;}   /* breathing room between the header buttons and the first pinned row */
-  .wt.asst + .wt.asst{margin-top:2px;}   /* but keep terminal + assistant tight as a pair */
-  .wt.asst .agly{width:15px;text-align:center;}
-  .wt.asst .nm{font-weight:600;}
-  .asstsep{border-bottom:1px solid var(--vscode-panel-border,rgba(127,127,127,.2));margin:2px 0 6px;}
   .wt.active{background:rgba(127,127,127,.13);}   /* live tmux session — noticeably lighter than normal */
   .wt.unread{background:rgba(255,216,61,.16);box-shadow:inset 2px 0 0 var(--vscode-charts-yellow,#d2a000);}  /* your-turn, not yet opened — yellow */
   /* the session you currently have focused — VSCode's "selected list item" look (accent bar + bg).
@@ -1125,7 +1128,18 @@ class DevSummaryProvider {
 </style></head><body>
 <div id="lim"><div class="none">waiting for a session…</div></div>
 <hr>
-<div class="head"><span class="counts" id="counts"></span><span class="btns"><span class="btn" id="img" title="Add an image to the focused session — pastes a clipboard screenshot, or pick a file (works around native-Windows terminal paste)">📷</span><span class="btn" id="bell" title="Turn-end sound alert — click to mute/unmute">🔔</span><span class="btn" id="prev" title="Open the focused worktree's design preview">🖼</span><span class="btn" id="tests" title="Include/exclude test files in the diff panes">tests ✓</span><span class="btn" id="add" title="Launch a new agent">+ agent</span></span></div>
+<div class="toolbar">
+  <span class="avatar" id="termAvatar" title="plain terminal — a login shell in the dev base · click to open">🖥️</span>
+  <span class="avatar" id="asstAvatar" title="worktree-dev assistant — fleet management · click to open">🤖<span class="b" id="asstBadge" style="display:none"></span></span>
+  <span class="divider"></span>
+  <span class="ibtn" id="img" title="Add an image to the focused session — pastes a clipboard screenshot, or pick a file (works around native-Windows terminal paste)">📷</span>
+  <span class="ibtn" id="bell" title="Turn-end sound alert — click to mute/unmute">🔔</span>
+  <span class="ibtn" id="prev" title="Open the focused worktree's design preview">🖼</span>
+  <span class="divider"></span>
+  <span class="ibtn" id="tests" title="Include/exclude test files in the diff panes">🧪</span>
+  <span class="tbspacer"></span>
+  <span class="ibtn primary" id="add" title="Launch a new agent">➕</span>
+</div>
 <div id="roster"></div>
 <div id="monwrap">
 <hr>
@@ -1139,7 +1153,6 @@ class DevSummaryProvider {
   window.addEventListener('error', e => { try{ vsc.postMessage({cmd:'jsError', msg: String(e.message||e)+' @'+(e.lineno||'?')}); }catch(_){} });
   let accts=[], ros=[], mon=null, asstState={}, termState={}, multiAcct=false;
   const GLYPH={working:'🔵',input:'🟡',reviewing:'🟣',pr:'🔹',done:'🟢',stopped:'🔴'};   // emoji -> editor tab name
-  const GLYPHD={working:'◐',input:'!',reviewing:'⋯',pr:'◆',done:'✓',stopped:'○'};        // explorer-style glyph for the roster
   const COL={working:'#4aa3ff',input:'#ffd83d',reviewing:'#c586f0',pr:'#5cc8ff',done:'#3fd35f',stopped:'#ff5c57'};
   const PRIO={input:0,reviewing:1,working:2,pr:3,done:4,stopped:5,'':6};   // pr sorts below working, above done
   function esc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -1166,22 +1179,33 @@ class DevSummaryProvider {
       return '<div class="acctblk">'+head+bars+note+'</div>';
     }).join('');
   }
+  // 1-2 letter tag for a worktree's avatar: initials of its hyphen/slash/underscore-separated
+  // words ("billing-fix" -> "BF"), else just its first two characters.
+  function initials(name){
+    const parts=name.split(/[-_\/\s]+/).filter(Boolean);
+    return (parts.length>1 ? parts[0][0]+parts[1][0] : name.slice(0,2)).toUpperCase();
+  }
   function renderRoster(){
-    const c={}; ros.forEach(w=>{ const k=w.status||''; c[k]=(c[k]||0)+1; });
-    const order=['input','reviewing','working','pr','done','stopped'];
-    document.getElementById('counts').innerHTML =
-      order.filter(k=>c[k]).map(k=>'<span style="color:'+(COL[k]||'#888')+'">'+GLYPHD[k]+'</span>'+c[k]).join(' · ') || '<span style="opacity:.5">no worktrees</span>';
+    // pinned toolbar avatars mirror live terminal/assistant state: a ring for focused, dimmed
+    // when there's no live session, a corner badge for the assistant's unread "your turn".
+    const ta=document.getElementById('termAvatar');
+    if(ta){ ta.classList.toggle('ring', !!termState.current); ta.style.opacity = termState.active?1:.55; }
+    const aa=document.getElementById('asstAvatar');
+    if(aa){ aa.classList.toggle('ring', !!asstState.current); aa.style.opacity = asstState.active?1:.55; }
+    const ab=document.getElementById('asstBadge');
+    if(ab) ab.style.display = asstState.unread ? '' : 'none';
     // group by repo (slug), alphabetically. Within a repo, sort by
     // status priority (actionable on top) then name.
     const groups={}; ros.forEach(w=>{ (groups[w.slug]=groups[w.slug]||[]).push(w); });
     const slugs=Object.keys(groups).sort((a,b)=> a.localeCompare(b));
     const wtRow=(w,sep)=>{
       const g=GLYPH[w.status]||GLYPH.stopped;      // emoji -> editor tab name (data-glyph)
-      const gd=GLYPHD[w.status]||'○';              // explorer-style glyph shown in the row
-      const gc=COL[w.status]||'#888';
+      const gc=COL[w.status]||'#888888';
       const git=(w.ahead?'<span class="ahead">↑'+w.ahead+'</span> ':'')+(w.dirty?'<span class="dirty">●</span>':'');
       return '<div class="wt'+(sep?' sep':'')+(w.active?' active':'')+(w.unread?' unread':'')+(w.current?' current':'')+'" data-slug="'+esc(w.slug)+'" data-name="'+esc(w.name)+'" data-glyph="'+g+'" title="'+esc(w.slug+' '+w.name)+(w.status?(' — '+w.status):'')+(w.active?' · active':'')+(w.current?' · selected':'')+(w.unread?' · unread':'')+' · click to open">'
-        +'<span style="color:'+gc+'">'+gd+'</span><span class="nm">'+esc(w.name)+'</span>'
+        +'<span class="accentbar" style="background:'+gc+'"></span>'
+        +'<span class="mini" style="color:'+gc+';background:'+gc+'2e">'+esc(initials(w.name))+'</span>'
+        +'<span class="nm">'+esc(w.name)+'</span>'
         +'<span class="git">'+git+'</span>'
         +'<span class="acts">'
         +'<span class="dif" title="Browse this branch\\'s commits and diffs">Δ</span>'
@@ -1191,20 +1215,12 @@ class DevSummaryProvider {
         +'<span class="arch" title="Archive '+esc(w.name)+'">📦</span>'
         +'<span class="del" title="Delete '+esc(w.name)+' (remove worktree)">🗑</span></span></div>';
     };
-    // pinned plain-terminal row, just above the assistant — an ordinary shell for ad-hoc commands
-    const termRow='<div class="wt asst'+(termState.current?' current':'')+(termState.active?' active':'')+'" id="termRow" title="plain terminal — a login shell in the dev base · click to open">'
-      +'<span class="agly">🖥️</span><span class="nm">terminal</span></div>';
-    // pinned assistant row — separated from the worktrees, no status indicators
-    const asstRow='<div class="wt asst'+(asstState.current?' current':'')+(asstState.active?' active':'')+(asstState.unread?' unread':'')+'" id="asstRow" title="worktree-dev assistant — fleet management · click to open">'
-      +'<span class="agly">🤖</span><span class="nm">assistant</span></div><div class="asstsep"></div>';
-    document.getElementById('roster').innerHTML = termRow + asstRow + slugs.map(slug=>{
+    document.getElementById('roster').innerHTML = slugs.map(slug=>{
       const rows=groups[slug].sort((a,b)=>(PRIO[a.status]??9)-(PRIO[b.status]??9) || a.name.localeCompare(b.name));
       // add a gap whenever the status changes, so each status group is visually separated
       return '<div class="repo">'+esc(slug)+'</div>'+rows.map((w,i)=>wtRow(w, i>0 && rows[i-1].status!==w.status)).join('');
     }).join('');
-    const ar=document.getElementById('asstRow'); if(ar) ar.onclick=()=>vsc.postMessage({cmd:'newAssistant'});
-    const tr=document.getElementById('termRow'); if(tr) tr.onclick=()=>vsc.postMessage({cmd:'newTerminal'});
-    document.querySelectorAll('.wt:not(.asst)').forEach(el=>el.onclick=()=>vsc.postMessage({cmd:'open',slug:el.dataset.slug,name:el.dataset.name,glyph:el.dataset.glyph}));
+    document.querySelectorAll('.wt').forEach(el=>el.onclick=()=>vsc.postMessage({cmd:'open',slug:el.dataset.slug,name:el.dataset.name,glyph:el.dataset.glyph}));
     document.querySelectorAll('.arch').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'archive',slug:p.dataset.slug,name:p.dataset.name}); });
     document.querySelectorAll('.del').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'delete',slug:p.dataset.slug,name:p.dataset.name}); });
     document.querySelectorAll('.term').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'terminate',slug:p.dataset.slug,name:p.dataset.name}); });
@@ -1235,13 +1251,15 @@ class DevSummaryProvider {
       + mbar('cpu', cpuPct, cores+'/'+mon.ncpu+'c', 'Claude agents: '+cores+' of '+mon.ncpu+' cores ('+cpuPct+'% of CPU)'+(mon.load&&mon.load!=='n/a'?' · system load '+mon.load:''))
       + mbar('mem', memPct, gb(mon.amem)+'G', 'Claude agents using '+gb(mon.amem)+' GB RAM ('+memPct+'% of '+gb(mon.mt)+'G) · whole system '+gb(mon.msys)+'/'+gb(mon.mt)+'G used ('+sysPct+'%)');
   }
+  document.getElementById('termAvatar').onclick=()=>vsc.postMessage({cmd:'newTerminal'});
+  document.getElementById('asstAvatar').onclick=()=>vsc.postMessage({cmd:'newAssistant'});
   document.getElementById('add').onclick=()=>vsc.postMessage({cmd:'newAgent'});
   document.getElementById('img').onclick=()=>vsc.postMessage({cmd:'pasteImage'});
   document.getElementById('prev').onclick=()=>vsc.postMessage({cmd:'previewFocused'});
   function renderTests(excluded){ const b=document.getElementById('tests'); if(!b) return;
-    b.textContent = excluded ? 'tests ✕' : 'tests ✓';
+    b.style.color = excluded ? '' : 'var(--vscode-charts-green,#3fd35f)';
     b.title = excluded ? 'Test files are EXCLUDED from the diff panes — click to include' : 'Test files are INCLUDED in the diff panes — click to exclude';
-    b.style.opacity = excluded ? '.6' : '1'; }
+    b.style.opacity = excluded ? '.55' : '1'; }
   document.getElementById('tests').onclick=()=>vsc.postMessage({cmd:'toggleTests'});
   function renderBell(muted){ const b=document.getElementById('bell'); if(!b) return;
     b.textContent = muted ? '🔕' : '🔔';
