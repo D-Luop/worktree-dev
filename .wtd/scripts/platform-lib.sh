@@ -24,11 +24,25 @@ wtd_os() {
 
 # wtd_session_backend → tmux | vscode  (echoed)
 # Default: vscode on native Windows, tmux everywhere else. Override with WTD_SESSION_BACKEND.
+# On Linux/WSL/mac without tmux on PATH, this falls back to the vscode backend — which was built
+# and only ever exercised on native Windows Git Bash. That fallback is otherwise silent (the
+# caller just sees "vscode" and has no idea tmux was the reason), so warn once per process.
 wtd_session_backend() {
   if [ -n "${WTD_SESSION_BACKEND:-}" ]; then echo "$WTD_SESSION_BACKEND"; return; fi
   case "$(wtd_os)" in
     windows) echo vscode ;;
-    *)       command -v tmux >/dev/null 2>&1 && echo tmux || echo vscode ;;
+    *)
+      if command -v tmux >/dev/null 2>&1; then
+        echo tmux
+      else
+        if [ -z "${_WTD_TMUX_WARNED:-}" ]; then
+          echo "WARN: tmux not found on PATH — falling back to the vscode session backend" \
+               "(built for native Windows; untested on Linux/mac). Install tmux and re-run" \
+               "'make install' to use the intended backend." >&2
+          export _WTD_TMUX_WARNED=1
+        fi
+        echo vscode
+      fi ;;
   esac
 }
 

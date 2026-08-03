@@ -63,7 +63,10 @@ echo "    installed bash completion for agent/archive/review/ask (open a new she
 
 echo "==> B. dependency check"
 deps="jq git code node"
-[ "$BACKEND" = tmux ] && deps="$deps tmux"   # tmux only on the tmux backend (not native Windows)
+# Check tmux on every non-Windows OS, not just "if the backend already resolved to tmux" — that
+# used to be circular: a missing tmux is *why* the backend falls back to vscode, so gating the
+# check on BACKEND=tmux meant a missing tmux was silently never reported as missing at all.
+[ "$OS" != windows ] && deps="$deps tmux"
 # git-delta is optional (diffs fall back to git's colors) but recommended.
 missing=()
 for d in $deps; do
