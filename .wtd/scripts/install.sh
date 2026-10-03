@@ -187,7 +187,8 @@ echo "    set attribution.commit=\"\" and attribution.pr=\"\""
 echo "==> G. grant fleet-wide READ access to the reference checkouts (~/dev/refs)"
 # Reference checkouts (managed by `ref add` / `agent <slug> <name> <ref>...`) are GLOBAL context:
 # every worktree can read any of them, granted once here instead of per-worktree. Whole-tree
-# additionalDirectories covers refs added later; Edit/Write are denied to keep them read-only.
+# additionalDirectories covers refs added later; Edit is denied to keep them read-only (an Edit rule
+# covers every file-editing tool — Claude Code ignores Write(...) deny rules, so none is added).
 REFROOT="$BASE/refs"
 mkdir -p "$REFROOT"
 tmp=$(mktemp)
@@ -195,10 +196,10 @@ jq --arg root "$REFROOT" '
   .permissions = (.permissions // {})
   | .permissions.additionalDirectories = (((.permissions.additionalDirectories // []) + [$root]) | unique)
   | .permissions.deny =
-      (((.permissions.deny // []) + ["Edit(\($root)/**)", "Write(\($root)/**)"]) | unique)
+      (((.permissions.deny // []) - ["Write(\($root)/**)"] + ["Edit(\($root)/**)"]) | unique)
 ' "$SETTINGS" > "$tmp"
 mv "$tmp" "$SETTINGS"
-echo "    granted read on $REFROOT (Edit/Write denied) in $SETTINGS"
+echo "    granted read on $REFROOT (edits denied) in $SETTINGS"
 
 # Section H configures tmux (mouse, pane-lock, titles, bell, commit-click). Only the tmux backend
 # needs it — native Windows runs sessions in VSCode terminals, so skip the whole block there.
