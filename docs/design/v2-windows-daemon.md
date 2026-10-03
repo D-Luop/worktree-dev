@@ -205,13 +205,67 @@ seeded into the worktree's `CLAUDE.md` *Context / scope* section, and `/pr` note
   count against the rate limit). Results are cached per source and refreshed when the picker opens if
   older than 60 s.
 
+### 4.4 Agent-to-agent communication
+Agents can see the rest of the fleet and send prompts to other worktrees. **Every prompt sent to another
+worktree needs the user's explicit approval.**
+
+**Interface: a `wtd` MCP server.** `install` registers `wtd mcp` (stdio) as a user-scope MCP server,
+so every session gets typed tools with descriptions:
+
+| Tool | Does | Approval |
+|---|---|---|
+| `fleet_list` | All worktrees: repo, branch, status, group, linked issue, account, live?, dirty/ahead, plan title, last activity | none (read-only) |
+| `fleet_get` | One worktree in depth: plan summary (`active-plan.md`), recent commits, diff stat vs default branch, PR notes | none |
+| `fleet_read_file` | Read a file from another worktree (path-confined to that worktree; never writes) | none |
+| `fleet_send` | Send a prompt to another worktree's agent | **always the user** |
+| `fleet_inbox` | Messages this worktree sent and received, with delivery state | none |
+
+The same operations exist as CLI commands (`wtd fleet ls|show|cat|send`) for scripts. Both go through
+the daemon, so the approval rule applies equally to them.
+
+**"Always ask" is enforced in two layers:**
+1. **The daemon (the guarantee).** `fleet_send` never delivers anything directly. It creates a
+   *pending* message and returns `pending_approval` to the sender. The extension raises an approval
+   prompt (a notification, plus a badge on the sender's row) showing sender → target, the full text,
+   and **Send · Edit & send · Deny**. Only the user's click releases it. This holds in every Claude
+   permission mode (`auto`, `bypassPermissions`), and whether the agent uses the MCP tool or the CLI,
+   because there is no other path into another session.
+2. **The agent (good behaviour).** The seeded `CLAUDE.md` tells agents to propose a cross-worktree
+   message to the user in chat and explain why *before* calling `fleet_send`, and never to send
+   unprompted. The tool's description says the same thing.
+
+**Delivery** (after approval):
+- The target receives it as an ordinary prompt with a provenance header, so it shows in that session's
+  transcript and the user sees exactly what arrived:
+  ```
+  [wtd message from luop/feat-billing (msg 42) — reply with fleet_send to "luop/feat-billing"]
+  <body>
+  ```
+- **Target idle** (your turn): typed into its session right away. Before Phase 3 the extension does
+  this with `terminal.sendText`; from Phase 3 the daemon writes it to the pseudo console.
+- **Target busy:** queued, then delivered at its next turn end (`stop` hook). It never interrupts a turn
+  in progress.
+- **Target not running:** the approval prompt offers *Start session & deliver* (resumes its
+  conversation) or *Leave in inbox*. The inbox is delivered the next time the session starts.
+- Delivery state (pending → approved → delivered / denied) shows in both agents' `fleet_inbox` and on
+  the rows.
+
+**Guard rails:** replies are prompts too, so they also need approval, which means two agents can't loop
+without the user. Messages are capped (32 KB) and rate-limited per sender. The approval prompt names the
+sender clearly, because the receiving agent should treat a message as coming from a peer, not from the
+user.
+
+**Fleet awareness without token cost:** sessions aren't fed a fleet summary every turn. The seeded
+`CLAUDE.md` says other worktrees exist and points to `fleet_list` / `fleet_get`, so agents look things
+up on demand.
+
 ## 5. Migration plan
 
 | Phase | Delivers | Retires |
 |---|---|---|
 | **0** (done on branch) | Status hook ~5× faster, resident monitor, no login shells, single status-folder watch, row-only roster updates, git index settings, control-window VSCode settings | — |
-| **1** Daemon core | `wtd.exe` daemon + hook + pipe protocol + SQLite state; git service; metrics; usage. Extension switched to the pipe for all state. Sessions still launch in VSCode terminals, wrapped by `wtd run` (puts Claude in a Job Object and reports liveness) | extension disk scans, timers and `exec`s; `monitor-stats.*`; `wt-status.sh`; the session registry and reaper |
-| **2** New UX | Fleet panel search / filters / groups; New Session quick pick; Settings page; GitHub linking + issues | the `+ agent` input box |
+| **1** Daemon core | `wtd.exe` daemon + hook + pipe protocol + SQLite state; git service; metrics; usage; `wtd mcp` with the read-only fleet tools (`fleet_list` / `fleet_get` / `fleet_read_file`). Extension switched to the pipe for all state. Sessions still launch in VSCode terminals, wrapped by `wtd run` (puts Claude in a Job Object and reports liveness) | extension disk scans, timers and `exec`s; `monitor-stats.*`; `wt-status.sh`; the session registry and reaper |
+| **2** New UX | Fleet panel search / filters / groups; New Session quick pick; Settings page; GitHub linking + issues; agent messaging (`fleet_send` + approval prompt + delivery + inbox) | the `+ agent` input box |
 | **3** Session host | ConPTY hosting + `wtd attach`; sessions survive reloads | `wtd run` wrapper; terminal-name tracking hacks |
 | **4** CLI parity | `archive`/`rm`/`review`/`ask`/`account`/`preview` in Rust; skills call `wtd …` | Git Bash scripts on Windows (Claude Code itself still needs Git Bash) |
 
