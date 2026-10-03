@@ -36,7 +36,7 @@ when idle · daemon idle < 0.5% CPU, < 60 MB RSS with 15 worktrees · zero polli
                                 │ JSON-RPC (requests) + pushed state patches
 ┌───────────────────────────────┴──────────────────────────────────────────┐
 │ wtd daemon  (Rust, tokio, single instance per user)                       │
-│  State store (in memory, persisted to SQLite)                             │
+│  State store (in memory; SQLite from Phase 2)                             │
 │  Session host ── ConPTY + Job Object per Claude session                   │
 │  Git service ─── per-worktree change watch → debounced `git status`       │
 │  Hook ingest ─── status state machine (port of wt-status.sh)              │
@@ -75,11 +75,17 @@ the repo or as a release asset (the same way the `.vsix` ships today).
   its last `rev`; the daemon replays patches or sends a fresh snapshot.
 - Versioned: `hello {protocol: 1, client: "vscode"|"cli"|"hook"}`. A mismatch tells the extension to
   update.
-- Hook fast path: `wtd hook` sends one fire-and-forget `hook.event` line and exits without waiting for
-  a reply. If the daemon is down it appends to `state/hook-spool.jsonl`, and the daemon drains that on
-  start, so no status is ever lost.
+- Hook fast path (as built): `wtd hook` applies the status machine to the worktree's status files
+  itself, then sends one fire-and-forget `hook` notification so the daemon pushes the change at once.
+  The files stay authoritative, so status keeps updating while the daemon is stopped and nothing needs
+  spooling; the daemon re-reads the files on start and on every rescan. *(The first draft spooled
+  hook events to a file instead.)*
 
-### 3.2 State model (SQLite at `.wtd/state/wtd.db`; memory is authoritative, written through)
+### 3.2 State model (in memory; SQLite arrives in Phase 2)
+
+Phase 1 state is all derivable from disk (status files, worktree folders, live `wtd run` connections),
+so it isn't persisted. Groups, settings, GitHub links and messages (Phase 2) need durable storage, and
+that's when SQLite at `.wtd/state/wtd.db` lands.
 | Entity | Key fields |
 |---|---|
 | `Repo` | slug, bare path, remote URL, default branch, `github` link (§4.3) |
@@ -118,6 +124,14 @@ scripts that read them keep working, then retired.
   written to disk on the hot path except the SQLite write-through.
 
 ### 3.5 Git service
+**As built in Phase 1:** no file watchers. A worktree's git state is re-checked 2 s after its hook
+activity goes quiet (at most 10 s into a burst), after its session ends, and by a slow sweep (60 s if
+live, 5 min otherwise), at most 2 at a time, with `git --no-optional-locks` so a background check never
+holds `index.lock` against an agent's own git command. Watch handles on worktree folders would block
+`git worktree move/remove` while bash still owns archive/rm; the watcher design below waits for the
+daemon to own those (Phase 4).
+
+**Later:**
 - Per worktree, watch the tree (`ReadDirectoryChangesW`, via the `notify` crate) ignoring `.git/objects`,
   `node_modules`, build dirs; also watch `HEAD`, `index` and `refs` for commits and checkouts.
 - On change: debounce 750 ms, then `git status --porcelain=v2 --branch` for **that worktree only**,
@@ -164,8 +178,8 @@ daemon is stopped, the panel shows the roster greyed out with a single *Start da
 and the `WorkTreeDev: Start Daemon` / `Stop Daemon` palette commands do the same.
 
 **Stopping is safe:**
-- Hooks that fire while the daemon is down are spooled (§3.1) and replayed when it starts, so no status
-  is lost.
+- Hooks keep updating the status files while the daemon is down (§3.1), so folder colours stay right
+  and the daemon picks the latest state up when it starts.
 - Phases 1–2: sessions run in VSCode terminals under `wtd run` and **keep running** when the daemon
   stops. Only fleet features (live status, git state, messaging) pause.
 - Phase 3+: the daemon hosts the sessions, so Stop asks for confirmation first: *"Stopping ends 9
@@ -299,7 +313,7 @@ up on demand.
 | Phase | Delivers | Retires |
 |---|---|---|
 | **0** (done on branch) | Status hook ~5× faster, resident monitor, no login shells, single status-folder watch, row-only roster updates, git index settings, control-window VSCode settings | — |
-| **1** Daemon core | `wtd.exe` daemon + hook + pipe protocol + SQLite state; git service; metrics; usage; `wtd mcp` with the read-only fleet tools (`fleet_list` / `fleet_get` / `fleet_read_file`); `wtd tray` icon + panel Start/Stop toggle. Extension switched to the pipe for all state. Sessions still launch in VSCode terminals, wrapped by `wtd run` (puts Claude in a Job Object and reports liveness) | extension disk scans, timers and `exec`s; `monitor-stats.*`; `wt-status.sh`; the session registry and reaper |
+| **1** Daemon core | `wtd.exe` daemon + hook + pipe protocol + in-memory state; git service; metrics; usage; `wtd mcp` with the read-only fleet tools (`fleet_list` / `fleet_get` / `fleet_read_file`); `wtd tray` icon + panel Start/Stop toggle. Extension switched to the pipe for all state. Sessions still launch in VSCode terminals, wrapped by `wtd run` (puts Claude in a Job Object and reports liveness) | extension disk scans, timers and `exec`s; `monitor-stats.*`; `wt-status.sh`; the session registry and reaper |
 | **2** New UX | Fleet panel search / filters / groups; New Session quick pick; Settings page; GitHub linking + issues; agent messaging (`fleet_send` + approval prompt + delivery + inbox) | the `+ agent` input box |
 | **3** Session host | ConPTY hosting + `wtd attach`; sessions survive reloads | `wtd run` wrapper; terminal-name tracking hacks |
 | **4** CLI parity | `archive`/`rm`/`review`/`ask`/`account`/`preview` in Rust; skills call `wtd …` | Git Bash scripts on Windows (Claude Code itself still needs Git Bash) |
@@ -310,6 +324,8 @@ Each phase ships on its own, and the bash tooling keeps working until the phase 
 ```
 wtd/                       (cargo workspace, at repo root /wtd)
   crates/wtd-core     state model, status machine, protocol types   (platform-free)
+  (Phase 1 ships two crates — wtd-core and wtd, with Windows code in wtd/src/win.rs; the split below
+   happens as those areas grow)
   crates/wtd-win      ConPTY, Job Objects, named pipes, dir watch   (cfg(windows))
   crates/wtd-git      status parsing, worktree ops
   crates/wtd-github   issues / Projects v2 client
