@@ -175,9 +175,27 @@ seeded into the worktree's `CLAUDE.md` *Context / scope* section, and `/pr` note
   default branch), **GitHub links**, **Accounts** (add or log in, role defaults), **Branch naming**,
   **Groups**, **Performance** (intervals), **Keybindings**.
 - **GitHub link per repo:** the GitHub repo that holds the code (`owner/name`, detected from the
-  remote), plus an optional **issue source**: that repo's issues, another repo's issues (e.g. a tracker
-  repo), or a **GitHub Project (v2)** with an optional status-column filter (e.g. only *Todo* /
-  *Ready*). Also optional default label and assignee filters.
+  remote), plus an **issue source**, chosen per repo on the Settings page. Both kinds are fully supported:
+  - **Repo issues** (the default when nothing is configured): open issues from the code repo, or from
+    another repo such as a shared tracker. Optional label and assignee filters.
+  - **GitHub Project (v2)**: a user- or org-owned board, identified by its URL, which is parsed into
+    owner and number. The Settings page lists the board's single-select fields so you can pick the
+    status field and which columns to offer (e.g. *Todo*, *Ready*). An optional toggle moves the card
+    to a chosen column (e.g. *In Progress*) when a session starts on it. Board items that are drafts
+    rather than real issues are listed but marked, since they have no issue number for `Closes #`.
+
+  ```jsonc
+  // stored per repo in the daemon's settings
+  "github": {
+    "repo": "D-Luop/luop-software-mono-repo",
+    "issueSource": { "kind": "repo", "repo": "D-Luop/luop-software-mono-repo", "labels": [], "assignee": "@me" }
+    // or
+    "issueSource": { "kind": "project", "owner": "D-Luop", "ownerType": "org", "number": 3,
+                     "statusField": "Status", "offer": ["Todo", "Ready"], "onStart": "In Progress" }
+  }
+  ```
+  Settings validates a source when it's saved, with a test fetch that shows "N items found" or the
+  exact error (e.g. missing `read:project` scope → `gh auth refresh -s read:project`).
 - **Auth:** the GitHub token comes from `gh auth token` (so `gh auth login` is the only setup), kept in
   memory and never written to disk.
 - **API:** REST for issues, GraphQL for Projects v2, with ETag conditional requests (a `304` doesn't
@@ -219,9 +237,9 @@ process groups or cgroups, Unix sockets) and reuses everything else.
 
 1. ~~Keybinding for New Session.~~ **Decided:** Command Palette entries (`WorkTreeDev: …`), reached via
    `Ctrl+P` → `>`. An optional direct chord can be bound later in Settings.
-2. **"Project" meaning.** Is the issue list the linked repo's **Issues**, or a **GitHub Project (v2)
-   board** (which can span repos and has status columns)? The design supports both; the question is
-   which is the default.
+2. ~~"Project" meaning.~~ **Decided:** both. Each repo's issue source is configured on the Settings
+   page as either **repo issues** or a **GitHub Project (v2) board** (§4.3). Repo issues is the default
+   when nothing is configured.
 3. **Groups vs repos.** Should user-defined groups replace grouping by repo, or sit alongside it
    (a toggle)? **Recommendation: toggle, defaulting to groups.**
 4. **Daemon lifetime.** Start on demand (from the extension or CLI), or register to start at logon?
