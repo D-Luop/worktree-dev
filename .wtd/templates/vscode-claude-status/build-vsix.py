@@ -31,7 +31,9 @@ CONTENT_TYPES = (
     '<Default Extension="js" ContentType="application/javascript"/>'
     '<Default Extension="md" ContentType="text/markdown"/>'
     '<Default Extension="vsixmanifest" ContentType="text/xml"/>'
-    '<Default Extension="txt" ContentType="text/plain"/></Types>'
+    '<Default Extension="txt" ContentType="text/plain"/>'
+    '<Default Extension="css" ContentType="text/css"/>'
+    '<Default Extension="ttf" ContentType="font/ttf"/></Types>'
 )
 MANIFEST = (
     '<?xml version="1.0" encoding="utf-8"?>\n'
@@ -52,5 +54,8 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
     z.writestr("extension.vsixmanifest", MANIFEST)
     for f in ("package.json", "extension.js", "diffview.js", "README.md", "LICENSE"):
         z.write(os.path.join(HERE, f), f"extension/{f}")
+    # bundled codicons (toolbar / row icons) + their licenses
+    for f in sorted(os.listdir(os.path.join(HERE, "media"))):
+        z.write(os.path.join(HERE, "media", f), f"extension/media/{f}")
 
 print(f"wrote {out}")

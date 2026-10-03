@@ -134,6 +134,105 @@ function execScript(file, args, opts, cb) {
   } catch (e) { done(e); }
 }
 
+// --- wtd daemon (v2) -------------------------------------------------------------------------------
+// When wtd.exe is installed, the daemon owns all background work (status, git state, usage, metrics)
+// and pushes changes over a named pipe; the panel just renders them. Without it, the legacy
+// in-extension scanning below is used.
+const net = require('net');
+function wtdExe() { return path.join(WTD, 'bin', 'wtd.exe'); }
+function daemonInstalled() { try { return IS_WIN && fs.existsSync(wtdExe()); } catch { return false; } }
+function pipePath() {
+  const u = (process.env.USERNAME || process.env.USER || 'user').replace(/[^A-Za-z0-9_-]/g, '_');
+  return '\\\\.\\pipe\\wtd-' + u;
+}
+
+class DaemonClient {
+  constructor(onChange) {
+    this.onChange = onChange;   // (kind) => void   kind: 'daemon' | 'fleet' | 'accounts' | 'metrics'
+    this.running = false;
+    this.wts = new Map();       // id → Worktree (see wtd-core model.rs)
+    this.accounts = [];
+    this.metrics = null;
+    this._sock = null; this._buf = ''; this._pending = new Map(); this._next = 1; this._retry = null; this._stopped = false;
+  }
+  start() { this._stopped = false; this._connect(); }
+  dispose() { this._stopped = true; clearTimeout(this._retry); if (this._sock) this._sock.destroy(); }
+
+  _connect() {
+    if (this._sock || this._stopped) return;
+    const s = net.connect(pipePath());
+    this._sock = s;
+    s.setEncoding('utf8');
+    s.on('connect', () => {
+      this.running = true;
+      this._send('hello', { client: 'vscode', protocol: 1 });
+      this._send('subscribe', { metrics: true });
+      this.onChange('daemon');
+    });
+    s.on('data', (d) => {
+      this._buf += d;
+      let i;
+      while ((i = this._buf.indexOf('\n')) >= 0) {
+        const line = this._buf.slice(0, i); this._buf = this._buf.slice(i + 1);
+        if (line.trim()) { try { this._line(JSON.parse(line)); } catch (e) { _dbg('daemon line: ' + e.message); } }
+      }
+    });
+    const down = () => {
+      if (this._sock !== s) return;
+      this._sock = null; this._buf = '';
+      for (const [, p] of this._pending) p.reject(new Error('daemon disconnected'));
+      this._pending.clear();
+      const was = this.running; this.running = false;
+      if (was) this.onChange('daemon');
+      clearTimeout(this._retry);
+      // a failed open on a missing pipe costs microseconds — no process is spawned
+      if (!this._stopped) this._retry = setTimeout(() => this._connect(), 2000);
+    };
+    s.on('error', down); s.on('close', down);
+  }
+
+  _send(method, params) {
+    const id = this._next++;
+    if (this._sock) this._sock.write(JSON.stringify({ id, method, params: params || {} }) + '\n');
+    return id;
+  }
+
+  request(method, params) {
+    return new Promise((resolve, reject) => {
+      if (!this._sock || !this.running) return reject(new Error('daemon not running'));
+      const id = this._send(method, params);
+      this._pending.set(id, { resolve, reject });
+    });
+  }
+
+  _line(m) {
+    if (m.id !== undefined && ('result' in m || 'error' in m)) {
+      const p = this._pending.get(m.id); if (!p) return;
+      this._pending.delete(m.id);
+      if (m.error) p.reject(new Error(m.error)); else p.resolve(m.result);
+      return;
+    }
+    switch (m.event) {
+      case 'snapshot':
+        this.wts = new Map((m.snapshot.worktrees || []).map((w) => [w.id, w]));
+        this.accounts = m.snapshot.accounts || [];
+        this.metrics = m.snapshot.metrics || null;
+        this.onChange('fleet'); this.onChange('accounts'); this.onChange('metrics');
+        break;
+      case 'upsert': {
+        const prev = this.wts.get(m.worktree.id);
+        this.wts.set(m.worktree.id, m.worktree);
+        this.onChange('fleet', m.worktree, prev);
+        break;
+      }
+      case 'remove': this.wts.delete(m.id); this.onChange('fleet'); break;
+      case 'accounts': this.accounts = m.accounts || []; this.onChange('accounts'); break;
+      case 'metrics': this.metrics = m.metrics; this.onChange('metrics'); break;
+      case 'shutdown': break;   // the pipe closes next → 'daemon' change
+    }
+  }
+}
+
 class ClaudeStatusProvider {
   constructor() {
     this._onDidChange = new vscode.EventEmitter();
@@ -658,12 +757,78 @@ class DevSummaryProvider {
     for (const k of Object.keys(this._unread)) { const name = k.split('')[1]; if (this._unread[k] && termName(t) === name) { this.clearUnread(k); return; } }
   }
 
+  // "New session": the toolbar button and the `WorkTreeDev: New Session` palette command.
+  newAgent() {
+    vscode.window.showInputBox({
+      prompt: 'New agent — enter: <slug> <name> [ref-tokens…]   (slug "plan" = a repo-less planning agent)',
+      placeHolder: 'plan my-new-app    ·    <slug> feat/my-thing',
+    }).then((v) => {
+      if (!v || !v.trim()) return;
+      const raw = v.trim();
+      const toks = raw.split(/\s+/);
+      const slug = toks[0], name = toks[1] || '';
+      const launch = () => {
+        const nm = name || slug || 'agent';   // tab = the <name> token (no slug)
+        const t = vscode.window.createTerminal({ name: nm, location: vscode.TerminalLocation.Editor,
+          shellPath: bashShell(), shellArgs: ['-lc', 'agent ' + raw] });
+        t.show();
+        setTimeout(() => this._postRoster(), 2500);
+      };
+      // 'plan' is the reserved repo-less planning slug; a registered slug launches straight away.
+      // A brand-new slug (with a name to open) offers to create the repo for a new application.
+      const known = new Set(registeredSlugs());
+      if (slug === 'plan' || known.has(slug) || !name) { launch(); return; }
+      vscode.window.showWarningMessage(
+        "'" + slug + "' isn't a registered repo. Create it for a new application?",
+        { modal: true, detail: 'New empty repo: a fresh local git repo (no remote yet) — start scaffolding immediately, add a GitHub remote later.\nClone from URL: bare-clone an existing remote.\nOr use the reserved "plan" slug for a repo-less planning agent.' },
+        'New empty repo', 'Clone from URL…'
+      ).then((ch) => {
+        const addRepo = path.join(HOME, '.local', 'bin', 'add-repo');
+        if (ch === 'New empty repo') {
+          execScript(addRepo, ['--new', slug], { timeout: 30000 }, (e, so, se) => {
+            if (e) { vscode.window.showErrorMessage('create repo failed: ' + ((se || '').trim() || e.message)); return; }
+            launch();
+          });
+        } else if (ch === 'Clone from URL…') {
+          vscode.window.showInputBox({ prompt: 'Git URL to clone for "' + slug + '"', placeHolder: 'https://github.com/you/repo.git' })
+            .then((url) => {
+              if (!url || !url.trim()) return;
+              execScript(addRepo, [slug, url.trim()], { timeout: 120000 }, (e, so, se) => {
+                if (e) { vscode.window.showErrorMessage('clone failed: ' + ((se || '').trim() || e.message)); return; }
+                launch();
+              });
+            });
+        }
+      });
+    });
+  }
+
+  // the toolbar's ⋯ menu: occasional actions, kept out of the main row
+  moreMenu() {
+    let testsExcluded = false; try { testsExcluded = fs.existsSync(TESTS_FLAG); } catch {}
+    let muted = false;
+    try { const tb = vscode.workspace.getConfiguration('accessibility.signals').get('terminalBell') || {}; muted = (tb.sound || 'auto') === 'off'; } catch {}
+    const items = [
+      { label: '$(terminal) Open terminal', description: 'a shell in the dev base', run: () => this.openOrFocusTerminal() },
+      { label: '$(hubot) Open assistant', description: 'fleet-management session', run: () => this.openOrFocusAssistant() },
+      { label: '$(device-camera) Add image to focused session', description: 'clipboard screenshot or a file', run: () => this.pasteImage() },
+      { label: '$(file-media) Open design preview', description: 'of the focused worktree', run: () => this.previewFocused() },
+      { label: '$(beaker) Test files in diffs: ' + (testsExcluded ? 'excluded' : 'included'), description: 'click to ' + (testsExcluded ? 'include' : 'exclude'),
+        run: () => this._onMsg && this._onMsg({ cmd: 'toggleTests' }) },
+      { label: (muted ? '$(bell-slash)' : '$(bell)') + ' Turn-end sound: ' + (muted ? 'off' : 'on'), description: 'click to ' + (muted ? 'enable' : 'mute'), run: () => this.toggleBell() },
+    ];
+    if (this._daemonMode() && this.daemon.running)
+      items.push({ label: '$(refresh) Refresh fleet now', description: 'rescan worktrees + re-check git', run: () => this.daemon.request('refresh', {}).catch(() => {}) });
+    vscode.window.showQuickPick(items, { placeHolder: 'WorkTreeDev' }).then((it) => { if (it) it.run(); });
+  }
+
   resolveWebviewView(view) {
     this.view = view;
-    view.webview.options = { enableScripts: true };
-    view.webview.html = this._html();
+    const media = vscode.Uri.joinPath(this._extUri, 'media');
+    view.webview.options = { enableScripts: true, localResourceRoots: [media] };
+    view.webview.html = this._html().replace('__CODICON_HREF__', view.webview.asWebviewUri(vscode.Uri.joinPath(media, 'codicon.css')).toString());
 
-    view.webview.onDidReceiveMessage((m) => {
+    this._onMsg = (m) => {
       if (!m) return;
       if (m.cmd === 'ready') {
         // The webview's script just finished loading. Messages posted before that (the initial posts
@@ -737,48 +902,11 @@ class DevSummaryProvider {
           });
         });
       } else if (m.cmd === 'newAgent') {
-        vscode.window.showInputBox({
-          prompt: 'New agent — enter: <slug> <name> [ref-tokens…]   (slug "plan" = a repo-less planning agent)',
-          placeHolder: 'plan my-new-app    ·    <slug> feat/my-thing',
-        }).then((v) => {
-          if (!v || !v.trim()) return;
-          const raw = v.trim();
-          const toks = raw.split(/\s+/);
-          const slug = toks[0], name = toks[1] || '';
-          const launch = () => {
-            const nm = name || slug || 'agent';   // tab = the <name> token (no slug)
-            const t = vscode.window.createTerminal({ name: nm, location: vscode.TerminalLocation.Editor,
-              shellPath: bashShell(), shellArgs: ['-lc', 'agent ' + raw] });
-            t.show();
-            setTimeout(() => this._postRoster(), 2500);
-          };
-          // 'plan' is the reserved repo-less planning slug; a registered slug launches straight away.
-          // A brand-new slug (with a name to open) offers to create the repo for a new application.
-          const known = new Set(registeredSlugs());
-          if (slug === 'plan' || known.has(slug) || !name) { launch(); return; }
-          vscode.window.showWarningMessage(
-            "'" + slug + "' isn't a registered repo. Create it for a new application?",
-            { modal: true, detail: 'New empty repo: a fresh local git repo (no remote yet) — start scaffolding immediately, add a GitHub remote later.\nClone from URL: bare-clone an existing remote.\nOr use the reserved "plan" slug for a repo-less planning agent.' },
-            'New empty repo', 'Clone from URL…'
-          ).then((ch) => {
-            const addRepo = path.join(HOME, '.local', 'bin', 'add-repo');
-            if (ch === 'New empty repo') {
-              execScript(addRepo, ['--new', slug], { timeout: 30000 }, (e, so, se) => {
-                if (e) { vscode.window.showErrorMessage('create repo failed: ' + ((se || '').trim() || e.message)); return; }
-                launch();
-              });
-            } else if (ch === 'Clone from URL…') {
-              vscode.window.showInputBox({ prompt: 'Git URL to clone for "' + slug + '"', placeHolder: 'https://github.com/you/repo.git' })
-                .then((url) => {
-                  if (!url || !url.trim()) return;
-                  execScript(addRepo, [slug, url.trim()], { timeout: 120000 }, (e, so, se) => {
-                    if (e) { vscode.window.showErrorMessage('clone failed: ' + ((se || '').trim() || e.message)); return; }
-                    launch();
-                  });
-                });
-            }
-          });
-        });
+        this.newAgent();
+      } else if (m.cmd === 'daemonToggle') {
+        this.toggleDaemon();
+      } else if (m.cmd === 'more') {
+        this.moreMenu();
       } else if (m.cmd === 'newAssistant') {
         this.openOrFocusAssistant();
       } else if (m.cmd === 'newTerminal') {
@@ -800,7 +928,8 @@ class DevSummaryProvider {
       } else if (m.cmd === 'toggleBell') {
         this.toggleBell();
       }
-    });
+    };
+    view.webview.onDidReceiveMessage((m) => this._onMsg(m));
 
     // Each post is independently fire-walled: a throw in one (a failing fetch, a bad file, a patched
     // https that throws synchronously) must not take down the others or the refresh timers — an
@@ -812,7 +941,8 @@ class DevSummaryProvider {
         if (r && typeof r.catch === 'function') r.catch((e) => _dbg('panel ' + tag + ' FAILED: ' + ((e && e.stack) || e)));
       } catch (e) { _dbg('panel ' + tag + ' FAILED: ' + ((e && e.stack) || e)); }
     };
-    const postAll = () => { safe('limits', () => this._postLimits()); safe('roster', () => this._postRoster({ git: true }));
+    const postAll = () => { safe('daemon', () => this._postDaemon()); safe('limits', () => this._postLimits());
+      safe('roster', () => this._postRoster({ git: true }));
       safe('monitor', () => this._postMonitor()); safe('tests', () => this._postTests()); safe('bell', () => this._postBell()); };
     this._postAll = postAll;   // re-run on the webview's 'ready' handshake (initial posts can beat the script)
     postAll();
@@ -821,7 +951,9 @@ class DevSummaryProvider {
     // ahead) every GIT_SECS; status flips arrive instantly via the status watchers, without git.
     // System monitor every MON_SECS (resident sampler on Windows; a timer elsewhere).
     this.limTimer = setInterval(() => safe('limits', () => this._postLimits()), 60000);
-    this.rosTimer = setInterval(() => safe('roster', () => this._postRoster({ git: true })), GIT_SECS * 1000);
+    // daemon mode is push-driven (see activate's daemon onChange); these timers are the legacy path.
+    // The roster timer still runs (cheap without git) to catch terminal focus/liveness drift.
+    this.rosTimer = setInterval(() => safe('roster', () => this._postRoster({ git: !this._daemonMode() })), GIT_SECS * 1000);
     if (!IS_WIN) this.monTimer = setInterval(() => safe('monitor', () => this._postMonitor()), MON_SECS * 1000);
     view.onDidChangeVisibility(() => { if (view.visible) postAll(); else this._stopMonitor(); });
     view.onDidDispose(() => {
@@ -870,6 +1002,12 @@ class DevSummaryProvider {
   // gather usage for ALL accounts and post them together so the panel shows each (no overwrite)
   _postLimits() {
     if (!this.view || !this.view.visible) return;
+    if (this._daemonMode()) {
+      // the daemon polls usage; while it's stopped keep showing the last pushed numbers
+      const list = this.daemon.accounts || [];
+      if (list.length) { this.view.webview.postMessage({ type: 'limits', accounts: list }); this._maybeNotifyLimit(list); }
+      return;
+    }
     const accts = this._accounts();
     if (!accts.length) { this.view.webview.postMessage({ type: 'limits', accounts: [] }); return; }
     const out = new Array(accts.length); let pending = accts.length;
@@ -980,9 +1118,27 @@ class DevSummaryProvider {
     }
   }
 
+  // daemon mode: rows straight from the pushed fleet state (no disk scan, no git, no registry reads)
+  _daemonRows() {
+    const rows = []; const live = new Set();
+    for (const w of this.daemon.wts.values()) {
+      if (w.kind === 'dev') continue;   // the assistant has its own pinned row
+      const slug = w.slug, name = w.name;
+      rows.push({ slug, name, status: w.status === 'none' ? '' : w.status, dirty: !!(w.git && w.git.dirty), ahead: (w.git && w.git.ahead) || 0,
+                  branch: (w.git && w.git.branch) || '', plan: w.plan_title || '', account: w.account || '', live: !!w.live });
+      if (w.live) live.add(slug + '-' + name);
+    }
+    return { rows, live };
+  }
+
   async _postRosterNow(opts) {
-    const rows = await this._roster(!!(opts && opts.git));
-    const live = await this._liveSessions();   // session names with a live tmux session
+    let rows, live;
+    if (this._daemonMode()) {
+      ({ rows, live } = this._daemonRows());
+    } else {
+      rows = await this._roster(!!(opts && opts.git));
+      live = await this._liveSessions();   // session names with a live tmux session
+    }
     // resolve which row is the currently-focused session: by exact terminal if we opened it, else
     // (e.g. after a window reload, when _terms is empty) fall back to matching the terminal's name.
     // sync the focused terminal from VSCode (covers editor-area terminals — assistant/terminal/sessions —
@@ -1007,7 +1163,9 @@ class DevSummaryProvider {
     // to 'input' (your turn) while you're not focused on it → highlight yellow; cleared when you focus it.
     const asstTerm = vscode.window.terminals.find((x) => termName(x) === ASST_NAME);
     const asstCurrent = !!cur && termName(cur) === ASST_NAME;
-    let asstStatus = ''; try { asstStatus = fs.readFileSync(path.join(DEV, STATUS_FILE), 'utf8').trim(); } catch {}
+    let asstStatus = '';
+    if (this._daemonMode()) { const d = this.daemon.wts.get('_dev'); asstStatus = d && d.status !== 'none' ? d.status : ''; }
+    else { try { asstStatus = fs.readFileSync(path.join(DEV, STATUS_FILE), 'utf8').trim(); } catch {} }
     const aprev = this._lastStatus[ASST_NAME];
     if (asstStatus === 'input' && aprev !== undefined && aprev !== 'input' && !asstCurrent) this._unread[ASST_NAME] = true;
     this._lastStatus[ASST_NAME] = asstStatus;
@@ -1018,6 +1176,28 @@ class DevSummaryProvider {
     const terminal = { active: !!plainTerm, current: !!cur && termName(cur) === TERM_NAME };
     let multiAccount = false; try { multiAccount = this._accounts().length > 1; } catch {}
     if (this.view && this.view.visible) this.view.webview.postMessage({ type: 'roster', rows, assistant, terminal, multiAccount });
+  }
+
+  // daemon mode = wtd.exe is installed (whether or not the daemon is running right now)
+  _daemonMode() { return !!this.daemon && daemonInstalled(); }
+
+  _postDaemon() {
+    if (!this.view || !this.view.visible) return;
+    this.view.webview.postMessage({ type: 'daemon', installed: daemonInstalled(), running: !!(this.daemon && this.daemon.running), busy: !!this._daemonBusy });
+  }
+
+  // Start/Stop toggle (panel button, palette commands). The daemon never auto-starts.
+  toggleDaemon(want) {
+    const running = !!(this.daemon && this.daemon.running);
+    const start = want === undefined ? !running : want;
+    if (!daemonInstalled()) { vscode.window.showWarningMessage('wtd.exe is not installed — run install.sh (needs Rust: winget install Rustlang.Rustup).'); return; }
+    if (start === running) return;
+    this._daemonBusy = true; this._postDaemon();
+    cp.execFile(wtdExe(), ['daemon', start ? 'start' : 'stop'], { timeout: 15000, windowsHide: true }, (e, so, se) => {
+      this._daemonBusy = false;
+      if (e) vscode.window.showErrorMessage('wtd daemon ' + (start ? 'start' : 'stop') + ' failed: ' + ((se || '').trim() || e.message));
+      this._postDaemon();
+    });
   }
 
   // names of worktrees with a live session (session name = "<slug>-<name>"). On Windows there's no
@@ -1049,6 +1229,13 @@ class DevSummaryProvider {
 
   _postMonitor() {
     if (!this.view || !this.view.visible) return;
+    if (this._daemonMode()) {
+      const m = this.daemon.running ? this.daemon.metrics : null;
+      this.view.webview.postMessage({ type: 'monitor', m: m && {
+        sess: m.sessions, nag: m.agents, rev: m.reviews, acpu: m.cpu_pct, amem: m.mem_mb,
+        mt: m.sys_total_mb, msys: m.sys_used_mb, ncpu: m.ncpu, load: 'n/a' } });
+      return;
+    }
     if (IS_WIN) return this._startMonitor();   // resident sampler; it pushes lines on its own
     if (this._monBusy) return;                 // never stack runs (a slow sample used to overlap the next)
     this._monBusy = true;
@@ -1136,220 +1323,291 @@ class DevSummaryProvider {
 
   _html() {
     return `<!DOCTYPE html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="__CODICON_HREF__">
 <style>
   html{height:100%;}
-  /* full-height flex column so the monitor block can be pinned to the bottom of the panel */
-  body{padding:3px 8px 5px;margin:0;font:12px var(--vscode-font-family);color:var(--vscode-foreground);display:flex;flex-direction:column;min-height:100vh;box-sizing:border-box;}
-  #monwrap{margin-top:auto;}   /* push the monitor section to the bottom of the available space */
-  .acct{opacity:.6;font-size:12px;margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-  .acctblk{margin-bottom:5px;}
-  .row{display:flex;align-items:center;gap:6px;height:15px;}
-  .lbl{width:15px;opacity:.65;}
-  .track{flex:1;height:5px;border-radius:3px;background:var(--vscode-input-background,rgba(127,127,127,.18));overflow:hidden;}
-  .fill{display:block;height:100%;width:0;border-radius:3px;transition:width .3s ease;}
+  body{padding:4px 8px 6px;margin:0;font:12px var(--vscode-font-family);color:var(--vscode-foreground);display:flex;flex-direction:column;min-height:100vh;box-sizing:border-box;}
+  .codicon{font-size:14px;line-height:1;}
+  .none{color:var(--vscode-descriptionForeground);font-size:12px;padding:3px 2px;}
+  hr{border:none;border-top:1px solid var(--vscode-panel-border,rgba(127,127,127,.2));margin:6px 0;}
+  .sect{font-size:11px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--vscode-descriptionForeground);margin:8px 2px 2px;display:flex;align-items:center;gap:6px;}
+  .sect .n{font-weight:400;opacity:.8;}
+
+  /* --- account usage --- */
+  .acctblk{margin-bottom:6px;}
+  .acct{color:var(--vscode-descriptionForeground);margin:0 0 2px 2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .bar{display:flex;align-items:center;gap:6px;height:15px;padding:0 2px;}
+  .lbl{width:18px;color:var(--vscode-descriptionForeground);}
+  .track{flex:1;height:4px;border-radius:2px;background:var(--vscode-input-background,rgba(127,127,127,.18));overflow:hidden;}
+  .fill{display:block;height:100%;width:0;border-radius:2px;transition:width .3s ease;}
   .pct{width:30px;text-align:right;font-variant-numeric:tabular-nums;}
-  .meta{min-width:34px;opacity:.55;font-size:12px;}
-  .none{opacity:.5;font-size:12px;padding:2px 0;}
-  .stale{opacity:.45;} .staleNote{font-size:10px;opacity:.6;font-style:italic;color:var(--vscode-charts-yellow,#d2a000);margin-top:1px;}
-  hr{border:none;border-top:1px solid var(--vscode-panel-border,rgba(127,127,127,.2));margin:5px 0 4px;}
-  /* unified toolbar: pinned terminal/assistant avatars + all non-worktree-specific buttons, one row */
-  .toolbar{display:flex;align-items:center;gap:4px;margin-bottom:7px;flex-wrap:nowrap;}
-  .avatar{width:22px;height:22px;border-radius:50%;background:rgba(127,127,127,.16);display:flex;align-items:center;justify-content:center;font-size:12px;position:relative;cursor:pointer;flex:none;}
-  .avatar:hover{background:rgba(127,127,127,.3);}
-  .avatar.ring{box-shadow:0 0 0 2px var(--vscode-charts-green,#3fd35f);}
-  .avatar .b{position:absolute;bottom:-2px;right:-2px;width:7px;height:7px;border-radius:50%;border:1.5px solid var(--vscode-sideBar-background,#181818);background:var(--vscode-charts-yellow,#d2a000);}
-  .ibtn{cursor:pointer;border:none;width:22px;height:22px;background:rgba(127,127,127,.14);color:inherit;border-radius:5px;font-size:12px;display:inline-flex;align-items:center;justify-content:center;flex:none;}
-  .ibtn:hover{background:rgba(127,127,127,.3);}
-  .ibtn.primary{background:var(--vscode-button-background,rgba(74,163,255,.22));color:var(--vscode-button-foreground,#7ebcff);}
-  .ibtn.primary:hover{background:var(--vscode-button-hoverBackground,rgba(74,163,255,.34));}
-  .divider{width:1px;align-self:stretch;background:var(--vscode-panel-border,rgba(127,127,127,.2));margin:1px 1px;flex:none;}
-  .tbspacer{flex:1;}
-  .wt{position:relative;display:flex;align-items:center;gap:6px;height:21px;cursor:pointer;border-radius:3px;padding:0 3px 0 5px;font-size:13px;}
-  .wt:hover{background:var(--vscode-list-hoverBackground,rgba(127,127,127,.12));}
-  .wt .accentbar{width:2px;align-self:stretch;border-radius:2px;flex:none;}
-  .wt .mini{width:16px;height:16px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;font-size:8.5px;font-weight:700;}
-  .wt .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-  .wt .git{opacity:.6;font-size:12px;font-variant-numeric:tabular-nums;}
+  .meta{min-width:36px;color:var(--vscode-descriptionForeground);font-variant-numeric:tabular-nums;}
+  .stale{opacity:.45;} .staleNote{font-size:11px;color:var(--vscode-editorWarning-foreground,#d2a000);margin:1px 2px;}
+
+  /* --- toolbar: native view-toolbar look (no tiles; hover/pressed backgrounds only) --- */
+  .toolbar{display:flex;align-items:center;gap:2px;height:26px;margin:2px 0 4px;position:relative;}
+  .tb{display:inline-flex;align-items:center;gap:4px;height:22px;min-width:22px;padding:0 4px;box-sizing:border-box;border:1px solid transparent;border-radius:4px;
+      background:none;color:var(--vscode-icon-foreground,var(--vscode-foreground));font:inherit;cursor:pointer;white-space:nowrap;}
+  .tb:hover{background:var(--vscode-toolbar-hoverBackground,rgba(90,93,94,.31));}
+  .tb:focus-visible{outline:1px solid var(--vscode-focusBorder);outline-offset:-1px;}
+  .tb.on{background:var(--vscode-inputOption-activeBackground,rgba(0,127,212,.4));border-color:var(--vscode-inputOption-activeBorder,transparent);color:var(--vscode-inputOption-activeForeground,inherit);}
+  .tb .t{font-size:12px;}
+  .tb.primary{background:var(--vscode-button-background);color:var(--vscode-button-foreground);padding:0 7px 0 5px;}
+  .tb.primary:hover{background:var(--vscode-button-hoverBackground);}
+  .spacer{flex:1;}
+  /* daemon pill: state at rest, the action on hover */
+  .pill{gap:5px;padding:0 7px 0 5px;}
+  .pill .dot{font-size:10px;}
+  .pill.run .dot{color:var(--vscode-testing-iconPassed,#3fb950);}
+  .pill.off .dot{color:var(--vscode-descriptionForeground);}
+  .pill .act{display:none;} .pill:hover .rest{display:none;} .pill:hover .act{display:inline-flex;align-items:center;gap:5px;}
+  .pill.busy{opacity:.6;pointer-events:none;}
+
+  /* search + filter popover */
+  #searchRow{display:none;margin:0 0 4px;}
+  #searchRow.open{display:block;}
+  #q{width:100%;box-sizing:border-box;height:24px;padding:2px 6px;font:inherit;color:var(--vscode-input-foreground);background:var(--vscode-input-background);
+     border:1px solid var(--vscode-input-border,transparent);border-radius:2px;outline:none;}
+  #q:focus{border-color:var(--vscode-focusBorder);}
+  #q::placeholder{color:var(--vscode-input-placeholderForeground);}
+  .menu{position:absolute;top:26px;z-index:10;min-width:170px;padding:4px 0;background:var(--vscode-menu-background,var(--vscode-editorWidget-background));
+        color:var(--vscode-menu-foreground,inherit);border:1px solid var(--vscode-menu-border,var(--vscode-widget-border,transparent));border-radius:5px;
+        box-shadow:0 2px 8px var(--vscode-widget-shadow,rgba(0,0,0,.36));display:none;}
+  .menu.open{display:block;}
+  .mi{display:flex;align-items:center;gap:8px;height:24px;padding:0 10px;cursor:pointer;}
+  .mi:hover{background:var(--vscode-menu-selectionBackground,var(--vscode-list-hoverBackground));color:var(--vscode-menu-selectionForeground,inherit);}
+  .mi .chk{width:14px;visibility:hidden;} .mi.sel .chk{visibility:visible;}
+  .msep{height:1px;margin:4px 0;background:var(--vscode-menu-separatorBackground,var(--vscode-panel-border));}
+
+  /* --- rows --- */
+  .daemonOff{display:flex;align-items:center;gap:8px;margin:2px 0 6px;padding:6px 8px;border-radius:4px;
+             background:var(--vscode-inputValidation-warningBackground,rgba(210,160,0,.12));border:1px solid var(--vscode-inputValidation-warningBorder,transparent);}
+  .daemonOff .msg{flex:1;color:var(--vscode-foreground);}
+  #roster.dim .row.wt{opacity:.55;}
+  .row{position:relative;display:flex;align-items:center;gap:6px;height:22px;padding:0 4px 0 6px;border-radius:3px;cursor:pointer;font-size:13px;}
+  .row:hover{background:var(--vscode-list-hoverBackground);}
+  .row .st{flex:none;width:16px;text-align:center;}
+  .row .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .row .sub{color:var(--vscode-descriptionForeground);font-size:12px;margin-left:4px;}
+  .row .git{flex:none;color:var(--vscode-descriptionForeground);font-size:12px;font-variant-numeric:tabular-nums;display:flex;gap:4px;}
   .ahead{color:var(--vscode-charts-blue,#4aa3ff);} .dirty{color:var(--vscode-charts-yellow,#d2a000);}
-  .repo{font-size:10px;text-transform:uppercase;letter-spacing:.6px;opacity:.5;margin:5px 0 1px;}
-  .repo:first-child{margin-top:1px;}
-  /* actions overlay the right edge (out of flex flow) so the name gets the full row width;
-     a left gradient fades the name out underneath them on hover. */
-  .wt .acts{position:absolute;right:3px;top:0;height:21px;display:flex;align-items:center;gap:0;opacity:0;pointer-events:none;padding-left:14px;background:linear-gradient(to right,transparent,var(--vscode-sideBar-background,#181818) 40%);}
-  .wt:hover .acts{opacity:1;pointer-events:auto;}
-  .wt .arch,.wt .term,.wt .unr,.wt .del,.wt .acc,.wt .dif{opacity:.55;cursor:pointer;padding:0 2px;font-size:12px;}
-  .wt .arch:hover,.wt .term:hover,.wt .unr:hover,.wt .del:hover,.wt .acc:hover,.wt .dif:hover{opacity:1;}
-  .wt .term:hover,.wt .del:hover{color:var(--vscode-charts-red,#e5534b);}
-  .wt .unr:hover{color:var(--vscode-charts-yellow,#d2a000);}
-  .wt .acc:hover{color:var(--vscode-charts-blue,#4aa3ff);}
-  .wt .dif{font-weight:700;}
-  .wt .dif:hover{color:var(--vscode-charts-purple,#c586f0);}
-  .wt.sep{margin-top:7px;}   /* gap between status groups */
-  .wt.active{background:rgba(127,127,127,.13);}   /* live tmux session — noticeably lighter than normal */
-  .wt.unread{background:rgba(255,216,61,.16);box-shadow:inset 2px 0 0 var(--vscode-charts-yellow,#d2a000);}  /* your-turn, not yet opened — yellow */
-  /* the session you currently have focused — VSCode's "selected list item" look (accent bar + bg).
-     Declared last so its background wins over .active/.unread; pairs with .unread's yellow bar fine. */
-  .wt.current{background:var(--vscode-list-activeSelectionBackground,rgba(9,71,113,.55));box-shadow:inset 3px 0 0 var(--vscode-focusBorder,#2f81f7);}
-  .wt.current .nm{font-weight:600;}
-  .statline{display:flex;flex-wrap:wrap;gap:3px 14px;margin:3px 0 6px;}
-  .stat{display:flex;gap:5px;align-items:baseline;}
-  .sk{opacity:.5;} .sv{font-variant-numeric:tabular-nums;}
-  .mlbl{width:26px;flex:none;opacity:.65;}
-  #mon .row{height:16px;margin:1px 0;}
-  #mon .meta{min-width:0;text-align:right;white-space:nowrap;}
+  .badge{flex:none;font-size:10px;padding:0 5px;border-radius:8px;line-height:15px;background:var(--vscode-badge-background);color:var(--vscode-badge-foreground);}
+  .row.wt:not(.live) .st{opacity:.55;} .row.wt:not(.live) .nm{color:var(--vscode-descriptionForeground);}
+  .row.unread{box-shadow:inset 2px 0 0 var(--vscode-charts-yellow,#d2a000);background:rgba(255,216,61,.08);}
+  .row.unread .nm{font-weight:600;color:var(--vscode-foreground);}
+  .row.current{background:var(--vscode-list-activeSelectionBackground);color:var(--vscode-list-activeSelectionForeground,inherit);}
+  .row.current .nm{color:inherit;}
+  /* hover actions overlay the right edge so names keep the full width at rest */
+  .row .acts{position:absolute;right:2px;top:0;height:22px;display:flex;align-items:center;gap:0;opacity:0;pointer-events:none;padding-left:16px;
+             background:linear-gradient(to right,transparent,var(--vscode-sideBar-background,#181818) 35%);}
+  .row:hover .acts{opacity:1;pointer-events:auto;}
+  .row .acts .codicon{padding:3px;border-radius:3px;color:var(--vscode-icon-foreground);}
+  .row .acts .codicon:hover{background:var(--vscode-toolbar-hoverBackground);}
+  .row .acts .danger:hover{color:var(--vscode-errorForeground);}
+  .pins{margin-bottom:2px;}
+  .row.pin .st{opacity:.9;} .row.pin:not(.live) .st,.row.pin:not(.live) .nm{opacity:.6;}
+
+  /* --- monitor --- */
+  #monwrap{margin-top:auto;}
+  .statline{display:flex;flex-wrap:wrap;gap:3px 14px;margin:2px 2px 5px;}
+  .stat{display:flex;gap:5px;align-items:baseline;} .sk{color:var(--vscode-descriptionForeground);} .sv{font-variant-numeric:tabular-nums;}
+  .mlbl{width:26px;flex:none;color:var(--vscode-descriptionForeground);}
+  #mon .bar{height:16px;margin:1px 0;} #mon .meta{min-width:0;text-align:right;white-space:nowrap;}
 </style></head><body>
-<div id="lim"><div class="none">waiting for a session…</div></div>
+<div id="lim"><div class="none">waiting for usage…</div></div>
 <hr>
-<div class="toolbar">
-  <span class="avatar" id="termAvatar" title="plain terminal — a login shell in the dev base · click to open">🖥️</span>
-  <span class="avatar" id="asstAvatar" title="worktree-dev assistant — fleet management · click to open">🤖<span class="b" id="asstBadge" style="display:none"></span></span>
-  <span class="divider"></span>
-  <span class="ibtn" id="img" title="Add an image to the focused session — pastes a clipboard screenshot, or pick a file (works around native-Windows terminal paste)">📷</span>
-  <span class="ibtn" id="bell" title="Turn-end sound alert — click to mute/unmute">🔔</span>
-  <span class="ibtn" id="prev" title="Open the focused worktree's design preview">🖼</span>
-  <span class="divider"></span>
-  <span class="ibtn" id="tests" title="Include/exclude test files in the diff panes">🧪</span>
-  <span class="tbspacer"></span>
-  <span class="ibtn primary" id="add" title="Launch a new agent">➕</span>
+<div class="toolbar" id="toolbar">
+  <button class="tb pill off" id="daemon" title="WorkTreeDev daemon"></button>
+  <button class="tb" id="active" title="Show only worktrees with a live session"><i class="codicon codicon-zap"></i><span class="t" id="activeTxt">Active</span></button>
+  <button class="tb" id="filter" title="Filter by status"><i class="codicon codicon-filter" id="filterIco"></i></button>
+  <button class="tb" id="search" title="Search worktrees (name, branch, plan, account)"><i class="codicon codicon-search"></i></button>
+  <span class="spacer"></span>
+  <button class="tb" id="more" title="More actions"><i class="codicon codicon-ellipsis"></i></button>
+  <button class="tb primary" id="add" title="New session (also: Command Palette → WorkTreeDev: New Session)"><i class="codicon codicon-add"></i><span class="t">New</span></button>
+  <div class="menu" id="filterMenu"></div>
 </div>
+<div id="searchRow"><input id="q" type="text" placeholder="Search worktrees" spellcheck="false"></div>
+<div id="daemonOff"></div>
+<div class="pins" id="pins"></div>
 <div id="roster"></div>
 <div id="monwrap">
 <hr>
-<div class="repo">monitor</div>
+<div class="sect">Monitor</div>
 <div id="mon"><div class="none">…</div></div>
 </div>
 <script>
   const vsc = acquireVsCodeApi();
-  // any script error in here is invisible (webview devtools only) — report it to the host, which
-  // logs it to .wtd/state/open-debug.log
   window.addEventListener('error', e => { try{ vsc.postMessage({cmd:'jsError', msg: String(e.message||e)+' @'+(e.lineno||'?')}); }catch(_){} });
-  let accts=[], ros=[], mon=null, asstState={}, termState={}, multiAcct=false;
-  const GLYPH={working:'🔵',input:'🟡',reviewing:'🟣',pr:'🔹',done:'🟢',stopped:'🔴'};   // emoji -> editor tab name
-  const COL={working:'#4aa3ff',input:'#ffd83d',reviewing:'#c586f0',pr:'#5cc8ff',done:'#3fd35f',stopped:'#ff5c57'};
-  const PRIO={input:0,reviewing:1,working:2,pr:3,done:4,stopped:5,'':6};   // pr sorts below working, above done
-  function esc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+  let accts=[], ros=[], mon=null, asstState={}, termState={}, multiAcct=false, daemon={installed:false,running:false,busy:false};
+  const saved = vsc.getState() || {};
+  let activeOnly = !!saved.activeOnly, query = saved.query || '', searchOpen = !!saved.searchOpen, statuses = new Set(saved.statuses || []);
+  function save(){ vsc.setState({activeOnly, query, searchOpen, statuses:[...statuses]}); }
+
+  const GLYPH={working:'🔵',input:'🟡',reviewing:'🟣',pr:'🔹',done:'🟢',stopped:'🔴'};   // editor tab name prefix (host side)
+  const STATUS=[
+    ['input','Your turn','bell-dot','var(--vscode-charts-yellow,#d2a000)'],
+    ['working','Working','loading codicon-modifier-spin','var(--vscode-charts-blue,#4aa3ff)'],
+    ['reviewing','Reviewing','eye','var(--vscode-charts-purple,#c586f0)'],
+    ['pr','PR ready','git-pull-request','var(--vscode-charts-blue,#5cc8ff)'],
+    ['done','Done','pass-filled','var(--vscode-charts-green,#3fb950)'],
+    ['stopped','Stopped','circle-large-outline','var(--vscode-descriptionForeground)'],
+  ];
+  const SMAP=Object.fromEntries(STATUS.map(s=>[s[0],s]));
+  const PRIO={input:0,reviewing:1,working:2,pr:3,done:4,stopped:5,'':6};
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
   function col(p){ return p>=90?'var(--vscode-charts-red,#e5534b)':p>=70?'var(--vscode-charts-yellow,#d2a000)':'var(--vscode-charts-green,#3fb950)'; }
   function rel(ts){ if(!ts) return ''; const s=ts-Math.floor(Date.now()/1000); if(s<=0) return 'resetting'; const h=Math.floor(s/3600),m=Math.floor((s%3600)/60); return h>0?(h+'h'+m+'m'):(m+'m'); }
   function ago(ts){ if(!ts) return 0; return Math.max(0, Math.floor(Date.now()/1000)-ts); }
   function agoTxt(s){ const m=Math.floor(s/60); return m>=60?(Math.floor(m/60)+'h'+(m%60)+'m'):(m>0?(m+'m'):(s+'s')); }
+  const ico=(name,extra)=>'<i class="codicon codicon-'+name+(extra?' '+extra:'')+'"></i>';
+
   function bar(lbl,p,resets){ const has=typeof p==='number'; const w=has?Math.min(100,Math.max(0,p)):0;
-    return '<div class="row" title="'+lbl+' limit '+(has?w+'%':'unknown')+(resets?(' · resets in '+rel(resets)):'')+'">'
+    return '<div class="bar" title="'+lbl+' limit '+(has?w+'%':'unknown')+(resets?(' · resets in '+rel(resets)):'')+'">'
       +'<span class="lbl">'+lbl+'</span><div class="track"><div class="fill" style="width:'+w+'%;background:'+col(w)+'"></div></div>'
       +'<span class="pct">'+(has?w+'%':'--')+'</span><span class="meta">'+(resets?rel(resets):'')+'</span></div>';
   }
   function renderLim(){
     const el=document.getElementById('lim');
-    if(!accts || !accts.length){ el.innerHTML='<div class="none">waiting for a session…</div>'; return; }
+    if(!accts || !accts.length){ el.innerHTML='<div class="none">'+(daemon.installed&&!daemon.running?'usage paused — daemon stopped':'waiting for usage…')+'</div>'; return; }
     el.innerHTML = accts.map(a=>{
       const label = a.email || a.name;
       const head = '<div class="acct" title="'+esc(label)+'">'+esc(label)+'</div>';
       if(a.nologin) return '<div class="acctblk">'+head+'<div class="none">not logged in</div></div>';
       const f=a.five_hour||{}, s=a.seven_day||{};
-      const age = ago(a.ts); const stale = age >= 90;
+      const age = ago(a.ts); const stale = age >= 150;
       const bars = '<div class="'+(stale?'stale':'')+'">'+bar('5h', f.used, f.resets_at)+bar('7d', s.used, s.resets_at)+'</div>';
-      const note = stale ? '<div class="staleNote" title="Live fetch failing (token expired / offline / rate-limited); showing last known.">⟳ '+agoTxt(age)+' old</div>' : '';
+      const note = stale ? '<div class="staleNote" title="Live fetch failing (token expired / offline / rate-limited, or the daemon is stopped); showing last known.">'+ico('history')+' '+agoTxt(age)+' old</div>' : '';
       return '<div class="acctblk">'+head+bars+note+'</div>';
     }).join('');
   }
-  // 1-2 letter tag for a worktree's avatar: initials of its hyphen/slash/underscore-separated
-  // words ("billing-fix" -> "BF"), else just its first two characters.
-  function initials(name){
-    const parts=name.split(/[-_\/\s]+/).filter(Boolean);
-    return (parts.length>1 ? parts[0][0]+parts[1][0] : name.slice(0,2)).toUpperCase();
+
+  function renderToolbar(){
+    const d=document.getElementById('daemon');
+    if(!daemon.installed){ d.style.display='none'; }
+    else {
+      d.style.display='';
+      d.className='tb pill '+(daemon.running?'run':'off')+(daemon.busy?' busy':'');
+      d.innerHTML = daemon.running
+        ? '<span class="rest">'+ico('circle-filled','dot')+'<span class="t">Running</span></span><span class="act">'+ico('debug-stop')+'<span class="t">Stop</span></span>'
+        : '<span class="rest">'+ico('circle-outline','dot')+'<span class="t">Stopped</span></span><span class="act">'+ico('play')+'<span class="t">Start</span></span>';
+      d.title = daemon.running ? 'Daemon running — click to stop (sessions keep running)' : 'Daemon stopped — click to start (live status, git state, usage)';
+    }
+    const n = ros.filter(w=>w.active).length;
+    document.getElementById('activeTxt').textContent = 'Active · '+n;
+    document.getElementById('active').classList.toggle('on', activeOnly);
+    document.getElementById('filter').classList.toggle('on', statuses.size>0);
+    document.getElementById('filterIco').className = 'codicon codicon-'+(statuses.size?'filter-filled':'filter');
+    document.getElementById('search').classList.toggle('on', searchOpen);
+    document.getElementById('searchRow').classList.toggle('open', searchOpen);
+    const off=document.getElementById('daemonOff');
+    off.innerHTML = (daemon.installed && !daemon.running)
+      ? '<div class="daemonOff">'+ico('warning')+'<span class="msg">Daemon stopped — live status, git state and usage are paused.</span><button class="tb primary" id="startNow">'+ico('play')+'<span class="t">Start</span></button></div>' : '';
+    const sn=document.getElementById('startNow'); if(sn) sn.onclick=()=>vsc.postMessage({cmd:'daemonToggle'});
+    document.getElementById('roster').classList.toggle('dim', daemon.installed && !daemon.running);
   }
+
+  function renderFilterMenu(){
+    const m=document.getElementById('filterMenu');
+    m.innerHTML = STATUS.map(s=>'<div class="mi'+(statuses.has(s[0])?' sel':'')+'" data-s="'+s[0]+'">'+ico('check','chk')+'<span style="color:'+s[3]+'">'+ico(s[1]==='Working'?'loading':s[2])+'</span><span>'+s[1]+'</span></div>').join('')
+      + '<div class="msep"></div><div class="mi" data-s="">'+ico('clear-all')+'<span>Clear filter</span></div>';
+    m.querySelectorAll('.mi').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const s=el.dataset.s;
+      if(!s) statuses.clear(); else if(statuses.has(s)) statuses.delete(s); else statuses.add(s);
+      save(); renderFilterMenu(); renderRoster(); });
+    const b=document.getElementById('filter'); m.style.left = b.offsetLeft+'px';
+  }
+
+  function matches(w){
+    if(activeOnly && !w.active) return false;
+    if(statuses.size && !statuses.has(w.status||'stopped')) return false;
+    if(query){
+      const hay=[w.slug,w.name,w.status,w.branch,w.plan,w.account].join(' ').toLowerCase();
+      return query.toLowerCase().split(/\\s+/).filter(Boolean).every(t=>hay.includes(t));
+    }
+    return true;
+  }
+
+  function wtRow(w){
+    const s=SMAP[w.status]||['','No status','circle-outline','var(--vscode-descriptionForeground)'];
+    const g=GLYPH[w.status]||GLYPH.stopped;
+    const git=(w.ahead?'<span class="ahead" title="'+w.ahead+' unpushed commit(s)">↑'+w.ahead+'</span>':'')+(w.dirty?'<span class="dirty" title="uncommitted changes">●</span>':'');
+    const acct = (multiAcct && w.active && w.account && w.account!=='default') ? '<span class="badge" title="Claude account">'+esc(w.account)+'</span>' : '';
+    const tip = w.slug+'/'+w.name+' — '+s[1]+(w.active?' · live session':'')+(w.branch?' · '+w.branch:'')+(w.plan?'\\n'+w.plan:'')+'\\nclick to open';
+    return '<div class="row wt'+(w.active?' live':'')+(w.unread?' unread':'')+(w.current?' current':'')+'" data-slug="'+esc(w.slug)+'" data-name="'+esc(w.name)+'" data-glyph="'+g+'" title="'+esc(tip)+'">'
+      +'<span class="st" style="color:'+s[3]+'">'+ico(s[2])+'</span>'
+      +'<span class="nm">'+esc(w.name)+'</span>'+acct
+      +'<span class="git">'+git+'</span>'
+      +'<span class="acts">'
+      +'<i class="codicon codicon-diff dif" title="Commits & diffs"></i>'
+      +(w.active&&!w.unread?'<i class="codicon codicon-mail unr" title="Mark unread"></i>':'')
+      +(w.active&&multiAcct?'<i class="codicon codicon-arrow-swap acc" title="Switch account (reopens under the one with most capacity)"></i>':'')
+      +(w.active?'<i class="codicon codicon-debug-stop term danger" title="End session (worktree stays)"></i>':'')
+      +'<i class="codicon codicon-archive arch" title="Archive"></i>'
+      +'<i class="codicon codicon-trash del danger" title="Delete worktree"></i>'
+      +'</span></div>';
+  }
+
+  function renderPins(){
+    const pin=(id,icon,label,sub,state)=>'<div class="row pin'+(state.active?' live':'')+(state.current?' current':'')+(state.unread?' unread':'')+'" id="'+id+'" title="'+esc(label+' — '+sub+' · click to open')+'">'
+      +'<span class="st">'+ico(icon)+'</span><span class="nm">'+label+'<span class="sub">'+sub+'</span></span></div>';
+    document.getElementById('pins').innerHTML = pin('pinAsst','hubot','Assistant','fleet manager',asstState) + pin('pinTerm','terminal','Terminal','dev base shell',termState);
+    document.getElementById('pinAsst').onclick=()=>vsc.postMessage({cmd:'newAssistant'});
+    document.getElementById('pinTerm').onclick=()=>vsc.postMessage({cmd:'newTerminal'});
+  }
+
   function renderRoster(){
-    // pinned toolbar avatars mirror live terminal/assistant state: a ring for focused, dimmed
-    // when there's no live session, a corner badge for the assistant's unread "your turn".
-    const ta=document.getElementById('termAvatar');
-    if(ta){ ta.classList.toggle('ring', !!termState.current); ta.style.opacity = termState.active?1:.55; }
-    const aa=document.getElementById('asstAvatar');
-    if(aa){ aa.classList.toggle('ring', !!asstState.current); aa.style.opacity = asstState.active?1:.55; }
-    const ab=document.getElementById('asstBadge');
-    if(ab) ab.style.display = asstState.unread ? '' : 'none';
-    // group by repo (slug), alphabetically. Within a repo, sort by
-    // status priority (actionable on top) then name.
-    const groups={}; ros.forEach(w=>{ (groups[w.slug]=groups[w.slug]||[]).push(w); });
-    const slugs=Object.keys(groups).sort((a,b)=> a.localeCompare(b));
-    const wtRow=(w,sep)=>{
-      const g=GLYPH[w.status]||GLYPH.stopped;      // emoji -> editor tab name (data-glyph)
-      const gc=COL[w.status]||'#888888';
-      const git=(w.ahead?'<span class="ahead">↑'+w.ahead+'</span> ':'')+(w.dirty?'<span class="dirty">●</span>':'');
-      return '<div class="wt'+(sep?' sep':'')+(w.active?' active':'')+(w.unread?' unread':'')+(w.current?' current':'')+'" data-slug="'+esc(w.slug)+'" data-name="'+esc(w.name)+'" data-glyph="'+g+'" title="'+esc(w.slug+' '+w.name)+(w.status?(' — '+w.status):'')+(w.active?' · active':'')+(w.current?' · selected':'')+(w.unread?' · unread':'')+' · click to open">'
-        +'<span class="accentbar" style="background:'+gc+'"></span>'
-        +'<span class="mini" style="color:'+gc+';background:'+gc+'2e">'+esc(initials(w.name))+'</span>'
-        +'<span class="nm">'+esc(w.name)+'</span>'
-        +'<span class="git">'+git+'</span>'
-        +'<span class="acts">'
-        +'<span class="dif" title="Browse this branch\\'s commits and diffs">Δ</span>'
-        +(w.active&&!w.unread?'<span class="unr" title="Mark unread (flag it yellow to revisit)">✉</span>':'')
-        +(w.active&&multiAcct?'<span class="acc" title="Switch to the account with the most capacity (reopens under it + compacts)">⇄</span>':'')
-        +(w.active?'<span class="term" title="End the tmux session (worktree stays)">⏹</span>':'')
-        +'<span class="arch" title="Archive '+esc(w.name)+'">📦</span>'
-        +'<span class="del" title="Delete '+esc(w.name)+' (remove worktree)">🗑</span></span></div>';
-    };
-    document.getElementById('roster').innerHTML = slugs.map(slug=>{
+    renderToolbar(); renderPins();
+    const shown = ros.filter(matches);
+    const el=document.getElementById('roster');
+    if(!ros.length){ el.innerHTML='<div class="none">No worktrees yet — click New to start a session.</div>'; return; }
+    if(!shown.length){ el.innerHTML='<div class="none">No worktrees match the current filter.</div>'; return; }
+    // grouped by repo until user-defined groups land (Phase 2); actionable statuses first
+    const groups={}; shown.forEach(w=>{ (groups[w.slug]=groups[w.slug]||[]).push(w); });
+    el.innerHTML = Object.keys(groups).sort((a,b)=>a.localeCompare(b)).map(slug=>{
       const rows=groups[slug].sort((a,b)=>(PRIO[a.status]??9)-(PRIO[b.status]??9) || a.name.localeCompare(b.name));
-      // add a gap whenever the status changes, so each status group is visually separated
-      return '<div class="repo">'+esc(slug)+'</div>'+rows.map((w,i)=>wtRow(w, i>0 && rows[i-1].status!==w.status)).join('');
+      return '<div class="sect">'+esc(slug)+'<span class="n">'+rows.length+'</span></div>'+rows.map(wtRow).join('');
     }).join('');
-    document.querySelectorAll('.wt').forEach(el=>el.onclick=()=>vsc.postMessage({cmd:'open',slug:el.dataset.slug,name:el.dataset.name,glyph:el.dataset.glyph}));
-    document.querySelectorAll('.arch').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'archive',slug:p.dataset.slug,name:p.dataset.name}); });
-    document.querySelectorAll('.del').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'delete',slug:p.dataset.slug,name:p.dataset.name}); });
-    document.querySelectorAll('.term').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'terminate',slug:p.dataset.slug,name:p.dataset.name}); });
-    document.querySelectorAll('.unr').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'markunread',slug:p.dataset.slug,name:p.dataset.name}); });
-    document.querySelectorAll('.acc').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'switchAccount',slug:p.dataset.slug,name:p.dataset.name}); });
-    document.querySelectorAll('.dif').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); const p=el.closest('.wt'); vsc.postMessage({cmd:'openCommits',slug:p.dataset.slug,name:p.dataset.name}); });
+    const on=(sel,cmd)=>el.querySelectorAll(sel).forEach(x=>x.onclick=(ev)=>{ ev.stopPropagation(); const p=x.closest('.wt'); vsc.postMessage({cmd,slug:p.dataset.slug,name:p.dataset.name}); });
+    el.querySelectorAll('.wt').forEach(x=>x.onclick=()=>vsc.postMessage({cmd:'open',slug:x.dataset.slug,name:x.dataset.name,glyph:x.dataset.glyph}));
+    on('.arch','archive'); on('.del','delete'); on('.term','terminate'); on('.unr','markunread'); on('.acc','switchAccount'); on('.dif','openCommits');
   }
+
   function renderMonitor(){
     const el=document.getElementById('mon'); if(!el) return;
-    if(!mon){ el.innerHTML='<div class="none">…</div>'; return; }
+    if(!mon){ el.innerHTML='<div class="none">'+(daemon.installed&&!daemon.running?'paused — daemon stopped':'…')+'</div>'; return; }
     const gb=x=>(x/1024).toFixed(1);
-    // bars are AGENT-scoped: summed over every claude process tree, as a share of the box.
-    const cpuPct = mon.ncpu>0?Math.min(100,Math.round(mon.acpu/mon.ncpu)):0;   // agent CPU / total cores
-    const memPct = mon.mt>0?Math.min(100,Math.round(mon.amem*100/mon.mt)):0;    // agent RAM / total RAM
-    const sysPct = mon.mt>0?Math.round(mon.msys*100/mon.mt):0;                  // whole-box RAM (tooltip)
+    const cpuPct = mon.ncpu>0?Math.min(100,Math.round(mon.acpu/mon.ncpu)):0;
+    const memPct = mon.mt>0?Math.min(100,Math.round(mon.amem*100/mon.mt)):0;
+    const sysPct = mon.mt>0?Math.round(mon.msys*100/mon.mt):0;
     const cores  = (mon.acpu/100).toFixed(1);
     const stat=(k,v,t)=>'<span class="stat" title="'+t+'"><span class="sk">'+k+'</span><span class="sv">'+v+'</span></span>';
-    const mbar=(lbl,pct,meta,title)=>
-      '<div class="row" title="'+title+'"><span class="mlbl">'+lbl+'</span>'
-      +'<div class="track"><div class="fill" style="width:'+pct+'%;background:'+col(pct)+'"></div></div>'
-      +'<span class="pct">'+pct+'%</span><span class="meta">'+meta+'</span></div>';
-    el.innerHTML =
-      '<div class="statline">'
-        + stat('sessions', mon.sess, 'fleet sessions running')
-        + stat('agents', mon.nag, 'interactive claude agents')
-        + stat('reviews', mon.rev, 'review agents running')
-      +'</div>'
-      + mbar('cpu', cpuPct, cores+'/'+mon.ncpu+'c', 'Claude agents: '+cores+' of '+mon.ncpu+' cores ('+cpuPct+'% of CPU)'+(mon.load&&mon.load!=='n/a'?' · system load '+mon.load:''))
-      + mbar('mem', memPct, gb(mon.amem)+'G', 'Claude agents using '+gb(mon.amem)+' GB RAM ('+memPct+'% of '+gb(mon.mt)+'G) · whole system '+gb(mon.msys)+'/'+gb(mon.mt)+'G used ('+sysPct+'%)');
+    const mbar=(lbl,pct,meta,title)=>'<div class="bar" title="'+title+'"><span class="mlbl">'+lbl+'</span><div class="track"><div class="fill" style="width:'+pct+'%;background:'+col(pct)+'"></div></div><span class="pct">'+pct+'%</span><span class="meta">'+meta+'</span></div>';
+    el.innerHTML = '<div class="statline">'+stat('sessions', mon.sess, 'fleet sessions running')+stat('agents', mon.nag, 'interactive agents')+stat('reviews', mon.rev, 'review workers')+'</div>'
+      + mbar('cpu', cpuPct, cores+'/'+mon.ncpu+'c', 'Agents: '+cores+' of '+mon.ncpu+' cores ('+cpuPct+'% of CPU)')
+      + mbar('mem', memPct, gb(mon.amem)+'G', 'Agents using '+gb(mon.amem)+' GB ('+memPct+'% of '+gb(mon.mt)+'G) · system '+gb(mon.msys)+'/'+gb(mon.mt)+'G ('+sysPct+'%)');
   }
-  document.getElementById('termAvatar').onclick=()=>vsc.postMessage({cmd:'newTerminal'});
-  document.getElementById('asstAvatar').onclick=()=>vsc.postMessage({cmd:'newAssistant'});
+
+  // --- toolbar wiring ---
+  document.getElementById('daemon').onclick=()=>vsc.postMessage({cmd:'daemonToggle'});
+  document.getElementById('active').onclick=()=>{ activeOnly=!activeOnly; save(); renderRoster(); };
+  document.getElementById('search').onclick=()=>{ searchOpen=!searchOpen; if(!searchOpen){ query=''; document.getElementById('q').value=''; } save(); renderRoster(); if(searchOpen) document.getElementById('q').focus(); };
+  const q=document.getElementById('q'); q.value=query;
+  q.oninput=()=>{ query=q.value; save(); renderRoster(); };
+  q.onkeydown=(e)=>{ if(e.key==='Escape'){ searchOpen=false; query=''; q.value=''; save(); renderRoster(); } };
+  document.getElementById('filter').onclick=(ev)=>{ ev.stopPropagation(); const m=document.getElementById('filterMenu'); const open=!m.classList.contains('open'); if(open) renderFilterMenu(); m.classList.toggle('open', open); };
+  document.addEventListener('click', ()=>document.getElementById('filterMenu').classList.remove('open'));
+  document.getElementById('more').onclick=()=>vsc.postMessage({cmd:'more'});
   document.getElementById('add').onclick=()=>vsc.postMessage({cmd:'newAgent'});
-  document.getElementById('img').onclick=()=>vsc.postMessage({cmd:'pasteImage'});
-  document.getElementById('prev').onclick=()=>vsc.postMessage({cmd:'previewFocused'});
-  function renderTests(excluded){ const b=document.getElementById('tests'); if(!b) return;
-    b.style.color = excluded ? '' : 'var(--vscode-charts-green,#3fd35f)';
-    b.title = excluded ? 'Test files are EXCLUDED from the diff panes — click to include' : 'Test files are INCLUDED in the diff panes — click to exclude';
-    b.style.opacity = excluded ? '.55' : '1'; }
-  document.getElementById('tests').onclick=()=>vsc.postMessage({cmd:'toggleTests'});
-  function renderBell(muted){ const b=document.getElementById('bell'); if(!b) return;
-    b.textContent = muted ? '🔕' : '🔔';
-    b.title = muted ? 'Turn-end sound alert is OFF — click to enable' : 'Turn-end sound alert is ON — click to mute';
-    b.style.opacity = muted ? '.6' : '1'; }
-  document.getElementById('bell').onclick=()=>vsc.postMessage({cmd:'toggleBell'});
+
   window.addEventListener('message', e => {
     const m=e.data; if(!m) return;
     if(m.type==='limits'){ accts=m.accounts||[]; renderLim(); }
     else if(m.type==='roster'){ ros=m.rows||[]; asstState=m.assistant||{}; termState=m.terminal||{}; multiAcct=!!m.multiAccount; renderRoster(); }
     else if(m.type==='monitor'){ mon=m.m; renderMonitor(); }
-    else if(m.type==='teststate'){ renderTests(m.excluded); }
-    else if(m.type==='bell'){ renderBell(m.muted); }
+    else if(m.type==='daemon'){ daemon={installed:!!m.installed, running:!!m.running, busy:!!m.busy}; renderRoster(); renderLim(); renderMonitor(); }
   });
+  renderRoster();
   setInterval(renderLim, 15000);   // keep the reset countdown ticking
-  vsc.postMessage({cmd:'ready'});  // handshake: tell the host to (re)send state — posts sent before
-                                   // this script loaded were dropped, which left the panel stuck on
-                                   // its static "waiting for a session…" HTML after a window reload
+  vsc.postMessage({cmd:'ready'});  // handshake: the host replays full state once this script is live
 </script></body></html>`;
   }
 }
@@ -1395,6 +1653,37 @@ function activate(context) {
   context.subscriptions.push(vscode.window.registerFileDecorationProvider(provider));
 
   const dev = new DevSummaryProvider();
+  dev._extUri = context.extensionUri;
+
+  // v2 daemon: one pipe subscription replaces the panel's scanning, polling and process spawning.
+  // Pushes are coalesced per kind so a burst of agent activity costs one repaint.
+  const pending = new Set(); let flush = null;
+  const kick = (kind) => {
+    pending.add(kind);
+    if (flush) return;
+    flush = setTimeout(() => {
+      flush = null;
+      const kinds = new Set(pending); pending.clear();
+      if (kinds.has('daemon')) { dev._postDaemon(); dev._postMonitor(); }
+      if (kinds.has('fleet') || kinds.has('daemon')) dev._postRoster();
+      if (kinds.has('accounts')) dev._postLimits();
+      if (kinds.has('metrics')) dev._postMonitor();
+    }, 150);
+  };
+  dev.daemon = new DaemonClient((kind, wt, prev) => {
+    // folder colours: refresh just the worktree whose status changed
+    if (kind === 'fleet' && wt && (!prev || prev.status !== wt.status)) provider.refresh(vscode.Uri.file(wt.path));
+    kick(kind);
+  });
+  if (daemonInstalled()) dev.daemon.start();
+  context.subscriptions.push({ dispose: () => dev.daemon.dispose() });
+  const reg = (id, fn) => context.subscriptions.push(vscode.commands.registerCommand(id, fn));
+  reg('claudeStatus.startDaemon', () => dev.toggleDaemon(true));
+  reg('claudeStatus.stopDaemon', () => dev.toggleDaemon(false));
+  reg('claudeStatus.toggleDaemon', () => dev.toggleDaemon());
+  reg('claudeStatus.newSession', () => dev.newAgent());
+  reg('claudeStatus.openAssistant', () => dev.openOrFocusAssistant());
+  reg('claudeStatus.openTerminal', () => dev.openOrFocusTerminal());
   context.subscriptions.push(vscode.window.registerWebviewViewProvider('claudeStatus.limit', dev));
   // ctrl+v in a focused session → image-aware paste (see DevSummaryProvider.smartPaste)
   context.subscriptions.push(vscode.commands.registerCommand('claudeStatus.smartPaste', () => dev.smartPaste()));
