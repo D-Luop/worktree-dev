@@ -50,9 +50,9 @@ when idle · daemon idle < 0.5% CPU, < 60 MB RSS with 15 worktrees · zero polli
 
 **One binary, `wtd.exe`, with subcommands:** `daemon`, `hook`, `attach`, plus the user CLI (`new`,
 `ls`, `stop`, `archive`, `rm`, `pr`, `done`, `review`, `ask`, `preview`, `account`, `repo`, …). A
-Rust exe starts in a few ms, so even the hook client can be the same binary. The daemon is started on
-demand by the first client (extension activation or any CLI call) and can optionally be registered to
-start at logon.
+Rust exe starts in a few ms, so even the hook client can be the same binary. The daemon is started and
+stopped **explicitly** by the user, from a Start/Stop button or from the tray icon (§3.8). Nothing
+auto-starts it.
 
 ### Why Rust (vs Node)
 - The hook client runs on **every tool call of every agent**; Node's ~50 ms startup is too slow for
@@ -137,6 +137,41 @@ scripts that read them keep working, then retired.
   changes. Tokens are read from each account's credentials file, as today.
 - Reviews and `ask`: the daemon spawns `claude -p …` in a Job Object and tracks phase, cost and report
   paths. Phase 1 runs the existing `review.sh` under the daemon; later phases port the orchestration.
+
+### 3.8 Lifecycle: Start/Stop button and tray icon
+The daemon runs only when the user starts it. There are two controls, and both reflect the live state.
+
+**Tray icon: `wtd tray`.** A separate, tiny process from the same exe (a hidden window plus
+`Shell_NotifyIcon`; no UI framework). It has to be separate: if the daemon owned the icon, stopping the
+daemon would remove the only button that can start it again.
+- **Icon state:** *running* (colour) · *stopped* (grey) · *needs you* (colour + dot), shown when an
+  agent is on your turn or a cross-worktree message (§4.4) is waiting for approval. The tooltip reads
+  e.g. `WorkTreeDev — running · 9 sessions · 2 need you`.
+- **Left-click:** open or focus the dev-root VSCode window (`code <dev root>`, which focuses an existing
+  window rather than opening a second one).
+- **Right-click menu:** status line · **Start daemon / Stop daemon** (one item that flips) · **Open
+  VSCode** · *Pending approvals (N)…* (opens VSCode on the approval prompt) · *Start tray at logon* ✓ ·
+  *Quit tray*.
+- It learns the daemon's state by holding a subscription on the pipe. When the daemon is down, it
+  retries the connection every few seconds (a cheap failed pipe open, no process spawn).
+- *Start tray at logon* (on by default after install) adds an `HKCU\…\Run` entry for the **tray only**.
+  The daemon still starts only when you click Start.
+- Windows puts new tray icons in the `^` overflow. Drag it onto the taskbar, or turn it on under
+  *Settings → Personalization → Taskbar → Other system tray icons*. The installer prints this hint.
+
+**Panel button.** The fleet panel toolbar gets a **Start / Stop** toggle with the same state. While the
+daemon is stopped, the panel shows the roster greyed out with a single *Start daemon* call to action,
+and the `WorkTreeDev: Start Daemon` / `Stop Daemon` palette commands do the same.
+
+**Stopping is safe:**
+- Hooks that fire while the daemon is down are spooled (§3.1) and replayed when it starts, so no status
+  is lost.
+- Phases 1–2: sessions run in VSCode terminals under `wtd run` and **keep running** when the daemon
+  stops. Only fleet features (live status, git state, messaging) pause.
+- Phase 3+: the daemon hosts the sessions, so Stop asks for confirmation first: *"Stopping ends 9
+  running sessions. Conversations can be resumed."* *Stop* then terminates them cleanly.
+- CLI commands that need the daemon say *"daemon not running — start it from the tray or the panel"*.
+  They never start it themselves.
 
 ## 4. New UX
 
@@ -264,7 +299,7 @@ up on demand.
 | Phase | Delivers | Retires |
 |---|---|---|
 | **0** (done on branch) | Status hook ~5× faster, resident monitor, no login shells, single status-folder watch, row-only roster updates, git index settings, control-window VSCode settings | — |
-| **1** Daemon core | `wtd.exe` daemon + hook + pipe protocol + SQLite state; git service; metrics; usage; `wtd mcp` with the read-only fleet tools (`fleet_list` / `fleet_get` / `fleet_read_file`). Extension switched to the pipe for all state. Sessions still launch in VSCode terminals, wrapped by `wtd run` (puts Claude in a Job Object and reports liveness) | extension disk scans, timers and `exec`s; `monitor-stats.*`; `wt-status.sh`; the session registry and reaper |
+| **1** Daemon core | `wtd.exe` daemon + hook + pipe protocol + SQLite state; git service; metrics; usage; `wtd mcp` with the read-only fleet tools (`fleet_list` / `fleet_get` / `fleet_read_file`); `wtd tray` icon + panel Start/Stop toggle. Extension switched to the pipe for all state. Sessions still launch in VSCode terminals, wrapped by `wtd run` (puts Claude in a Job Object and reports liveness) | extension disk scans, timers and `exec`s; `monitor-stats.*`; `wt-status.sh`; the session registry and reaper |
 | **2** New UX | Fleet panel search / filters / groups; New Session quick pick; Settings page; GitHub linking + issues; agent messaging (`fleet_send` + approval prompt + delivery + inbox) | the `+ agent` input box |
 | **3** Session host | ConPTY hosting + `wtd attach`; sessions survive reloads | `wtd run` wrapper; terminal-name tracking hacks |
 | **4** CLI parity | `archive`/`rm`/`review`/`ask`/`account`/`preview` in Rust; skills call `wtd …` | Git Bash scripts on Windows (Claude Code itself still needs Git Bash) |
@@ -299,5 +334,6 @@ process groups or cgroups, Unix sockets) and reuses everything else.
    when nothing is configured.
 3. ~~Groups vs repos.~~ **Decided:** user-defined groups replace grouping by repo, with no toggle. The
    repo shows as a row badge and a filter (§4.1).
-4. **Daemon lifetime.** Start on demand (from the extension or CLI), or register to start at logon?
-   **Recommendation: on demand, with an optional logon task.**
+4. ~~Daemon lifetime.~~ **Decided:** explicit Start/Stop only, via a toggle button in the panel and
+   a tray icon (`wtd tray`) that can start and stop the daemon and open the VSCode window (§3.8). Only
+   the tray app starts at logon.
