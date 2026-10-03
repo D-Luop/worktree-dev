@@ -48,7 +48,31 @@ unsafe impl Send for Tray {}
 
 static TRAY: Mutex<Option<Tray>> = Mutex::new(None);
 
-pub fn main() -> Result<i32> {
+/// `wtd tray [--spawn | --quit | --logon on|off]`
+pub fn main(args: &[String]) -> Result<i32> {
+    match args.first().map(String::as_str) {
+        // start detached (from install / a terminal) so it doesn't die with the caller
+        Some("--spawn") => {
+            let mut cmd = Command::new(std::env::current_exe()?);
+            cmd.arg("tray").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+            win::spawn_detached(&mut cmd)?;
+            return Ok(0);
+        }
+        // close a running tray (e.g. before replacing wtd.exe)
+        Some("--quit") => unsafe {
+            let hwnd = FindWindowW(win::wide("wtd-tray").as_ptr(), std::ptr::null());
+            if !hwnd.is_null() {
+                PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            }
+            return Ok(0);
+        },
+        Some("--logon") => {
+            set_start_at_logon(args.get(1).map(String::as_str) != Some("off"));
+            return Ok(0);
+        }
+        Some(a) => bail!("unknown option '{a}' (wtd tray [--spawn | --quit | --logon on|off])"),
+        None => {}
+    }
     unsafe {
         // one tray per user session
         CreateMutexW(std::ptr::null(), 0, win::wide("Local\\wtd-tray").as_ptr());
@@ -149,6 +173,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             if changed {
                 notify_icon(NIM_MODIFY);
             }
+            0
+        }
+        WM_DESTROY => {
+            PostQuitMessage(0);
             0
         }
         WM_COMMAND => {

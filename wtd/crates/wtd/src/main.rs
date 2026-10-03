@@ -24,7 +24,8 @@ wtd — WorkTreeDev fleet tool
   wtd refresh [slug/name]            rescan worktrees and re-check git now
   wtd hook <event>                   Claude Code hook handler (reads hook JSON on stdin)
   wtd mcp                            stdio MCP server: read-only fleet tools for agents
-  wtd tray                           notification-area icon: start/stop the daemon, open VS Code
+  wtd tray [--spawn|--quit|--logon on|off]
+                                     notification-area icon: start/stop the daemon, open VS Code
   wtd run [--kind k] [--account a] -- <program> [args…]
                                      run a session inside a tracked job";
 
@@ -53,7 +54,7 @@ fn dispatch(cmd: &str, rest: &[String]) -> Result<i32> {
         "daemon" => daemon::main(rest),
         "run" => run::main(rest),
         "mcp" => mcp::main(),
-        "tray" => tray::main(),
+        "tray" => tray::main(rest),
         "ls" => ls(rest.iter().any(|a| a == "--json")),
         "stop" => {
             let id = rest.first().ok_or_else(|| anyhow::anyhow!("usage: wtd stop <slug/name>"))?;

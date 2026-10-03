@@ -5,10 +5,10 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::process::CommandExt;
 use std::process::Command;
 
-use windows_sys::Win32::Foundation::{CloseHandle, BOOL, FALSE, HANDLE, TRUE};
+use windows_sys::Win32::Foundation::{CloseHandle, SetHandleInformation, BOOL, FALSE, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, TRUE};
 use windows_sys::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
 use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
-use windows_sys::Win32::System::Console::{SetConsoleCtrlHandler, CTRL_BREAK_EVENT, CTRL_C_EVENT};
+use windows_sys::Win32::System::Console::{GetStdHandle, SetConsoleCtrlHandler, CTRL_BREAK_EVENT, CTRL_C_EVENT, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation, JobObjectBasicProcessIdList,
     JobObjectExtendedLimitInformation, OpenJobObjectW, QueryInformationJobObject, SetInformationJobObject,
@@ -198,6 +198,18 @@ pub fn ignore_ctrl_c_in_this_process() {
 /// Start a process fully detached from the caller's console and job (so it outlives VSCode's
 /// terminal or the tray), with stdio redirected as configured on `cmd`.
 pub fn spawn_detached(cmd: &mut Command) -> std::io::Result<std::process::Child> {
+    // CreateProcess hands the child EVERY inheritable handle we hold, not just the stdio we set on
+    // `cmd`. Our own stdio is usually the caller's pipe (a VSCode execFile, `… | tail`), and a resident
+    // child holding it open means that caller never sees EOF and hangs. Our short-lived launcher
+    // doesn't need its stdio inheritable, so turn that off first; `cmd`'s own stdio is unaffected.
+    unsafe {
+        for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            let h = GetStdHandle(id);
+            if !h.is_null() && h != INVALID_HANDLE_VALUE {
+                SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
     let base = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
     match cmd.creation_flags(base | CREATE_BREAKAWAY_FROM_JOB).spawn() {
         Ok(c) => Ok(c),
