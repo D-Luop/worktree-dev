@@ -147,8 +147,11 @@ scripts that read them keep working, then retired.
   filtering as you type.
 - **Filters:** status (working / your turn / reviewing / PR / done / stopped), repo, account,
   has-unread, dirty or unpushed.
-- **Groups:** user-defined and collapsible, with counts. Drag rows between groups. The **Ungrouped**
-  bucket is implicit. A toggle switches to auto-grouping by repo (today's behaviour).
+- **Groups:** user-defined and collapsible, with counts. They **replace** today's grouping by repo,
+  and there is no toggle back. Drag rows between groups, or use *Move to group…*. New sessions land
+  in **Ungrouped** (the New Session flow can also pick a group). Rename, reorder and delete groups
+  inline; deleting a group moves its rows to Ungrouped. The repo stays visible as a badge on each row
+  and as a filter.
 - **Rows:** status glyph · name · issue `#123` · account badge · `↑n` / `●` · relative time. Unread rows
   are highlighted, as today. Row actions and the account / usage / monitor sections carry over.
 - The webview receives only patches, so a status change re-renders one row, not the whole list.
@@ -240,7 +243,7 @@ process groups or cgroups, Unix sockets) and reuses everything else.
 2. ~~"Project" meaning.~~ **Decided:** both. Each repo's issue source is configured on the Settings
    page as either **repo issues** or a **GitHub Project (v2) board** (§4.3). Repo issues is the default
    when nothing is configured.
-3. **Groups vs repos.** Should user-defined groups replace grouping by repo, or sit alongside it
-   (a toggle)? **Recommendation: toggle, defaulting to groups.**
+3. ~~Groups vs repos.~~ **Decided:** user-defined groups replace grouping by repo, with no toggle. The
+   repo shows as a row badge and a filter (§4.1).
 4. **Daemon lifetime.** Start on demand (from the extension or CLI), or register to start at logon?
    **Recommendation: on demand, with an optional logon task.**
