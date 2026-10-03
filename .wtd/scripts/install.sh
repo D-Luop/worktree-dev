@@ -250,7 +250,7 @@ fi
 tmux source-file "$CLICKCONF" 2>/dev/null && echo "    loaded commit-click binding into running server" || true
 fi   # end Section H (tmux backend only)
 
-echo "==> I. commit-msg attribution stripper on all registered bares"
+echo "==> I. commit-msg attribution stripper + git perf config on all registered bares"
 # Belt-and-suspenders with attribution="": deterministically strip any Claude/AI lines from
 # commit messages, repo-side, so commits are never tied to Claude regardless of the model.
 if [ -f "$WTD/repos.tsv" ]; then
@@ -265,7 +265,31 @@ if [ -f "$WTD/repos.tsv" ]; then
     else
       echo "    [$slug] existing commit-msg hook left intact"
     fi
+    wtd_git_perf_config "$bare" && echo "    [$slug] git perf config (untrackedCache, manyFiles)"
   done < "$WTD/repos.tsv"
+fi
+
+echo "==> J. control-window VSCode settings ($BASE/.vscode/settings.json)"
+# The dev base is opened as ONE window containing every worktree. Keep VSCode's own background work
+# off the worktrees: the built-in Git extension otherwise discovers each worktree as a repository and
+# runs its own `git status` on every file change; the recursive file watcher and search otherwise walk
+# every worktree's build output. The roster/extension doesn't rely on any of these (status arrives via
+# .wtd/state/status). Open a worktree in its own window to review it with full git/LSP support.
+WSET="$BASE/.vscode/settings.json"
+mkdir -p "$(dirname "$WSET")"; [ -f "$WSET" ] || echo '{}' > "$WSET"
+if jq empty "$WSET" 2>/dev/null; then
+  tmp=$(mktemp)
+  jq --indent 4 '
+    . + {"git.autoRepositoryDetection": "openEditors", "git.openRepositoryInParentFolders": "never"}
+    | .["files.watcherExclude"] = ((.["files.watcherExclude"] // {}) + {
+        "**/repos/**": true, "**/refs/**": true, "**/worktrees/**": true})
+    | .["search.exclude"] = ((.["search.exclude"] // {}) + {
+        "**/repos/**": true, "**/.wtd/state/**": true,
+        "**/worktrees/*/archive/**": true, "**/node_modules": true})
+  ' "$WSET" > "$tmp" && mv "$tmp" "$WSET"
+  echo "    git autodetect → open editors only; worktrees/repos/refs out of the file watcher; search trimmed"
+else
+  echo "    SKIPPED: $WSET is not plain JSON (comments?) — add the settings by hand (see install.sh section J)"
 fi
 
 echo "==> done"

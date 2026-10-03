@@ -66,6 +66,7 @@ if [ "${1:-}" = "rm" ]; then
       echo "folder not present."
     fi
     wtd_session_id_forget "$rmsession"
+    rm -f "$WTD/state/status/${rmrepo}__${rmname//\//__}"   # central status mirror (see wt-status.sh)
     rm -rf "$DEV/.wtd/state/previews/plan/$rmname" 2>/dev/null || true
     echo "done."
     exit 0
@@ -113,6 +114,7 @@ if [ "${1:-}" = "rm" ]; then
     echo "worktree not present; pruned stale entries"
   fi
   wtd_session_id_forget "$rmsession"   # only now (worktree actually gone) drop the durable resume id
+  rm -f "$WTD/state/status/${rmrepo}__${rmname//\//__}"   # central status mirror (see wt-status.sh)
   if [ "$del_branch" = 1 ]; then
     if git -C "$rmbare" show-ref --verify --quiet "refs/heads/$rmname"; then
       git -C "$rmbare" branch -D "$rmname" && echo "deleted branch $rmname"

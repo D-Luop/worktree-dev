@@ -1,7 +1,9 @@
 {
     "terminal.integrated.tabs.title": "${sequence}",
     "terminal.integrated.tabs.description": "${cwdFolder}",
-    "workbench.editorAssociations": { "*.md": "vscode.markdown.preview.editor" },
+    "workbench.editorAssociations": {
+        "*.md": "vscode.markdown.preview.editor"
+    },
     "accessibility.signals.terminalBell": {
         "sound": "off"
     },
@@ -27,5 +29,18 @@
     },
     "peacock.remoteColor": "#dd0531",
     "terminal.integrated.enableVisualBell": true,
-    "workbench.editor.showTabs": "none"
+    "workbench.editor.showTabs": "none",
+    "git.autoRepositoryDetection": "openEditors",
+    "git.openRepositoryInParentFolders": "never",
+    "files.watcherExclude": {
+        "**/repos/**": true,
+        "**/refs/**": true,
+        "**/worktrees/**": true
+    },
+    "search.exclude": {
+        "**/repos/**": true,
+        "**/.wtd/state/**": true,
+        "**/worktrees/*/archive/**": true,
+        "**/node_modules": true
+    }
 }

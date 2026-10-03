@@ -56,6 +56,7 @@ wtd_session_kill "$session" "$wt" 2>/dev/null && echo "killed session $session" 
 mkdir -p "$(dirname "$arc")"
 if git -c safe.bareRepository=all -C "$bare" worktree move "$wt" "$arc"; then
   echo "archived: $wt  →  $arc"
+  rm -f "$WTD/state/status/${slug}__${name//\//__}"   # drop its central status mirror (see wt-status.sh)
   echo "  (branch + changes + reviews kept; it's out of the active rotation. To bring it back:"
   echo "   git -c safe.bareRepository=all -C $bare worktree move '$arc' '$wt')"
 else

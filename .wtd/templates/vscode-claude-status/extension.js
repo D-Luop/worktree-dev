@@ -58,6 +58,9 @@ function refreshDevRoot() {
   SESS_DIR = path.join(WTD, 'state', 'sessions');
 }
 const IS_WIN = process.platform === 'win32';
+const MON_SECS = 15;   // system-monitor sample interval
+const GIT_SECS = 30;   // dirty/ahead refresh interval (status flips don't wait for this — they're watched)
+const GIT_CONCURRENCY = 3;   // max simultaneous `git status` (15 at once saturates disk on a monorepo)
 const ASST_NAME = 'assistant';   // the reserved terminal name of the pinned fleet-management session
 const TERM_NAME = 'terminal';    // the reserved name of the pinned plain shell row (above assistant)
 // The shell each worktree terminal runs. On Windows that's Git Bash (so the .wtd bash scripts run);
@@ -115,12 +118,17 @@ function registeredSlugs() {
 // these aren't directly spawnable — cp.execFile throws EFTYPE — so route them through Git Bash (with
 // forward-slash paths it can stat); elsewhere exec them directly. Crucially this NEVER throws
 // synchronously: a spawn failure is delivered to cb, so e.g. _postMonitor can't take down the webview.
+// Non-login `bash -c`: a login shell re-sources the whole profile on every call (~0.5-0.8s on Windows).
+// Git's bin\bash.exe launcher already puts /usr/bin + /mingw64/bin on PATH; we add ~/.local/bin.
+const LOCAL_BIN = path.join(HOME, '.local', 'bin');
 function execScript(file, args, opts, cb) {
   const done = typeof cb === 'function' ? cb : () => {};
   try {
     if (IS_WIN) {
       const line = [file].concat(args || []).map((a) => shq(String(a).replace(/\\/g, '/'))).join(' ');
-      return cp.execFile(bashShell(), ['-lc', line], opts, done);
+      const pk = Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') || 'PATH';   // Windows: usually "Path"
+      const env = { ...process.env, [pk]: LOCAL_BIN + path.delimiter + (process.env[pk] || '') };
+      return cp.execFile(bashShell(), ['-c', line], { ...opts, env }, done);
     }
     return cp.execFile(file, args || [], opts, done);
   } catch (e) { done(e); }
@@ -804,21 +812,23 @@ class DevSummaryProvider {
         if (r && typeof r.catch === 'function') r.catch((e) => _dbg('panel ' + tag + ' FAILED: ' + ((e && e.stack) || e)));
       } catch (e) { _dbg('panel ' + tag + ' FAILED: ' + ((e && e.stack) || e)); }
     };
-    const postAll = () => { safe('limits', () => this._postLimits()); safe('roster', () => this._postRoster());
+    const postAll = () => { safe('limits', () => this._postLimits()); safe('roster', () => this._postRoster({ git: true }));
       safe('monitor', () => this._postMonitor()); safe('tests', () => this._postTests()); safe('bell', () => this._postBell()); };
     this._postAll = postAll;   // re-run on the webview's 'ready' handshake (initial posts can beat the script)
     postAll();
     // refresh accounts' usage every 60s. Active accounts come from their (free) statusline file; only
-    // idle accounts hit the endpoint — 60s keeps API calls low enough to avoid 429. Roster every 12s,
-    // system monitor every 5s.
+    // idle accounts hit the endpoint — 60s keeps API calls low enough to avoid 429. Git state (dirty /
+    // ahead) every GIT_SECS; status flips arrive instantly via the status watchers, without git.
+    // System monitor every MON_SECS (resident sampler on Windows; a timer elsewhere).
     this.limTimer = setInterval(() => safe('limits', () => this._postLimits()), 60000);
-    this.rosTimer = setInterval(() => safe('roster', () => this._postRoster()), 12000);
-    this.monTimer = setInterval(() => safe('monitor', () => this._postMonitor()), 5000);
-    view.onDidChangeVisibility(() => { if (view.visible) postAll(); });
+    this.rosTimer = setInterval(() => safe('roster', () => this._postRoster({ git: true })), GIT_SECS * 1000);
+    if (!IS_WIN) this.monTimer = setInterval(() => safe('monitor', () => this._postMonitor()), MON_SECS * 1000);
+    view.onDidChangeVisibility(() => { if (view.visible) postAll(); else this._stopMonitor(); });
     view.onDidDispose(() => {
       if (this.limTimer) clearInterval(this.limTimer);
       if (this.rosTimer) clearInterval(this.rosTimer);
       if (this.monTimer) clearInterval(this.monTimer);
+      this._stopMonitor();
       this.limTimer = this.rosTimer = this.monTimer = this.view = this._postAll = null;
     });
   }
@@ -957,9 +967,21 @@ class DevSummaryProvider {
     } catch (e) { _dbg('usage fetch threw: ' + ((e && e.stack) || e)); cb(null); }
   }
 
-  async _postRoster() {
+  async _postRoster(opts) {
     if (!this.view || !this.view.visible) return;
-    const rows = await this._roster();
+    // coalesce: a refresh requested while one is running runs once more after it (never in parallel)
+    if (this._rosBusy) { this._rosAgain = { git: !!(opts && opts.git) || !!(this._rosAgain && this._rosAgain.git) }; return; }
+    this._rosBusy = true;
+    try { await this._postRosterNow(opts); }
+    finally {
+      this._rosBusy = false;
+      const again = this._rosAgain; this._rosAgain = null;
+      if (again) this._postRoster(again);
+    }
+  }
+
+  async _postRosterNow(opts) {
+    const rows = await this._roster(!!(opts && opts.git));
     const live = await this._liveSessions();   // session names with a live tmux session
     // resolve which row is the currently-focused session: by exact terminal if we opened it, else
     // (e.g. after a window reload, when _terms is empty) fall back to matching the terminal's name.
@@ -1017,18 +1039,50 @@ class DevSummaryProvider {
   }
 
   // system monitor: tmux sessions, claude procs + RSS, reviews running, WSL mem, CPU load
+  _postMonitorLine(out) {
+    if (!this.view || !this.view.visible) return;
+    const p = (out || '').trim().split('|');   // sess|nag|rev|acpu|amem|mt|msys|ncpu|load
+    if (p.length < 9) return;
+    this.view.webview.postMessage({ type: 'monitor', m: {
+      sess: +p[0], nag: +p[1], rev: +p[2], acpu: +p[3], amem: +p[4], mt: +p[5], msys: +p[6], ncpu: +p[7], load: p[8] } });
+  }
+
   _postMonitor() {
     if (!this.view || !this.view.visible) return;
+    if (IS_WIN) return this._startMonitor();   // resident sampler; it pushes lines on its own
+    if (this._monBusy) return;                 // never stack runs (a slow sample used to overlap the next)
+    this._monBusy = true;
     execScript(path.join(DEV, '.wtd', 'hooks', 'monitor-stats.sh'), [], { timeout: 8000 }, (e, out) => {
-      if (e || !this.view || !this.view.visible) return;
-      const p = (out || '').trim().split('|');   // sess|nag|rev|acpu|amem|mt|msys|ncpu|load
-      if (p.length < 9) return;
-      this.view.webview.postMessage({ type: 'monitor', m: {
-        sess: +p[0], nag: +p[1], rev: +p[2], acpu: +p[3], amem: +p[4], mt: +p[5], msys: +p[6], ncpu: +p[7], load: p[8] } });
+      this._monBusy = false;
+      if (!e) this._postMonitorLine(out);
     });
   }
 
-  _roster() {
+  // Windows: one long-lived PowerShell sampling every MON_SECS, instead of a fresh bash → powershell →
+  // WMI cold start per sample (~7s each, on a 5s timer). Runs only while the panel is visible.
+  _startMonitor() {
+    if (this._monProc) return;
+    const ps1 = path.join(DEV, '.wtd', 'hooks', 'monitor-stats.ps1');
+    let buf = '';
+    try {
+      const proc = cp.spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', ps1, '-Loop', String(MON_SECS)], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+      this._monProc = proc;
+      proc.stdout.on('data', (d) => {
+        buf += d; let i;
+        while ((i = buf.indexOf('\n')) >= 0) { this._postMonitorLine(buf.slice(0, i)); buf = buf.slice(i + 1); }
+      });
+      const gone = () => { if (this._monProc === proc) this._monProc = null; };
+      proc.on('exit', gone); proc.on('error', gone);
+    } catch (e) { _dbg('monitor spawn failed: ' + ((e && e.stack) || e)); this._monProc = null; }
+  }
+
+  _stopMonitor() {
+    const p = this._monProc; this._monProc = null;
+    if (p) { try { p.kill(); } catch {} }
+  }
+
+  _roster(git) {
     const wts = [];
     const walk = (dir, slug, rel, depth) => {
       if (depth > 4) return;
@@ -1046,20 +1100,38 @@ class DevSummaryProvider {
     try { slugs = fs.readdirSync(path.join(DEV, 'worktrees'), { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name); } catch {}
     for (const slug of slugs) walk(path.join(DEV, 'worktrees', slug), slug, '', 0);
 
-    return Promise.all(wts.map((w) => new Promise((res) => {
+    this._gitCache = this._gitCache || new Map();   // dir → { dirty, ahead }
+    const cache = this._gitCache;
+    for (const k of cache.keys()) if (!wts.some((w) => w.dir === k)) cache.delete(k);
+    // git status only when asked (timer / explicit refresh) or for a worktree never seen; otherwise
+    // reuse the cache — a status flip only needs the sentinel file, not a working-tree scan.
+    const stale = wts.filter((w) => git || !cache.has(w.dir));
+    return this._gitStatusAll(stale).then(() => wts.map((w) => {
       let status = '';
       try { status = fs.readFileSync(path.join(w.dir, STATUS_FILE), 'utf8').trim(); } catch {}
-      cp.execFile('git', ['-C', w.dir, 'status', '--porcelain', '--branch'], { timeout: 3000 }, (e, out) => {
+      const g = cache.get(w.dir) || { dirty: false, ahead: 0 };
+      return { slug: w.slug, name: w.name, status, dirty: g.dirty, ahead: g.ahead };
+    }));
+  }
+
+  // `git status` the given worktrees into _gitCache, at most GIT_CONCURRENCY at a time.
+  _gitStatusAll(wts) {
+    const queue = wts.slice();
+    const one = (w) => new Promise((res) => {
+      cp.execFile('git', ['-C', w.dir, 'status', '--porcelain', '--branch'], { timeout: 10000, windowsHide: true }, (e, out) => {
         let dirty = false, ahead = 0;
         if (!e && out) {
-          const lines = out.split('\n');
-          dirty = lines.slice(1).some((l) => l.trim().length > 0);
+          dirty = out.split('\n').slice(1).some((l) => l.trim().length > 0);
           const m = out.match(/ahead (\d+)/);
           if (m) ahead = parseInt(m[1], 10) || 0;
         }
-        res({ slug: w.slug, name: w.name, status, dirty, ahead });
+        if (!e) this._gitCache.set(w.dir, { dirty, ahead });
+        else if (!this._gitCache.has(w.dir)) this._gitCache.set(w.dir, { dirty: false, ahead: 0 });
+        res();
       });
-    })));
+    });
+    const worker = () => queue.length ? one(queue.shift()).then(worker) : Promise.resolve();
+    return Promise.all(Array.from({ length: Math.min(GIT_CONCURRENCY, queue.length) }, worker));
   }
 
   _html() {
@@ -1322,13 +1394,6 @@ function activate(context) {
   const provider = new ClaudeStatusProvider();
   context.subscriptions.push(vscode.window.registerFileDecorationProvider(provider));
 
-  const watcher = vscode.workspace.createFileSystemWatcher('**/' + STATUS_FILE);
-  const fire = (uri) => provider.refresh(vscode.Uri.file(path.dirname(uri.fsPath)));
-  watcher.onDidCreate(fire);
-  watcher.onDidChange(fire);
-  watcher.onDidDelete(fire);
-  context.subscriptions.push(watcher);
-
   const dev = new DevSummaryProvider();
   context.subscriptions.push(vscode.window.registerWebviewViewProvider('claudeStatus.limit', dev));
   // ctrl+v in a focused session → image-aware paste (see DevSummaryProvider.smartPaste)
@@ -1362,13 +1427,33 @@ function activate(context) {
   // keep the roster's terminal map + unread flags in sync with the actual terminals
   context.subscriptions.push(vscode.window.onDidCloseTerminal((t) => dev.onTermClosed(t)));
   context.subscriptions.push(vscode.window.onDidChangeActiveTerminal((t) => dev.onTermActive(t)));
-  // refresh the roster THE MOMENT a .claude-status changes (debounced) so unread/status flips
-  // near-instantly with the bell, instead of waiting up to the 12s poll.
-  let rosBump;
-  const bumpRoster = () => { clearTimeout(rosBump); rosBump = setTimeout(() => dev._postRoster(), 200); };
-  watcher.onDidCreate(bumpRoster);
-  watcher.onDidChange(bumpRoster);
-  watcher.onDidDelete(bumpRoster);
+  // Status changes arrive through ONE central folder the status hook mirrors into: $WTD/state/status/<key>
+  // (key = path under worktrees/ with '/' → '__'; '_dev' = the dev base / assistant). A single
+  // non-recursive fs.watch replaces a workspace-wide '**/.claude-status' glob — no recursive watching of
+  // every worktree, works with worktrees/** in files.watcherExclude, and holds no handle on any worktree
+  // dir (which on Windows blocks `git worktree move/remove`).
+  let rosBump = null, statusWatch = null, statusWatchDir = '';
+  const onStatus = (key) => {
+    const dir = key === '_dev' ? DEV : path.join(DEV, 'worktrees', ...key.split('__'));
+    provider.refresh(vscode.Uri.file(dir));
+    if (dev._gitCache) dev._gitCache.delete(dir);   // a turn started/ended: re-check just this worktree's git state
+    // throttle, not debounce: with many agents firing, a resetting debounce can starve the roster
+    if (!rosBump) rosBump = setTimeout(() => { rosBump = null; dev._postRoster(); }, 250);
+  };
+  const watchStatus = () => {
+    const dir = path.join(WTD, 'state', 'status');
+    if (statusWatch && statusWatchDir === dir) return;
+    if (statusWatch) { try { statusWatch.close(); } catch {} statusWatch = null; }
+    try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+    try {
+      const w = fs.watch(dir, (ev, file) => { if (file) onStatus(String(file)); });
+      w.on('error', () => { try { w.close(); } catch {} if (statusWatch === w) statusWatch = null; });
+      statusWatch = w; statusWatchDir = dir;
+    } catch (e) { _dbg('status watch failed: ' + ((e && e.stack) || e)); }
+  };
+  watchStatus();
+  const statusRewatch = setInterval(watchStatus, 30000);   // re-arm after an error or a dev-root change
+  context.subscriptions.push({ dispose: () => { clearInterval(statusRewatch); if (statusWatch) try { statusWatch.close(); } catch {} } });
 
   // Clickable commit SHAs in terminal output (e.g. an agent's chat): click → repaint that session's
   // diff pane with the commit, like double-clicking a SHA in the commit pane.

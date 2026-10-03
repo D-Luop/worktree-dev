@@ -71,6 +71,7 @@ else
   git -c safe.bareRepository=all -C "$bare" remote set-head origin -a >/dev/null 2>&1 || true
   echo "cloned -> $bare"
 fi
+wtd_git_perf_config "$bare"
 
 # --- seed exclude so seeded CLAUDE.md is never committed ---
 exclude="$bare/info/exclude"
