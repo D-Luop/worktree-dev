@@ -454,6 +454,7 @@ if [ "$(wtd_session_backend)" != tmux ]; then
   if [ -n "$ccdir" ]; then echo "session '$session' → Claude account '$account_label' ($ccdir)"; fi
   # wtd_session_run_claude registers the session, exports WTD_SESSION, cd's to the worktree, and
   # exec's claude (replacing this shell). The trap it sets deregisters on exit so liveness is accurate.
+  export WTD_ACCOUNT="${account_label:-}"   # shown on the roster row (wtd run reports it to the daemon)
   wtd_session_run_claude "$session" "$repo" "$name" "$wt" "$ccdir" "$pmode" "$launch_claude"
   exit 0   # safety net: wtd_session_run_claude exec's, so we never get here
 fi
