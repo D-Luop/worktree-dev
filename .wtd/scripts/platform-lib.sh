@@ -76,6 +76,18 @@ wtd_git_bash_path() {
   command -v bash 2>/dev/null
 }
 
+# wtd_git_perf_config <bare>  → cheaper `git status` in every worktree of this bare (config is shared):
+# untrackedCache + manyFiles (index v4). Deliberately NOT core.fsmonitor: on a ~3k-file repo it measured
+# no gain (status is ~200ms either way — dominated by process startup), and it costs an idle daemon per
+# worktree whose directory handle blocks `git worktree move/remove` on Windows.
+wtd_git_perf_config() {
+  local bare="$1" g=(git -c safe.bareRepository=all -C "$1")
+  [ -d "$bare" ] || return 0
+  "${g[@]}" config core.untrackedCache true
+  "${g[@]}" config feature.manyFiles true
+  return 0
+}
+
 # Let git drive worktree-dev's own bare repos (repos/<slug>/.bare) even when the environment forces
 # `safe.bareRepository=explicit`. VSCode injects exactly that via GIT_CONFIG_PARAMETERS, so any wtd
 # script launched from VSCode (an extension button or an integrated terminal) would otherwise fail
