@@ -316,7 +316,30 @@ up on demand.
 
 ## Status (2026-10-04)
 
-Phases 1–3 are built and installed. What changed from the plan while building them:
+All four phases are built. On Windows, every `~/.local/bin` command (`agent`, `archive`, `review`,
+`ask`, `account`, `ref`, `preview`, `tokens`, `ship`, `assistant`, `close`, `add-repo`) is a shim that
+execs `wtd.exe <sub>`. The extension calls `wtd.exe` directly and runs session terminals as
+`wtd.exe agent …`, with no bash in between. The bash scripts are now only the Linux/tmux tooling.
+
+Phase 4 notes:
+
+- **Archive and remove are daemon-owned while it runs** (`worktree.archive` / `worktree.remove`).
+  The daemon ends the hosted session and drops its file watch first, because on Windows an open
+  watch handle or a live process blocks `git worktree move/remove`.
+- **Git state follows file watchers** (`notify`, on the worktree plus its admin dir in the bare
+  repo). Sweeps every 300 s (live) / 900 s (idle) are only a backstop.
+- **Usage-limit review retries** are daemon-scheduled jobs (`job.schedule`), so they survive the
+  terminal closing.
+- **Commits and diffs are native:** a *Worktree Changes* Explorer tree shows uncommitted changes
+  plus the branch's commits over its base. It follows the focused session. Files open in VSCode's
+  own diff editor, with read-only revisions via a `wtd-git:` content provider, and whole commits
+  open in the multi-diff editor. SHAs printed in a session terminal link to that commit. The webview
+  commits tab and the tmux-era commit/diff panes are gone on Windows.
+- **Deleted:** the extension's legacy (pre-daemon) mode, i.e. its own folder scans, `git status`,
+  usage fetching and PowerShell monitor; `monitor-stats.*`; and the Windows process-reaping
+  PowerShell in `session-lib.sh`.
+
+What changed from the plan while building Phases 1–3:
 
 - **Store:** groups, membership and messages live in a JSON file (`.wtd/state/store.json`, atomic
   writes), not SQLite. The data is tiny, and this keeps the build light.

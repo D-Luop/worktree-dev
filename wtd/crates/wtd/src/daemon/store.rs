@@ -21,6 +21,20 @@ pub struct Store {
     pub messages: Vec<Message>,
     #[serde(default)]
     pub next_id: u64,
+    /// Deferred `wtd <kind> <args…>` runs (review retries after a usage-limit reset).
+    #[serde(default)]
+    pub jobs: Vec<Job>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Job {
+    pub id: u64,
+    pub kind: String,
+    pub args: Vec<String>,
+    /// Unix seconds.
+    pub at: i64,
+    /// Dedupe key (e.g. the worktree path): one job per kind+key.
+    pub key: String,
 }
 
 fn path(dev: &Path) -> PathBuf {

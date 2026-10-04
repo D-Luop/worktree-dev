@@ -55,8 +55,13 @@ pub fn user_name() -> String {
     std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_else(|_| "user".into())
 }
 
+/// The daemon's pipe. `WTD_PIPE` overrides it so a test daemon (with its own `WTD_DEV`) can run
+/// beside the real one without touching it.
 pub fn pipe_name() -> String {
-    wtd_core::protocol::pipe_name(&user_name())
+    match std::env::var("WTD_PIPE") {
+        Ok(p) if !p.is_empty() => format!(r"\\.\pipe\{p}"),
+        _ => wtd_core::protocol::pipe_name(&user_name()),
+    }
 }
 
 pub fn state_dir(dev: &Path) -> PathBuf {

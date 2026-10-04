@@ -28,6 +28,39 @@ pub(crate) fn out(v: Value) -> Result<i32> {
     Ok(0)
 }
 
+/// Print rows as an aligned table (for a person at a terminal; scripts get JSON).
+fn table(head: &[&str], rows: Vec<Vec<String>>) -> Result<i32> {
+    let mut w: Vec<usize> = head.iter().map(|h| h.len()).collect();
+    for r in &rows {
+        for (i, c) in r.iter().enumerate() {
+            w[i] = w[i].max(c.chars().count());
+        }
+    }
+    let line = |cells: Vec<String>| {
+        let mut l = String::new();
+        for (i, c) in cells.iter().enumerate() {
+            l.push_str(c);
+            if i + 1 < cells.len() {
+                l.push_str(&" ".repeat(w[i] - c.chars().count() + 2));
+            }
+        }
+        println!("{}", l.trim_end());
+    };
+    line(head.iter().map(|h| h.to_uppercase()).collect());
+    if rows.is_empty() {
+        println!("(none)");
+    }
+    for r in rows {
+        line(r);
+    }
+    Ok(0)
+}
+
+fn human(a: &[&str]) -> bool {
+    use std::io::IsTerminal;
+    !a.contains(&"--json") && std::io::stdout().is_terminal()
+}
+
 pub(crate) fn valid_name(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
@@ -65,7 +98,7 @@ fn git_out(args: &[&str], env: &[(&str, &str)]) -> Result<String> {
 
 /// `remove_dir_all` that also clears the read-only bit git sets on pack files (Windows refuses
 /// to delete read-only files otherwise).
-fn remove_tree(p: &Path) -> std::io::Result<()> {
+pub(crate) fn remove_tree(p: &Path) -> std::io::Result<()> {
     fn clear(p: &Path) {
         if let Ok(rd) = std::fs::read_dir(p) {
             for e in rd.flatten() {
@@ -196,6 +229,27 @@ pub fn repo_main(args: &[String]) -> Result<i32> {
     let dev = paths::dev_root()?;
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     match a.as_slice() {
+        [] | ["ls"] if human(&a) => table(
+            &["repo", "remote", "default", "worktrees", "issues from"],
+            repo_list(&dev)
+                .into_iter()
+                .map(|r| {
+                    let g = |k: &str| r.github.pointer(&format!("/issueSource/{k}")).map(|v| v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()));
+                    let src = match g("kind").as_deref() {
+                        Some("repo") => format!("issues: {}", g("repo").unwrap_or_default()),
+                        Some("project") => format!("project: {} #{}", g("owner").unwrap_or_default(), g("number").unwrap_or_default()),
+                        _ => String::new(),
+                    };
+                    vec![
+                        r.slug,
+                        if r.local_only { "(local only)".into() } else { r.url },
+                        r.default_branch.unwrap_or_default(),
+                        if r.archived > 0 { format!("{} (+{} archived)", r.worktrees, r.archived) } else { r.worktrees.to_string() },
+                        src,
+                    ]
+                })
+                .collect(),
+        ),
         [] | ["ls"] | ["ls", "--json"] => out(serde_json::to_value(repo_list(&dev))?),
         ["add", "--new", slug] => repo_add(&dev, slug, None),
         ["add", slug, url] => repo_add(&dev, slug, Some(url)),
@@ -461,7 +515,7 @@ fn roles_path(home: &Path) -> PathBuf {
 }
 
 /// role → "claude:<name>" | "codex:<name>" (absent = the default Claude login)
-fn read_roles(home: &Path) -> BTreeMap<String, String> {
+pub(crate) fn read_roles(home: &Path) -> BTreeMap<String, String> {
     std::fs::read_to_string(roles_path(home))
         .unwrap_or_default()
         .lines()
@@ -587,6 +641,16 @@ pub fn account_main(args: &[String]) -> Result<i32> {
     let home = paths::home_dir()?;
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     match a.as_slice() {
+        [] | ["ls"] if human(&a) => table(
+            &["provider", "name", "email", "plan", "roles"],
+            account_list(&home)
+                .into_iter()
+                .map(|x| {
+                    let email = if x.logged_in { x.email } else { "(not logged in)".into() };
+                    vec![x.provider.into(), x.name, email, x.plan, x.roles.join(",")]
+                })
+                .collect(),
+        ),
         [] | ["ls"] | ["ls", "--json"] => out(serde_json::to_value(account_list(&home))?),
         ["add", provider, name] => {
             if !valid_name(name) || *name == "default" {
@@ -629,6 +693,81 @@ pub fn account_main(args: &[String]) -> Result<i32> {
             }
             remove_tree(&dir).with_context(|| format!("removing {}", dir.display()))?;
             out(json!({ "ok": true }))
+        }
+        ["login", provider, name] | ["login", provider, name, ..] => {
+            // an interactive sign-in under that account's config dir, in this terminal
+            let dir = account_dir(&home, provider, name)?;
+            let (prog, var) = if *provider == "codex" { ("codex", "CODEX_HOME") } else { ("claude", "CLAUDE_CONFIG_DIR") };
+            let (exe, prefix) = crate::run::command_for(prog);
+            let mut c = Command::new(exe);
+            c.args(&prefix);
+            if *provider == "codex" {
+                c.arg("login");
+            }
+            if *name != "default" {
+                std::fs::create_dir_all(&dir)?;
+                c.env(var, &dir);
+            }
+            Ok(c.status()?.code().unwrap_or(1))
+        }
+        ["usage"] | ["usage", _] => {
+            let name = a.get(1).copied().unwrap_or("default");
+            let dir = account_dir(&home, "claude", name)?;
+            match crate::daemon::usage_fetch_dir(&dir, &mut Default::default()) {
+                Some(u) => {
+                    let f = |l: &Option<wtd_core::model::Limit>| l.as_ref().and_then(|l| l.used).map(|v| format!("{v:.0}%")).unwrap_or("--".into());
+                    let r = |l: &Option<wtd_core::model::Limit>| l.as_ref().map(|l| crate::daemon::fmt_local(l.resets_at)).unwrap_or_default();
+                    println!("usage — {name}\n  5h  {:>5}   resets {}\n  7d  {:>5}   resets {}", f(&u.five_hour), r(&u.five_hour), f(&u.seven_day), r(&u.seven_day));
+                    Ok(0)
+                }
+                None => bail!("no usage for '{name}' (not logged in, offline, or rate-limited — try again shortly)"),
+            }
+        }
+        ["switch", slug, wtname, rest @ ..] => {
+            // move a worktree's session to another Claude account (`--to <name>`, else the logged-in one
+            // with the most headroom): copy its transcript there so reopening resumes the same chat,
+            // and rebind the session. Prints the target name (the extension then relaunches + compacts).
+            let dev = paths::dev_root()?;
+            let session = crate::wt::session_name(slug, wtname);
+            let key = crate::wt::session_key(&session);
+            let cur = crate::wt::read_state(&dev, "session-accounts", &key).unwrap_or_else(|| "default".into());
+            let dir_of = |n: &str| if n == "default" { home.join(".claude") } else { home.join(".claude-accounts").join(n) };
+            let to = match rest {
+                ["--to", t, ..] => t.to_string(),
+                _ => {
+                    let mut best: Option<(f64, String)> = None;
+                    for acc in account_list(&home).into_iter().filter(|x| x.provider == "claude" && x.logged_in && x.name != cur) {
+                        if let Some(u) = crate::daemon::usage_fetch_dir(&dir_of(&acc.name), &mut Default::default()) {
+                            let util = [u.five_hour, u.seven_day].iter().filter_map(|l| l.as_ref().and_then(|l| l.used)).fold(0.0, f64::max);
+                            if util < 100.0 && best.as_ref().is_none_or(|(b, _)| util < *b) {
+                                best = Some((util, acc.name.clone()));
+                            }
+                        }
+                    }
+                    best.map(|(_, n)| n).context("no other logged-in account has capacity (add one in Settings → Accounts)")?
+                }
+            };
+            if to == cur {
+                bail!("the session is already on '{to}'");
+            }
+            let tdir = dir_of(&to);
+            if !tdir.join(".credentials.json").is_file() {
+                bail!("'{to}' isn't a logged-in Claude account");
+            }
+            let wtp = paths::worktree_path(&dev, &format!("{slug}/{wtname}"));
+            if let Some(id) = crate::wt::read_state(&dev, "session-ids", &key) {
+                let enc: String = wtp.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+                let src = dir_of(&cur).join("projects").join(&enc).join(format!("{id}.jsonl"));
+                let dst = tdir.join("projects").join(&enc).join(format!("{id}.jsonl"));
+                if src.is_file() {
+                    std::fs::create_dir_all(dst.parent().unwrap())?;
+                    std::fs::copy(&src, &dst)?;
+                    eprintln!("copied the conversation into '{to}' (reopening resumes the same chat)");
+                }
+            }
+            crate::wt::write_state(&dev, "session-accounts", &key, &to)?;
+            println!("{to}");
+            Ok(0)
         }
         ["use", role, target] => {
             if !ROLES.contains(role) {

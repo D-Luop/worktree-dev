@@ -62,6 +62,13 @@ pub fn fetch_all(home: &Path, last: &mut HashMap<String, Account>, now: i64) -> 
         .collect()
 }
 
+/// Live usage for one account config dir (Claude), or None without a login / on failure.
+pub fn fetch_dir(dir: &Path) -> Option<Account> {
+    let token = read_json(&dir.join(".credentials.json"))?.pointer("/claudeAiOauth/accessToken")?.as_str()?.to_string();
+    let (five, seven) = fetch(&token)?;
+    Some(Account { name: String::new(), email: String::new(), five_hour: Some(five), seven_day: Some(seven), ts: 0, nologin: false })
+}
+
 fn fetch(token: &str) -> Option<(Limit, Limit)> {
     let body = ureq::get("https://api.anthropic.com/api/oauth/usage")
         .set("Authorization", &format!("Bearer {token}"))

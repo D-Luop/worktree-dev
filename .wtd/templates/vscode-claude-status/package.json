@@ -1,12 +1,12 @@
 {
   "name": "claude-status",
   "displayName": "Claude Status",
-  "description": "Recolors worktree folders in the Explorer from a .claude-status sentinel (working=blue, input=yellow, reviewing=purple, done=green, stopped=red) and shows a Dev workflow summary (account usage + fleet roster) in the Explorer. Cross-platform: tmux sessions on Linux/WSL/mac, VSCode integrated terminals on native Windows.",
-  "version": "0.0.87",
+  "description": "WorkTreeDev: a fleet roster for parallel Claude/Codex worktrees driven by the wtd.exe daemon — session list with groups and search, New Session picker, usage limits, native commit/diff browser, and status-coloured worktree folders.",
+  "version": "0.0.88",
   "publisher": "local",
   "license": "MIT",
   "engines": {
-    "vscode": "^1.70.0"
+    "vscode": "^1.86.0"
   },
   "categories": [
     "Other"
@@ -61,6 +61,53 @@
         "title": "Open Settings",
         "category": "WorkTreeDev",
         "icon": "$(settings-gear)"
+      },
+      {
+        "command": "claudeStatus.changes.refresh",
+        "title": "Refresh Changes",
+        "category": "WorkTreeDev",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "claudeStatus.changes.pick",
+        "title": "Show Changes for Worktree…",
+        "category": "WorkTreeDev",
+        "icon": "$(list-selection)"
+      },
+      {
+        "command": "claudeStatus.changes.hideTests",
+        "title": "Hide Test Files",
+        "category": "WorkTreeDev",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "claudeStatus.changes.showTests",
+        "title": "Show Test Files",
+        "category": "WorkTreeDev",
+        "icon": "$(beaker-stop)"
+      },
+      {
+        "command": "claudeStatus.changes.openDiff",
+        "title": "Open Changes",
+        "category": "WorkTreeDev",
+        "icon": "$(compare-changes)"
+      },
+      {
+        "command": "claudeStatus.changes.openFile",
+        "title": "Open File",
+        "category": "WorkTreeDev",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "claudeStatus.changes.openAll",
+        "title": "Open All Changes",
+        "category": "WorkTreeDev",
+        "icon": "$(diff-multiple)"
+      },
+      {
+        "command": "claudeStatus.changes.copySha",
+        "title": "Copy Commit SHA",
+        "category": "WorkTreeDev"
       }
     ],
     "keybindings": [
@@ -135,6 +182,88 @@
           "contextualTitle": "Dev workflow summary",
           "order": 1,
           "visibility": "visible"
+        },
+        {
+          "id": "claudeStatus.changes",
+          "name": "Worktree Changes",
+          "contextualTitle": "Worktree Changes",
+          "icon": "$(git-compare)",
+          "order": 2,
+          "visibility": "visible"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "claudeStatus.changes.pick",
+          "when": "view == claudeStatus.changes",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudeStatus.changes.hideTests",
+          "when": "view == claudeStatus.changes && !claudeStatus.testsHidden",
+          "group": "navigation@2"
+        },
+        {
+          "command": "claudeStatus.changes.showTests",
+          "when": "view == claudeStatus.changes && claudeStatus.testsHidden",
+          "group": "navigation@2"
+        },
+        {
+          "command": "claudeStatus.changes.refresh",
+          "when": "view == claudeStatus.changes",
+          "group": "navigation@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "claudeStatus.changes.openAll",
+          "when": "view == claudeStatus.changes && viewItem =~ /^(commit|changes)$/",
+          "group": "inline"
+        },
+        {
+          "command": "claudeStatus.changes.openAll",
+          "when": "view == claudeStatus.changes && viewItem =~ /^(commit|changes)$/",
+          "group": "1_open"
+        },
+        {
+          "command": "claudeStatus.changes.copySha",
+          "when": "view == claudeStatus.changes && viewItem == commit",
+          "group": "2_copy"
+        },
+        {
+          "command": "claudeStatus.changes.openFile",
+          "when": "view == claudeStatus.changes && viewItem =~ /File$/",
+          "group": "inline"
+        },
+        {
+          "command": "claudeStatus.changes.openDiff",
+          "when": "view == claudeStatus.changes && viewItem =~ /File$/",
+          "group": "1_open@1"
+        },
+        {
+          "command": "claudeStatus.changes.openFile",
+          "when": "view == claudeStatus.changes && viewItem =~ /File$/",
+          "group": "1_open@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "claudeStatus.changes.openDiff",
+          "when": "false"
+        },
+        {
+          "command": "claudeStatus.changes.openFile",
+          "when": "false"
+        },
+        {
+          "command": "claudeStatus.changes.openAll",
+          "when": "false"
+        },
+        {
+          "command": "claudeStatus.changes.copySha",
+          "when": "false"
         }
       ]
     }

@@ -24,18 +24,20 @@ echo "==> A. install 'agent' + 'add-repo' + 'ref' commands into ~/.local/bin"
 # *function* breaks under exported guards like __BASHRC_LOADED that make child shells
 # (tmux, VSCode terminals, subshells) skip the bashrc body before defining functions.
 mkdir -p "$HOME/.local/bin"
-# On Unix, symlink. On native Windows, Git-Bash symlinks need Developer Mode/admin, so write a tiny
-# exec-shim instead (always works, and still dispatches to the live script so edits take effect).
+# On Unix, symlink to the bash tooling. On native Windows every command is a `wtd.exe` subcommand:
+# write a tiny shim that execs it (Git-Bash symlinks need Developer Mode anyway; wtd.exe is built in A2).
 wtd_link() {
-  local tgt="$WTD/scripts/$1" dst="$HOME/.local/bin/$2"
+  local tgt="$WTD/scripts/$1" dst="$HOME/.local/bin/$2" sub="${3:-$2}"
   case "$OS" in
-    windows) printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$tgt" > "$dst"; chmod +x "$dst" 2>/dev/null || true ;;
-    *)       ln -sf "$tgt" "$dst" ;;
+    windows)
+      printf '#!/usr/bin/env bash\nw=%q\n[ -x "$w" ] && exec "$w" %s "$@"\necho "wtd.exe is not built yet: re-run .wtd/scripts/install.sh (needs Rust)" >&2; exit 1\n' "$WTD/bin/wtd.exe" "$sub" > "$dst"
+      chmod +x "$dst" 2>/dev/null || true
+      echo "    shimmed ~/.local/bin/$2 -> wtd $sub" ;;
+    *) ln -sf "$tgt" "$dst"; echo "    linked ~/.local/bin/$2 -> $tgt" ;;
   esac
-  echo "    $([ "$OS" = windows ] && echo shimmed || echo linked) ~/.local/bin/$2 -> $tgt"
 }
 wtd_link agent.sh     agent
-wtd_link add-repo.sh  add-repo
+wtd_link add-repo.sh  add-repo "repo add"
 wtd_link ref.sh       ref
 wtd_link review.sh    review
 wtd_link archive.sh   archive
@@ -46,6 +48,7 @@ wtd_link account.sh   account
 wtd_link ship.sh      ship
 wtd_link assistant.sh assistant
 wtd_link preview.sh   preview
+wtd_link tokens.sh    tokens
 # migrate: strip the obsolete bashrc function block if a previous install added it
 if grep -q '>>> agent worktree launcher >>>' "$BASHRC" 2>/dev/null; then
   tmp=$(mktemp)
