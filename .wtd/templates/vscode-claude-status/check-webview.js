@@ -47,4 +47,10 @@ try {
   checkScripts('diffview', dv.commitsHtml('x', 'y', false));
 } catch (e) { failures++; console.error('diffview check failed: ' + e.message); }
 
+// 3. The Settings page: settings.settingsHtml() is a plain function (no vscode import at load).
+try {
+  const st = require(path.join(HERE, 'settings.js'));
+  checkScripts('settings', st.settingsHtml());
+} catch (e) { failures++; console.error('settings check failed: ' + e.message); }
+
 process.exit(failures ? 1 : 0);

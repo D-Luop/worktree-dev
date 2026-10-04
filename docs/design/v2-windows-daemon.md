@@ -223,6 +223,12 @@ Then the daemon creates the worktree and starts the session. The issue's title, 
 seeded into the worktree's `CLAUDE.md` *Context / scope* section, and `/pr` notes get a `Closes #123`.
 
 ### 4.3 GitHub linking and the Settings page
+*Built ahead of Phase 2:* the Settings tab (gear in the panel toolbar, or `WorkTreeDev: Open
+Settings`) with Repositories, Accounts (Claude **and Codex**), Defaults, GitHub and Daemon & tray. It
+drives `wtd repo|account|env` (JSON). Storage stays compatible with the bash tools: `.wtd/repos.tsv`,
+`~/.claude-accounts/` (+ `roles.conf`), `~/.codex` / `~/.codex-accounts/` (`CODEX_HOME`), and
+per-repo GitHub links in `.wtd/config.json` (local, git-ignored). Codex *sessions* come with New Session.
+
 - **Settings** opens as a full editor-tab webview with these sections: **Repos** (add, remove, URL,
   default branch), **GitHub links**, **Accounts** (add or log in, role defaults), **Branch naming**,
   **Groups**, **Performance** (intervals), **Keybindings**.

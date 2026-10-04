@@ -271,7 +271,7 @@ fn open_vscode() {
     }
 }
 
-fn start_at_logon() -> bool {
+pub fn start_at_logon() -> bool {
     unsafe {
         let mut size: u32 = 0;
         RegGetValueW(HKEY_CURRENT_USER, win::wide(RUN_KEY).as_ptr(), win::wide(RUN_VALUE).as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), std::ptr::null_mut(), &mut size) == 0

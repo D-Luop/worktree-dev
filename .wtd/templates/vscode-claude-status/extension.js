@@ -4,7 +4,8 @@ const os = require('os');
 const path = require('path');
 const cp = require('child_process');
 const https = require('https');
-const dv = require('./diffview.js');   // the `commits` tab: branch commits + filterable diffs
+const dv = require('./diffview.js');
+const { SettingsPanel } = require('./settings.js');   // the WorkTreeDev Settings editor tab   // the `commits` tab: branch commits + filterable diffs
 
 const STATUS_FILE = '.claude-status';
 const HOME = os.homedir();
@@ -809,6 +810,7 @@ class DevSummaryProvider {
     let muted = false;
     try { const tb = vscode.workspace.getConfiguration('accessibility.signals').get('terminalBell') || {}; muted = (tb.sound || 'auto') === 'off'; } catch {}
     const items = [
+      { label: '$(settings-gear) Settings', description: 'repos, accounts, GitHub, daemon', run: () => this._openSettings && this._openSettings() },
       { label: '$(terminal) Open terminal', description: 'a shell in the dev base', run: () => this.openOrFocusTerminal() },
       { label: '$(hubot) Open assistant', description: 'fleet-management session', run: () => this.openOrFocusAssistant() },
       { label: '$(device-camera) Add image to focused session', description: 'clipboard screenshot or a file', run: () => this.pasteImage() },
@@ -907,6 +909,8 @@ class DevSummaryProvider {
         this.toggleDaemon();
       } else if (m.cmd === 'more') {
         this.moreMenu();
+      } else if (m.cmd === 'settings') {
+        if (this._openSettings) this._openSettings();
       } else if (m.cmd === 'newAssistant') {
         this.openOrFocusAssistant();
       } else if (m.cmd === 'newTerminal') {
@@ -1422,6 +1426,7 @@ class DevSummaryProvider {
   <button class="tb" id="filter" title="Filter by status"><i class="codicon codicon-filter" id="filterIco"></i></button>
   <button class="tb" id="search" title="Search worktrees (name, branch, plan, account)"><i class="codicon codicon-search"></i></button>
   <span class="spacer"></span>
+  <button class="tb" id="settings" title="Settings — repos, accounts, GitHub, daemon"><i class="codicon codicon-settings-gear"></i></button>
   <button class="tb" id="more" title="More actions"><i class="codicon codicon-ellipsis"></i></button>
   <button class="tb primary" id="add" title="New session (also: Command Palette → WorkTreeDev: New Session)"><i class="codicon codicon-add"></i><span class="t">New</span></button>
   <div class="menu" id="filterMenu"></div>
@@ -1596,6 +1601,7 @@ class DevSummaryProvider {
   document.getElementById('filter').onclick=(ev)=>{ ev.stopPropagation(); const m=document.getElementById('filterMenu'); const open=!m.classList.contains('open'); if(open) renderFilterMenu(); m.classList.toggle('open', open); };
   document.addEventListener('click', ()=>document.getElementById('filterMenu').classList.remove('open'));
   document.getElementById('more').onclick=()=>vsc.postMessage({cmd:'more'});
+  document.getElementById('settings').onclick=()=>vsc.postMessage({cmd:'settings'});
   document.getElementById('add').onclick=()=>vsc.postMessage({cmd:'newAgent'});
 
   window.addEventListener('message', e => {
@@ -1670,11 +1676,20 @@ function activate(context) {
       if (kinds.has('metrics')) dev._postMonitor();
     }, 150);
   };
+  let settings = null;
   dev.daemon = new DaemonClient((kind, wt, prev) => {
     // folder colours: refresh just the worktree whose status changed
     if (kind === 'fleet' && wt && (!prev || prev.status !== wt.status)) provider.refresh(vscode.Uri.file(wt.path));
+    if (settings && (kind === 'daemon' || kind === 'accounts')) settings.onDaemonChange();
     kick(kind);
   });
+  settings = new SettingsPanel({
+    vscode, wtdExe, daemonInstalled, daemon: dev.daemon, log: _dbg,
+    media: vscode.Uri.joinPath(context.extensionUri, 'media'),
+    toggleDaemon: (want) => dev.toggleDaemon(want),
+  });
+  dev._openSettings = () => settings.open();
+  context.subscriptions.push({ dispose: () => settings.dispose() });
   if (daemonInstalled()) dev.daemon.start();
   context.subscriptions.push({ dispose: () => dev.daemon.dispose() });
   const reg = (id, fn) => context.subscriptions.push(vscode.commands.registerCommand(id, fn));
@@ -1682,6 +1697,7 @@ function activate(context) {
   reg('claudeStatus.stopDaemon', () => dev.toggleDaemon(false));
   reg('claudeStatus.toggleDaemon', () => dev.toggleDaemon());
   reg('claudeStatus.newSession', () => dev.newAgent());
+  reg('claudeStatus.openSettings', () => dev._openSettings());
   reg('claudeStatus.openAssistant', () => dev.openOrFocusAssistant());
   reg('claudeStatus.openTerminal', () => dev.openOrFocusTerminal());
   context.subscriptions.push(vscode.window.registerWebviewViewProvider('claudeStatus.limit', dev));

@@ -41,3 +41,4 @@ Thumbs.db
 # Rust build output (wtd daemon / CLI). Install copies the built exe to .wtd/bin/.
 wtd/target/
 .wtd/bin/
+.wtd/config.json

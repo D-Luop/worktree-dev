@@ -6,6 +6,7 @@ mod hook;
 mod mcp;
 mod paths;
 mod run;
+mod settings;
 mod statusfile;
 mod tray;
 mod win;
@@ -26,6 +27,9 @@ wtd — WorkTreeDev fleet tool
   wtd mcp                            stdio MCP server: read-only fleet tools for agents
   wtd tray [--spawn|--quit|--logon on|off]
                                      notification-area icon: start/stop the daemon, open VS Code
+  wtd repo ls|add|rm|fetch|set-github … repos (JSON output; see `wtd repo`)
+  wtd account ls|add|rm|use …        Claude / Codex logins and role defaults (JSON output)
+  wtd env                            installed CLIs, GitHub login + scopes, tray-at-logon
   wtd run [--kind k] [--account a] -- <program> [args…]
                                      run a session inside a tracked job";
 
@@ -55,6 +59,9 @@ fn dispatch(cmd: &str, rest: &[String]) -> Result<i32> {
         "run" => run::main(rest),
         "mcp" => mcp::main(),
         "tray" => tray::main(rest),
+        "repo" => settings::repo_main(rest),
+        "account" => settings::account_main(rest),
+        "env" => settings::env_main(rest),
         "ls" => ls(rest.iter().any(|a| a == "--json")),
         "stop" => {
             let id = rest.first().ok_or_else(|| anyhow::anyhow!("usage: wtd stop <slug/name>"))?;
