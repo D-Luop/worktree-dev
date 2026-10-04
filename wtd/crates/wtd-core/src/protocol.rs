@@ -92,6 +92,18 @@ pub mod method {
     /// `{worktree | dir, cols, rows}` → same, attach only.
     pub const SESSION_ATTACH: &str = "session.attach";
 
+    // --- worktree lifecycle (Phase 4: the daemon owns these while it runs) ---
+    /// `{id, force?, branch?}` → `{log: [..]}`: stop its session, release its watch, remove it.
+    pub const WORKTREE_REMOVE: &str = "worktree.remove";
+    /// `{id}` → `{path}`: stop its session, release its watch, move it under archive/.
+    pub const WORKTREE_ARCHIVE: &str = "worktree.archive";
+
+    // --- scheduled jobs (Phase 4: e.g. a review retried after a usage-limit reset) ---
+    /// `{kind, args, at, key}` → `{id}`: run `wtd <kind> <args…>` at unix time `at` (one per kind+key).
+    pub const JOB_SCHEDULE: &str = "job.schedule";
+    /// `{kind, key}` → `{}`: drop a scheduled job.
+    pub const JOB_CANCEL: &str = "job.cancel";
+
     // --- groups (Phase 2) ---
     /// `{name}` → `{id}`
     pub const GROUP_CREATE: &str = "group.create";

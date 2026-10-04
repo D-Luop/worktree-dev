@@ -9,6 +9,7 @@ mod host;
 mod messages;
 mod pty;
 mod store;
+mod watch;
 mod usage;
 
 use std::collections::{BTreeMap, HashMap};
@@ -36,8 +37,9 @@ const METRICS_EVERY: Duration = Duration::from_secs(5);
 const GIT_DEBOUNCE: Duration = Duration::from_secs(2);
 /// …but never longer than this after the first event of a burst.
 const GIT_MAX_DELAY: Duration = Duration::from_secs(10);
-const GIT_SWEEP_LIVE: Duration = Duration::from_secs(60);
-const GIT_SWEEP_IDLE: Duration = Duration::from_secs(300);
+// file watchers drive refreshes; these sweeps are only a backstop (missed events, external git ops)
+const GIT_SWEEP_LIVE: Duration = Duration::from_secs(300);
+const GIT_SWEEP_IDLE: Duration = Duration::from_secs(900);
 const GIT_CONCURRENCY: usize = 2;
 
 pub fn main(args: &[String]) -> Result<i32> {
@@ -154,6 +156,8 @@ struct Daemon {
     inner: Mutex<Inner>,
     tx: broadcast::Sender<Push>,
     next_conn: AtomicU64,
+    /// worktree id → its file watcher (dropping it releases the directory handles)
+    watchers: Mutex<HashMap<String, notify::RecommendedWatcher>>,
 }
 
 impl Daemon {
@@ -169,6 +173,11 @@ impl Daemon {
         inner.rev += 1;
         inner.worktrees.insert(wt.id.clone(), wt.clone());
         let _ = self.tx.send(Push::Upsert { rev: inner.rev, worktree: wt });
+    }
+
+    /// Release a worktree's file watch (before moving/removing it, or once it's gone).
+    fn unwatch(&self, id: &str) {
+        self.watchers.lock().unwrap_or_else(|p| p.into_inner()).remove(id);
     }
 
     fn remove(&self, inner: &mut Inner, id: &str) {
@@ -252,7 +261,7 @@ async fn serve(dev: PathBuf) -> Result<()> {
 
     let (tx, _) = broadcast::channel(1024);
     let inner = Inner { store: store::Store::load(&dev), ..Default::default() };
-    let d = Arc::new(Daemon { dev: dev.clone(), inner: Mutex::new(inner), tx, next_conn: AtomicU64::new(1) });
+    let d = Arc::new(Daemon { dev: dev.clone(), inner: Mutex::new(inner), tx, next_conn: AtomicU64::new(1), watchers: Mutex::new(HashMap::new()) });
     eprintln!("[{}] wtd daemon {} up: pid {}, dev {}", now(), env!("CARGO_PKG_VERSION"), std::process::id(), dev.display());
 
     rescan(&d).await;
@@ -260,6 +269,7 @@ async fn serve(dev: PathBuf) -> Result<()> {
     tokio::spawn(git_loop(d.clone()));
     tokio::spawn(usage_loop(d.clone()));
     tokio::spawn(metrics_loop(d.clone()));
+    tokio::spawn(jobs_loop(d.clone()));
 
     loop {
         server.connect().await?;
@@ -449,23 +459,29 @@ async fn dispatch(d: &Arc<Daemon>, conn: u64, req: &Request, out: &mpsc::Unbound
         }
         method::SESSION_STOP => {
             let id = p.get("id").and_then(Value::as_str).context("missing id")?.to_string();
-            let (jobs, hosted): (Vec<String>, Vec<Arc<host::Hosted>>) = {
-                let inner = d.lock();
-                let mine: Vec<&Session> = inner.sessions.values().filter(|s| s.wt == id).collect();
-                (mine.iter().filter(|s| s.hosted.is_none()).map(|s| s.job.clone()).collect(),
-                 mine.iter().filter_map(|s| s.hosted.clone()).collect())
-            };
-            let mut n = 0;
-            for h in &hosted {
-                h.pty.kill();
-                n += 1;
+            Ok(json!({ "stopped": stop_sessions(d, &id) }))
+        }
+        method::WORKTREE_REMOVE | method::WORKTREE_ARCHIVE => {
+            let id = p.get("id").and_then(Value::as_str).context("missing id")?.to_string();
+            let (slug, name) = id.split_once('/').map(|(a, b)| (a.to_string(), b.to_string())).context("id must be <slug>/<name>")?;
+            if stop_sessions(d, &id) > 0 {
+                tokio::time::sleep(Duration::from_millis(700)).await; // let the killed tree release the folder
             }
-            for j in &jobs {
-                if !j.is_empty() && win::terminate_job(j).unwrap_or(false) {
-                    n += 1;
+            d.unwatch(&id);
+            let dev = d.dev.clone();
+            let archive = req.method == method::WORKTREE_ARCHIVE;
+            let force = p.get("force").and_then(Value::as_bool).unwrap_or(false);
+            let branch = p.get("branch").and_then(Value::as_bool).unwrap_or(false);
+            let res = tokio::task::spawn_blocking(move || -> Result<Value> {
+                if archive {
+                    Ok(json!({ "path": crate::wt::archive(&dev, &slug, &name)? }))
+                } else {
+                    Ok(json!({ "log": crate::wt::remove(&dev, &slug, &name, force, branch)? }))
                 }
-            }
-            Ok(json!({ "stopped": n }))
+            })
+            .await?;
+            rescan(d).await;
+            res
         }
         method::FLEET_LIST => Ok(serde_json::to_value(d.lock().worktrees.values().cloned().collect::<Vec<_>>())?),
         method::FLEET_GET => {
@@ -565,6 +581,32 @@ async fn dispatch(d: &Arc<Daemon>, conn: u64, req: &Request, out: &mpsc::Unbound
         method::MESSAGE_SEND => messages::send(d, p),
         method::MESSAGE_DECIDE => messages::decide(d, p),
         method::MESSAGE_LIST => messages::list(d, p),
+        method::JOB_SCHEDULE => {
+            let kind = p.get("kind").and_then(Value::as_str).context("missing kind")?.to_string();
+            if kind != "review" {
+                bail!("unsupported job kind '{kind}'");
+            }
+            let args: Vec<String> = serde_json::from_value(p.get("args").cloned().unwrap_or_default())?;
+            let at = p.get("at").and_then(Value::as_i64).context("missing at")?;
+            let key = p.get("key").and_then(Value::as_str).unwrap_or("").to_string();
+            let mut inner = d.lock();
+            inner.store.jobs.retain(|j| !(j.kind == kind && j.key == key));
+            let id = inner.store.next();
+            inner.store.jobs.push(store::Job { id, kind, args, at, key });
+            let _ = inner.store.save(&d.dev);
+            Ok(json!({ "id": id }))
+        }
+        method::JOB_CANCEL => {
+            let kind = p.get("kind").and_then(Value::as_str).unwrap_or("");
+            let key = p.get("key").and_then(Value::as_str).unwrap_or("");
+            let mut inner = d.lock();
+            let before = inner.store.jobs.len();
+            inner.store.jobs.retain(|j| !(j.kind == kind && j.key == key));
+            if inner.store.jobs.len() != before {
+                let _ = inner.store.save(&d.dev);
+            }
+            Ok(json!({}))
+        }
         m => bail!("unknown method '{m}'"),
     }
 }
@@ -606,8 +648,21 @@ async fn rescan(d: &Arc<Daemon>) {
         }
     }
     let gone: Vec<String> = inner.worktrees.keys().filter(|k| !seen.contains(*k)).cloned().collect();
-    for id in gone {
-        d.remove(&mut inner, &id);
+    for id in &gone {
+        d.remove(&mut inner, id);
+    }
+    let want: Vec<(String, PathBuf)> = inner.worktrees.values().filter(|w| w.id != DEV_ID).map(|w| (w.id.clone(), PathBuf::from(&w.path))).collect();
+    drop(inner);
+    for id in &gone {
+        d.unwatch(id);
+    }
+    let mut ws = d.watchers.lock().unwrap_or_else(|p| p.into_inner());
+    for (id, path) in want {
+        if !ws.contains_key(&id) {
+            if let Some(w) = watch::watch(d, &id, &path) {
+                ws.insert(id, w);
+            }
+        }
     }
 }
 
@@ -754,4 +809,84 @@ fn group_name(p: &Value) -> Result<String> {
         bail!("group name must be 1-60 characters");
     }
     Ok(n)
+}
+
+/// End every session of a worktree (hosted: kill its pty's job; `wtd run`: terminate its named job).
+fn stop_sessions(d: &Daemon, id: &str) -> u64 {
+    let (jobs, hosted): (Vec<String>, Vec<Arc<host::Hosted>>) = {
+        let inner = d.lock();
+        let mine: Vec<&Session> = inner.sessions.values().filter(|s| s.wt == id).collect();
+        (mine.iter().filter(|s| s.hosted.is_none()).map(|s| s.job.clone()).collect(), mine.iter().filter_map(|s| s.hosted.clone()).collect())
+    };
+    let mut n = 0;
+    for h in &hosted {
+        h.pty.kill();
+        n += 1;
+    }
+    for j in &jobs {
+        if !j.is_empty() && win::terminate_job(j).unwrap_or(false) {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Run due scheduled jobs (`wtd <kind> <args…>`, output to a log next to the worktree). A job that
+/// came due while the daemon was stopped runs on the next start.
+async fn jobs_loop(d: Arc<Daemon>) {
+    let mut t = tokio::time::interval(Duration::from_secs(30));
+    loop {
+        t.tick().await;
+        let due: Vec<store::Job> = {
+            let mut inner = d.lock();
+            let n = now();
+            let (due, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut inner.store.jobs).into_iter().partition(|j| j.at <= n);
+            inner.store.jobs = keep;
+            if !due.is_empty() {
+                let _ = inner.store.save(&d.dev);
+            }
+            due
+        };
+        for j in due {
+            let log_dir = if j.key.is_empty() { paths::state_dir(&d.dev) } else { PathBuf::from(&j.key).join(".claude") };
+            let _ = std::fs::create_dir_all(&log_dir);
+            let log = OpenOptions::new().create(true).append(true).open(log_dir.join(format!(".{}-retry.log", j.kind)));
+            let (Ok(exe), Ok(log)) = (std::env::current_exe(), log) else { continue };
+            eprintln!("[{}] running scheduled {} {:?}", now(), j.kind, j.args);
+            let mut cmd = Command::new(exe);
+            cmd.arg(&j.kind).args(&j.args).stdin(Stdio::null()).stdout(log.try_clone().map(Stdio::from).unwrap_or(Stdio::null())).stderr(Stdio::from(log));
+            let _ = win::no_window(&mut cmd).spawn();
+        }
+    }
+}
+
+/// "YYYY-MM-DD" or RFC 3339 → unix seconds.
+pub fn usage_parse_date(s: &str) -> Option<i64> {
+    if s.len() == 10 {
+        return usage::parse_rfc3339(&format!("{s}T00:00:00Z"));
+    }
+    usage::parse_rfc3339(s)
+}
+
+pub fn usage_fetch_dir(dir: &std::path::Path, _last: &mut HashMap<String, Account>) -> Option<Account> {
+    usage::fetch_dir(dir)
+}
+
+/// Unix seconds → local "Sun 14:05" (offset from the system clock; good enough for messages).
+pub fn fmt_local(epoch: i64) -> String {
+    use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GetSystemTime};
+    let (mut l, mut u) = unsafe { (std::mem::zeroed(), std::mem::zeroed()) };
+    unsafe {
+        GetLocalTime(&mut l);
+        GetSystemTime(&mut u);
+    }
+    let secs = |t: &windows_sys::Win32::Foundation::SYSTEMTIME| t.wDay as i64 * 86400 + t.wHour as i64 * 3600 + t.wMinute as i64 * 60;
+    let mut off = secs(&l) - secs(&u);
+    if off > 14 * 3600 { off -= 86400 * ((off + 43200) / 86400); }   // month-boundary wrap
+    if off < -14 * 3600 { off += 86400 * ((-off + 43200) / 86400); }
+    let t = epoch + off;
+    let days = t.div_euclid(86400);
+    let rem = t.rem_euclid(86400);
+    let wd = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"][days.rem_euclid(7) as usize];
+    format!("{wd} {:02}:{:02}", rem / 3600, (rem % 3600) / 60)
 }

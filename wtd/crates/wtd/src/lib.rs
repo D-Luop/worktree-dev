@@ -1,19 +1,24 @@
 //! WorkTreeDev v2 for Windows: daemon, hook client, session wrapper, tray, MCP server, CLI.
 //! Two binaries share this library: `wtd.exe` (console CLI) and `wtd-tray.exe` (windowless tray).
 
+pub mod agent;
 pub mod attach;
 pub mod client;
 pub mod codex;
 pub mod daemon;
+pub mod gitx;
 pub mod hook;
 pub mod issues;
 pub mod mcp;
 pub mod paths;
+pub mod review;
 pub mod run;
 pub mod settings;
 pub mod statusfile;
+pub mod tools;
 pub mod tray;
 pub mod win;
+pub mod wt;
 
 use anyhow::Result;
 use serde_json::json;
@@ -23,6 +28,23 @@ use wtd_core::protocol::method;
 const USAGE: &str = "\
 wtd — WorkTreeDev fleet tool
 
+Worktrees & sessions (also on PATH as plain `agent`, `archive`, … via ~/.local/bin shims)
+  wtd agent <slug> <name> [--from ref] [--account a] [--issue-file md] [--no-claude] [ref…]
+                                     create-or-open a worktree and its agent session
+  wtd agent ls|stop|rm|done|pr|wip … manage worktrees (`wtd agent` for details)
+  wtd archive <slug> <name>          park a worktree under worktrees/<slug>/archive (branch kept)
+  wtd assistant                      the dev-root assistant session
+  wtd close                          end the session this terminal belongs to
+  wtd review <slug> <name> [--deep] [--model m] …
+                                     review a worktree's branch (reports open in VS Code;
+                                     WTD_REVIEW_NO_OPEN=1 leaves them on disk)
+  wtd ask <slug>[@branch] [question] ask an expert about another repo/branch
+  wtd ref add|sync|rm|ls …           read-only reference checkouts for agents
+  wtd preview <file.html> [label]    stage an HTML design for the preview panel
+  wtd tokens                         token usage across sessions
+  wtd ship                           package the toolkit for another machine
+
+Fleet & daemon
   wtd daemon start|stop [--force]|status|run
                                      control the background daemon (--force: also end hosted sessions)
   wtd ls [--json]                    list worktrees (status, git, live session)
@@ -73,7 +95,18 @@ fn dispatch(cmd: &str, rest: &[String]) -> Result<i32> {
         "repo" => settings::repo_main(rest),
         "account" => settings::account_main(rest),
         "env" => settings::env_main(rest),
-        "ls" => ls(rest.iter().any(|a| a == "--json")),
+        "ls" => ls_cmd(rest.iter().any(|a| a == "--json")),
+        "agent" => agent::main(rest),
+        "archive" => agent::archive_main(rest),
+        "close" => agent::close_main(),
+        "assistant" => agent::assistant_main(rest),
+        "ref" => gitx::ref_main(rest),
+        "review" => review::main(rest),
+        "wt-review" => review::wt_review_main(rest),
+        "ask" => tools::ask_main(rest),
+        "preview" => tools::preview_main(rest),
+        "tokens" => tools::tokens_main(rest),
+        "ship" => tools::ship_main(rest),
         "stop" => {
             let id = rest.first().ok_or_else(|| anyhow::anyhow!("usage: wtd stop <slug/name>"))?;
             let r = client::Client::connect_required()?.request(method::SESSION_STOP, json!({ "id": id }))?;
@@ -98,7 +131,7 @@ fn dispatch(cmd: &str, rest: &[String]) -> Result<i32> {
     }
 }
 
-fn ls(as_json: bool) -> Result<i32> {
+pub(crate) fn ls_cmd(as_json: bool) -> Result<i32> {
     let v = client::Client::connect_required()?.request(method::FLEET_LIST, json!({}))?;
     if as_json {
         println!("{}", serde_json::to_string_pretty(&v)?);

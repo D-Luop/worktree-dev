@@ -180,7 +180,6 @@ if [ "${1:-}" = "stop" ] || [ "${1:-}" = "kill" ]; then
     wtd_session_kill "$ssession" "$swt" "$sslug" "$sname"
     echo "stopped session '$ssession' (worktree kept → red 'stopped' unless done). Re-open: agent $sslug $sname"
   else
-    wtd_session_kill_stragglers "$sslug" "$sname"   # registry gone but launcher shells may linger
     echo "no running session '$ssession'."
   fi
   exit 0
@@ -479,8 +478,7 @@ if [ "${#refs[@]}" -gt 0 ]; then
   fi
 fi
 
-# --- vscode backend (Windows / no tmux): run claude directly in the terminal the extension opened.
-# There are no tmux panes; the commit/diff surfaces come from VSCode's native SCM/diff + the panel.
+# --- no tmux: run claude directly in this terminal (no panes).
 if [ "$(wtd_session_backend)" != tmux ]; then
   if [ -n "$ccdir" ]; then echo "session '$session' → Claude account '$account_label' ($ccdir)"; fi
   # wtd_session_run_claude registers the session, exports WTD_SESSION, cd's to the worktree, and

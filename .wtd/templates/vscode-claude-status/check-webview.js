@@ -41,13 +41,7 @@ while (i < src.length) {
 if (start < 0 || tickOpen < 0 || end < 0) { failures++; console.error('could not locate the _html() template in extension.js'); }
 else checkScripts('panel', src.slice(tickOpen + 1, end).replace(/\\(.)/g, (m, ch) => ch === 'n' ? '\n' : ch === 't' ? '\t' : ch));
 
-// 2. The commits tab: diffview.commitsHtml() is directly callable (git calls fail gracefully).
-try {
-  const dv = require(path.join(HERE, 'diffview.js'));
-  checkScripts('diffview', dv.commitsHtml('x', 'y', false));
-} catch (e) { failures++; console.error('diffview check failed: ' + e.message); }
-
-// 3. The Settings page: settings.settingsHtml() is a plain function (no vscode import at load).
+// 2. The Settings page: settings.settingsHtml() is a plain function (no vscode import at load).
 try {
   const st = require(path.join(HERE, 'settings.js'));
   checkScripts('settings', st.settingsHtml());

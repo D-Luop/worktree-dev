@@ -3,9 +3,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const cp = require('child_process');
-const https = require('https');
-const dv = require('./diffview.js');
-const { SettingsPanel } = require('./settings.js');   // the WorkTreeDev Settings editor tab   // the `commits` tab: branch commits + filterable diffs
+const { GitView } = require('./gitview.js');   // the native Worktree Changes tree + diffs
+const { SettingsPanel } = require('./settings.js');   // the WorkTreeDev Settings editor tab
 
 const STATUS_FILE = '.claude-status';
 const HOME = os.homedir();
@@ -20,7 +19,6 @@ const TESTS_FLAG = path.join(HOME, '.config', 'wtd', 'exclude-tests');  // prese
 // these are always defined; activate() overwrites them once the workspace is known.
 let DEV = path.join(HOME, 'dev');
 let WTD = path.join(DEV, '.wtd');
-let SESS_DIR = path.join(WTD, 'state', 'sessions');   // vscode-backend session registry (no tmux)
 
 // A dir is a worktree-dev base iff it contains a .wtd/ dir.
 const DEV_ROOT_PIN = path.join(HOME, '.config', 'wtd', 'dev-root');  // install-written absolute path
@@ -52,16 +50,12 @@ function resolveDevRoot() {
   return path.join(HOME, 'dev');
 }
 
-// (re)compute DEV/WTD/SESS_DIR from the current workspace
+// (re)compute DEV/WTD from the current workspace
 function refreshDevRoot() {
   DEV = resolveDevRoot();
   WTD = path.join(DEV, '.wtd');
-  SESS_DIR = path.join(WTD, 'state', 'sessions');
 }
 const IS_WIN = process.platform === 'win32';
-const MON_SECS = 15;   // system-monitor sample interval
-const GIT_SECS = 30;   // dirty/ahead refresh interval (status flips don't wait for this — they're watched)
-const GIT_CONCURRENCY = 3;   // max simultaneous `git status` (15 at once saturates disk on a monorepo)
 const ASST_NAME = 'assistant';   // the reserved terminal name of the pinned fleet-management session
 const TERM_NAME = 'terminal';    // the reserved name of the pinned plain shell row (above assistant)
 // The shell each worktree terminal runs. On Windows that's Git Bash (so the .wtd bash scripts run);
@@ -115,30 +109,12 @@ function registeredSlugs() {
   } catch { return []; }
 }
 
-// Run a .wtd shell script or a shebang wrapper (archive/agent/refresh-diffs/monitor-stats). On Windows
-// these aren't directly spawnable — cp.execFile throws EFTYPE — so route them through Git Bash (with
-// forward-slash paths it can stat); elsewhere exec them directly. Crucially this NEVER throws
-// synchronously: a spawn failure is delivered to cb, so e.g. _postMonitor can't take down the webview.
-// Non-login `bash -c`: a login shell re-sources the whole profile on every call (~0.5-0.8s on Windows).
-// Git's bin\bash.exe launcher already puts /usr/bin + /mingw64/bin on PATH; we add ~/.local/bin.
 const LOCAL_BIN = path.join(HOME, '.local', 'bin');
 // env for the bash terminals we open (sessions, assistant, dev shell): the wtd commands live in
 // ~/.local/bin, which a fresh Git Bash login shell doesn't have on PATH unless the user's profile adds it.
 function wtdTermEnv() {
   const pk = Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
   return { [pk]: LOCAL_BIN + path.delimiter + (process.env[pk] || '') };
-}
-function execScript(file, args, opts, cb) {
-  const done = typeof cb === 'function' ? cb : () => {};
-  try {
-    if (IS_WIN) {
-      const line = [file].concat(args || []).map((a) => shq(String(a).replace(/\\/g, '/'))).join(' ');
-      const pk = Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') || 'PATH';   // Windows: usually "Path"
-      const env = { ...process.env, [pk]: LOCAL_BIN + path.delimiter + (process.env[pk] || '') };
-      return cp.execFile(bashShell(), ['-c', line], { ...opts, env }, done);
-    }
-    return cp.execFile(file, args || [], opts, done);
-  } catch (e) { done(e); }
 }
 
 // --- wtd daemon (v2) -------------------------------------------------------------------------------
@@ -147,8 +123,14 @@ function execScript(file, args, opts, cb) {
 // in-extension scanning below is used.
 const net = require('net');
 function wtdExe() { return path.join(WTD, 'bin', 'wtd.exe'); }
+// run `wtd <args…>` (no shell); cb(err, stdout, stderr)
+function wtdRun(args, opts, cb) {
+  try { return cp.execFile(wtdExe(), args, Object.assign({ windowsHide: true }, opts || {}), cb || (() => {})); }
+  catch (e) { (cb || (() => {}))(e, '', ''); }
+}
 function daemonInstalled() { try { return IS_WIN && fs.existsSync(wtdExe()); } catch { return false; } }
 function pipePath() {
+  if (process.env.WTD_PIPE) return '\\\\.\\pipe\\' + process.env.WTD_PIPE;   // a test daemon (see paths.rs)
   const u = (process.env.USERNAME || process.env.USER || 'user').replace(/[^A-Za-z0-9_-]/g, '_');
   return '\\\\.\\pipe\\wtd-' + u;
 }
@@ -298,8 +280,6 @@ class DevSummaryProvider {
     this._pvTimer = null;         // poll so an open panel live-refreshes when its files change
     this._pvSig = '';             // signature (labels+mtimes) of the last render, to detect changes
     this._pvTabs = '';            // '|'-joined tab labels of the last render (commits tab re-render trigger)
-    this._cvSel = {};             // roster key -> selected commit sha in the `commits` tab (survives re-render)
-    this._cvWidth = 0;            // commit-list width the user dragged to (0 = the tab's default)
   }
   _wtPath(slug, name) { return path.join(DEV, 'worktrees', slug, name); }
   _key(slug, name) { return slug + '' + name; }
@@ -381,7 +361,7 @@ class DevSummaryProvider {
       'Switch account'
     ).then((ch) => {
       if (ch !== 'Switch account') return;
-      execScript(path.join(HOME, '.local', 'bin', 'account'), ['switch', slug, name, '--to', target], { timeout: 60000 }, (e, so, se) => {
+      wtdRun(['account', 'switch', slug, name, '--to', target], { timeout: 60000 }, (e, so, se) => {
         const out = ((se || '') + (so || '')).trim();
         if (e) { vscode.window.showErrorMessage('account switch failed: ' + (out || e.message)); return; }
         vscode.window.showInformationMessage('Switched ' + name + " → '" + target + "'. Reopening under it and compacting…");
@@ -420,13 +400,13 @@ class DevSummaryProvider {
       disposeDeadTerminals(name);   // reap reload-orphaned dead tabs so they can't be focused instead
       const nm = name;   // tab = worktree name only (no slug, no status glyph — status shows in the roster)
       t = vscode.window.createTerminal({ name: nm, location: vscode.TerminalLocation.Editor,
-        env: wtdTermEnv(), shellPath: bashShell(), shellArgs: ['-lc', 'agent ' + shq(slug) + ' ' + shq(name)] });
+        env: wtdTermEnv(), shellPath: wtdExe(), shellArgs: ['agent', slug, name] });
       t.show();
     }
     this._terms.set(key, t);
     this._current = t;            // the just-opened session is now the selected one
     this.clearUnread(key);
-    _dbg(`  -> branch=${branch} tname=${JSON.stringify(t && t.name)} exit=${t && t.exitStatus} shell=${JSON.stringify(bashShell())}`);
+    _dbg(`  -> branch=${branch} tname=${JSON.stringify(t && t.name)} exit=${t && t.exitStatus}`);
     setTimeout(() => this._postRoster(), 1500);
     } catch (e) {
       _dbg(`  -> THREW branch=${branch}: ${e && (e.stack || e.message)}`);
@@ -443,7 +423,7 @@ class DevSummaryProvider {
     else {
       disposeDeadTerminals(ASST_NAME);
       t = vscode.window.createTerminal({ name: ASST_NAME, location: vscode.TerminalLocation.Editor,
-        env: wtdTermEnv(), shellPath: bashShell(), shellArgs: ['-lc', 'assistant'] });
+        env: wtdTermEnv(), shellPath: wtdExe(), shellArgs: ['assistant'] });
       t.show();
     }
     this._asstTerm = t; this._current = t;
@@ -551,13 +531,7 @@ class DevSummaryProvider {
   _previewLabels(previews) {
     return Object.keys(previews).sort((a, b) => (a === 'plan' ? -1 : b === 'plan' ? 1 : a.localeCompare(b)));
   }
-  // Every git worktree gets a built-in `commits` tab (the diff viewer) after its staged previews, so
-  // the panel has something to show even when no agent has staged a design.
-  _tabs(slug, name, previews) {
-    const labels = this._previewLabels(previews);
-    if (dv.isGitWorktree(this._wtPath(slug, name))) labels.push(dv.COMMITS_LABEL);
-    return labels;
-  }
+  _tabs(slug, name, previews) { return this._previewLabels(previews); }
   // which tab to show: explicit request → remembered selection → 'plan' → first
   _pickLabel(key, want, previews, labels) {
     if (want && labels.includes(want)) return want;
@@ -566,12 +540,8 @@ class DevSummaryProvider {
     if (previews.plan) return 'plan';
     return labels[0] || null;
   }
-  // does this worktree have anything the panel can render? (a staged preview, or a git repo → commits)
-  _hasPanelContent(key) {
-    if (Object.keys(this._preview[key] || {}).length) return true;
-    const i = key.indexOf('\x01'); if (i < 0) return false;
-    return dv.isGitWorktree(this._wtPath(key.slice(0, i), key.slice(i + 1)));
-  }
+  // does this worktree have a staged preview the panel can render?
+  _hasPanelContent(key) { return Object.keys(this._preview[key] || {}).length > 0; }
   _previewSig(previews) {
     return this._previewLabels(previews).map((l) => {
       let m = 0; try { m = fs.statSync(previews[l]).mtimeMs; } catch {} return l + ':' + m;
@@ -589,12 +559,7 @@ class DevSummaryProvider {
     if (!labels.length) { vscode.window.showInformationMessage('claude-status: nothing to show for ' + slug + ' ' + name); return; }
     const chosen = this._pickLabel(key, label, previews, labels);
     let raw;
-    if (chosen === dv.COMMITS_LABEL) {
-      let hideTests = false; try { hideTests = fs.existsSync(TESTS_FLAG); } catch {}
-      raw = dv.commitsHtml(slug, name, hideTests, this._cvWidth);   // skeleton; commits arrive over postMessage
-    } else {
-      try { raw = fs.readFileSync(previews[chosen], 'utf8'); } catch { return; }
-    }
+    try { raw = fs.readFileSync(previews[chosen], 'utf8'); } catch { return; }
     this._pvFollow = true;   // engaging a preview → the panel now tracks the focused worktree
     if (!this._pvPanel) {
       this._pvPanel = vscode.window.createWebviewPanel('claudeStatus.preview', 'Design preview',
@@ -614,9 +579,6 @@ class DevSummaryProvider {
           const j = this._pvShownKey.indexOf('\x01');
           if (j >= 0) this.showPreview(this._pvShownKey.slice(0, j), this._pvShownKey.slice(j + 1), msg.label);
         }
-        else if (msg.cmd === 'cvReady' && msg.slug) this._cvList(msg.slug, msg.name);
-        else if (msg.cmd === 'cvSelect' && msg.slug && msg.sha) this._cvDiff(msg.slug, msg.name, msg.sha);
-        else if (msg.cmd === 'cvWidth' && msg.w) this._cvWidth = msg.w;   // remember the dragged divider
       });
     }
     const csp = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; '
@@ -634,7 +596,6 @@ class DevSummaryProvider {
       + labels.map(tab).join('') + '<span style="flex:1"></span>'
       + '<div id="__wtclose" title="Close preview" style="cursor:pointer;white-space:nowrap;background:#21262d;color:#e6edf3;'
       + 'border:1px solid #444c56;border-radius:6px;padding:3px 11px;font:600 12px system-ui;">✕ Close</div></div>'
-      // acquireVsCodeApi is one-shot per webview; the commits tab needs it too, so both go via __wtapi
       + '<script>(function(){var v=window.__wtapi||(window.__wtapi=acquireVsCodeApi());'
       + 'var b=document.getElementById("__wtclose");if(b)b.addEventListener("click",function(){v.postMessage({cmd:"close"});});'
       + 'document.addEventListener("click",function(e){'
@@ -663,44 +624,13 @@ class DevSummaryProvider {
 
   // refresh poll: re-scan the shown worktree's preview dir; if a tab was added/removed or the shown
   // file changed, re-render in place (no reveal → no focus steal; injected script restores scroll).
-  // The commits tab is git-backed, not file-backed: a preview re-stage must not blow away the diff
-  // you're reading, so it only re-renders when the tab set itself changes.
   _pollPreview() {
     if (!this._pvPanel || !this._pvShownKey) return;
     const i = this._pvShownKey.indexOf('\x01'); if (i < 0) return;
     const slug = this._pvShownKey.slice(0, i), name = this._pvShownKey.slice(i + 1);
     const previews = this._scanPreviews(slug, name);
-    if (this._pvLabel === dv.COMMITS_LABEL) {
-      const tabs = this._tabs(slug, name, previews).join('|');
-      if (tabs !== this._pvTabs) this.showPreview(slug, name, this._pvLabel, false);
-      return;
-    }
     if (!Object.keys(previews).length) return;   // keep last content if the dir momentarily empties
     if (this._previewSig(previews) !== this._pvSig) this.showPreview(slug, name, this._pvLabel, false);
-  }
-
-  // git is async, so a reply can arrive after the panel has switched tab or worktree — drop it rather
-  // than paint one worktree's commits over another's.
-  _cvPost(key, payload) {
-    if (!this._pvPanel || this._pvLabel !== dv.COMMITS_LABEL || this._pvShownKey !== key) return;
-    this._pvPanel.webview.postMessage(payload);
-  }
-
-  // the commits tab asked for its branch history (sent on load)
-  _cvList(slug, name) {
-    const wt = this._wtPath(slug, name);
-    if (!dv.isGitWorktree(wt)) return;
-    const key = this._key(slug, name);
-    dv.listCommits(wt, (res) => this._cvPost(key, Object.assign({ type: 'cvList', selected: this._cvSel[key] || '' }, res)));
-  }
-
-  // the commits tab asked for one commit's patch (or the working tree, sha === dv.WORKING)
-  _cvDiff(slug, name, sha) {
-    const wt = this._wtPath(slug, name);
-    if (!dv.isGitWorktree(wt)) return;
-    const key = this._key(slug, name);
-    this._cvSel[key] = sha;   // so switching to a design tab and back reopens the same commit
-    dv.commitDiff(wt, sha, (res) => this._cvPost(key, Object.assign({ type: 'cvDiff' }, res)));
   }
 
   // A ▶ Start button in the living-plan preview was clicked: hand that step to the worktree the panel
@@ -728,20 +658,22 @@ class DevSummaryProvider {
   _showPreviewByKey(key) { const i = key.indexOf('\x01'); if (i >= 0) this.showPreview(key.slice(0, i), key.slice(i + 1)); }
 
   // the worktree key of the currently-focused session (null for assistant/terminal/non-worktree)
-  _focusedWorktreeKey() {
-    const cur = this._current || vscode.window.activeTerminal;
-    if (!cur || termName(cur) === ASST_NAME || termName(cur) === TERM_NAME) return null;
-    for (const [k, v] of this._terms) if (v === cur) return k;
-    for (const k of Object.keys(this._preview)) if (k.split('\x01')[1] === termName(cur)) return k;   // reload-revived
+  _focusedWorktreeKey() { return this._terminalKey(this._current || vscode.window.activeTerminal); }
+  // the worktree key a session terminal belongs to (null for the assistant / dev shell / other terminals)
+  _terminalKey(t) {
+    if (!t || termName(t) === ASST_NAME || termName(t) === TERM_NAME) return null;
+    for (const [k, v] of this._terms) if (v === t) return k;
+    const n = termName(t);   // a reload-revived tab we didn't create this run: match by name
+    if (this.daemon) for (const w of this.daemon.wts.values()) if (w.slug && w.name === n && w.id !== '_dev') return this._key(w.slug, w.name);
+    for (const k of Object.keys(this._preview)) if (k.split('\x01')[1] === n) return k;
     return null;
   }
 
-  // header 🖼 button: open the panel for the worktree you're focused on (then it follows focus). Every
-  // git worktree has at least the `commits` tab, so this only fails on a non-worktree focus.
+  // header 🖼 button: open the panel for the worktree you're focused on (then it follows focus).
   previewFocused() {
     const key = this._focusedWorktreeKey();
     if (key && this._hasPanelContent(key)) this._showPreviewByKey(key);
-    else vscode.window.showInformationMessage('claude-status: focus a worktree session first — the panel shows its commits, plus any design an agent staged with `preview <file> [label]`.');
+    else vscode.window.showInformationMessage(key ? 'No staged previews for this worktree — an agent stages one with `preview <file> [label]`.' : 'Focus a worktree session first.');
   }
 
   // Keep the preview panel reflecting the focused worktree: show that worktree's staged preview, hide
@@ -765,6 +697,8 @@ class DevSummaryProvider {
     if (!t) return;
     this._current = t; setTimeout(() => this._postRoster(), 0);   // mark the focused session as selected
     this._syncPreviewPanel(t);   // make the design-preview panel follow the worktree you switched to
+    const tk = this._terminalKey(t);   // …and the Changes tree
+    if (tk && this.gitView) { const j = tk.indexOf('\x01'); this.gitView.follow(tk.slice(0, j), tk.slice(j + 1)); }
     for (const [k, v] of this._terms) if (v === t) { this.clearUnread(k); return; }
     // also match a reload-revived terminal by name
     for (const k of Object.keys(this._unread)) { const name = k.split('')[1]; if (this._unread[k] && termName(t) === name) { this.clearUnread(k); return; } }
@@ -773,54 +707,9 @@ class DevSummaryProvider {
   // "New session": the toolbar button and the `WorkTreeDev: New Session` palette command. With wtd.exe
   // installed it's the guided picker; without it, the original free-text prompt.
   newAgent() {
-    if (daemonInstalled()) return newSessionWizard(this).catch((e) => vscode.window.showErrorMessage('New session: ' + e.message));
-    return this._legacyNewAgent();
+    return newSessionWizard(this).catch((e) => vscode.window.showErrorMessage('New session: ' + e.message));
   }
 
-  _legacyNewAgent() {
-    vscode.window.showInputBox({
-      prompt: 'New agent — enter: <slug> <name> [ref-tokens…]   (slug "plan" = a repo-less planning agent)',
-      placeHolder: 'plan my-new-app    ·    <slug> feat/my-thing',
-    }).then((v) => {
-      if (!v || !v.trim()) return;
-      const raw = v.trim();
-      const toks = raw.split(/\s+/);
-      const slug = toks[0], name = toks[1] || '';
-      const launch = () => {
-        const nm = name || slug || 'agent';   // tab = the <name> token (no slug)
-        const t = vscode.window.createTerminal({ name: nm, location: vscode.TerminalLocation.Editor,
-          env: wtdTermEnv(), shellPath: bashShell(), shellArgs: ['-lc', 'agent ' + raw] });
-        t.show();
-        setTimeout(() => this._postRoster(), 2500);
-      };
-      // 'plan' is the reserved repo-less planning slug; a registered slug launches straight away.
-      // A brand-new slug (with a name to open) offers to create the repo for a new application.
-      const known = new Set(registeredSlugs());
-      if (slug === 'plan' || known.has(slug) || !name) { launch(); return; }
-      vscode.window.showWarningMessage(
-        "'" + slug + "' isn't a registered repo. Create it for a new application?",
-        { modal: true, detail: 'New empty repo: a fresh local git repo (no remote yet) — start scaffolding immediately, add a GitHub remote later.\nClone from URL: bare-clone an existing remote.\nOr use the reserved "plan" slug for a repo-less planning agent.' },
-        'New empty repo', 'Clone from URL…'
-      ).then((ch) => {
-        const addRepo = path.join(HOME, '.local', 'bin', 'add-repo');
-        if (ch === 'New empty repo') {
-          execScript(addRepo, ['--new', slug], { timeout: 30000 }, (e, so, se) => {
-            if (e) { vscode.window.showErrorMessage('create repo failed: ' + ((se || '').trim() || e.message)); return; }
-            launch();
-          });
-        } else if (ch === 'Clone from URL…') {
-          vscode.window.showInputBox({ prompt: 'Git URL to clone for "' + slug + '"', placeHolder: 'https://github.com/you/repo.git' })
-            .then((url) => {
-              if (!url || !url.trim()) return;
-              execScript(addRepo, [slug, url.trim()], { timeout: 120000 }, (e, so, se) => {
-                if (e) { vscode.window.showErrorMessage('clone failed: ' + ((se || '').trim() || e.message)); return; }
-                launch();
-              });
-            });
-        }
-      });
-    });
-  }
 
   // Agent messages awaiting the user's approval: a notification per new request; Review shows the full
   // text with Send / Edit & send / Deny. Nothing reaches the target agent without one of those clicks.
@@ -947,7 +836,7 @@ class DevSummaryProvider {
           { modal: true }, 'Archive'
         ).then((ch) => {
           if (ch !== 'Archive') return;
-          execScript(path.join(HOME, '.local', 'bin', 'archive'), [m.slug, m.name], { timeout: 30000 }, (e, so, se) => {
+          wtdRun(['archive', m.slug, m.name], { timeout: 60000 }, (e, so, se) => {
             if (e) vscode.window.showErrorMessage('archive failed: ' + ((se || '').trim() || e.message));
             else vscode.window.showInformationMessage('Archived ' + m.slug + ' ' + m.name);
             this._postRoster();
@@ -966,10 +855,10 @@ class DevSummaryProvider {
           if (ch !== 'Delete worktree' && ch !== 'Delete worktree + branch') return;
           const withBranch = ch === 'Delete worktree + branch';
           const run = (force) => {
-            const args = ['rm', m.slug, m.name, '-y'];
+            const args = ['agent', 'rm', m.slug, m.name, '-y'];
             if (force) args.push('--force');
             if (withBranch) args.push('--branch');
-            execScript(path.join(HOME, '.local', 'bin', 'agent'), args, { timeout: 30000 }, (e, so, se) => {
+            wtdRun(args, { timeout: 60000 }, (e, so, se) => {
               const out = ((se || '') + (so || '')).trim();
               if (!e) {
                 vscode.window.showInformationMessage('Deleted ' + m.slug + ' ' + m.name + (withBranch ? ' (+ branch)' : ''));
@@ -996,7 +885,7 @@ class DevSummaryProvider {
           { modal: true }, 'End session'
         ).then((ch) => {
           if (ch !== 'End session') return;
-          execScript(path.join(HOME, '.local', 'bin', 'agent'), ['stop', m.slug, m.name], { timeout: 15000 }, (e, so, se) => {
+          wtdRun(['agent', 'stop', m.slug, m.name], { timeout: 15000 }, (e, so, se) => {
             if (e) vscode.window.showErrorMessage('end session failed: ' + ((se || '').trim() || e.message));
             setTimeout(() => this._postRoster(), 800);
           });
@@ -1020,7 +909,7 @@ class DevSummaryProvider {
       } else if (m.cmd === 'previewFocused') {
         this.previewFocused();
       } else if (m.cmd === 'openCommits' && m.slug) {
-        this.showPreview(m.slug, m.name, dv.COMMITS_LABEL);
+        if (this.gitView) this.gitView.show(m.slug, m.name);
       } else if (m.cmd === 'pasteImage') {
         this.pasteImage();
       } else if (m.cmd === 'toggleTests') {
@@ -1030,7 +919,7 @@ class DevSummaryProvider {
           else { fs.mkdirSync(path.dirname(TESTS_FLAG), { recursive: true }); fs.writeFileSync(TESTS_FLAG, ''); }
         } catch (e) { vscode.window.showErrorMessage('toggle tests failed: ' + e.message); }
         this._postTests();
-        execScript(path.join(DEV, '.wtd', 'hooks', 'refresh-diffs.sh'), [], { timeout: 30000 }, () => {});
+        if (this.gitView) this.gitView.testsToggled();
       } else if (m.cmd === 'toggleBell') {
         this.toggleBell();
       }
@@ -1048,25 +937,19 @@ class DevSummaryProvider {
       } catch (e) { _dbg('panel ' + tag + ' FAILED: ' + ((e && e.stack) || e)); }
     };
     const postAll = () => { safe('daemon', () => this._postDaemon()); safe('limits', () => this._postLimits());
-      safe('roster', () => this._postRoster({ git: true }));
+      safe('roster', () => this._postRoster());
       safe('monitor', () => this._postMonitor()); safe('tests', () => this._postTests()); safe('bell', () => this._postBell()); };
     this._postAll = postAll;   // re-run on the webview's 'ready' handshake (initial posts can beat the script)
     postAll();
-    // refresh accounts' usage every 60s. Active accounts come from their (free) statusline file; only
-    // idle accounts hit the endpoint — 60s keeps API calls low enough to avoid 429. Git state (dirty /
-    // ahead) every GIT_SECS; status flips arrive instantly via the status watchers, without git.
-    // System monitor every MON_SECS (resident sampler on Windows; a timer elsewhere).
+    // usage is polled by the daemon; re-post every 60s so the 'stale' age marker advances.
     this.limTimer = setInterval(() => safe('limits', () => this._postLimits()), 60000);
-    // daemon mode is push-driven (see activate's daemon onChange); these timers are the legacy path.
-    // The roster timer still runs (cheap without git) to catch terminal focus/liveness drift.
-    this.rosTimer = setInterval(() => safe('roster', () => this._postRoster({ git: !this._daemonMode() })), GIT_SECS * 1000);
-    if (!IS_WIN) this.monTimer = setInterval(() => safe('monitor', () => this._postMonitor()), MON_SECS * 1000);
-    view.onDidChangeVisibility(() => { if (view.visible) postAll(); else this._stopMonitor(); });
+    // everything is push-driven by the daemon; this slow tick only catches terminal-focus drift
+    this.rosTimer = setInterval(() => safe('roster', () => this._postRoster()), 30000);
+    view.onDidChangeVisibility(() => { if (view.visible) postAll(); });
     view.onDidDispose(() => {
       if (this.limTimer) clearInterval(this.limTimer);
       if (this.rosTimer) clearInterval(this.rosTimer);
       if (this.monTimer) clearInterval(this.monTimer);
-      this._stopMonitor();
       this.limTimer = this.rosTimer = this.monTimer = this.view = this._postAll = null;
     });
   }
@@ -1108,22 +991,11 @@ class DevSummaryProvider {
   // gather usage for ALL accounts and post them together so the panel shows each (no overwrite)
   _postLimits() {
     if (!this.view || !this.view.visible) return;
-    if (this._daemonMode()) {
-      // the daemon polls usage; while it's stopped keep showing the last pushed numbers
-      const list = this.daemon.accounts || [];
-      if (list.length) { this.view.webview.postMessage({ type: 'limits', accounts: list }); this._maybeNotifyLimit(list); }
-      return;
-    }
-    const accts = this._accounts();
-    if (!accts.length) { this.view.webview.postMessage({ type: 'limits', accounts: [] }); return; }
-    const out = new Array(accts.length); let pending = accts.length;
-    const done = () => {
-      if (--pending) return;
-      const list = out.filter(Boolean);
-      if (this.view && this.view.visible) this.view.webview.postMessage({ type: 'limits', accounts: list });
-      this._maybeNotifyLimit(list);
-    };
-    accts.forEach((a, i) => this._usageFor(a, (u) => { out[i] = u; done(); }));
+    // the daemon polls usage; while it's stopped the last pushed numbers stay (marked stale by age)
+    const list = (this.daemon && this.daemon.accounts) || [];
+    for (const a of list) this._lastUsage[a.name] = a;   // for the ⇄ account-switch target pick
+    this.view.webview.postMessage({ type: 'limits', accounts: list });
+    if (list.length) this._maybeNotifyLimit(list);
   }
 
   // When a logged-in account crosses ~95% of a limit, nudge the user ONCE per reset window (deduped by
@@ -1149,67 +1021,7 @@ class DevSummaryProvider {
     } catch {}
   }
 
-  // usage for one account: LIVE-FETCH FIRST from the same endpoint the /usage panel uses (authoritative,
-  // zero token cost) so the numbers always match the official panel. The statusline file is an
-  // unreliable cache (its rate_limits schema drifted to null), so it's only a fallback, and any
-  // fallback is returned with its ORIGINAL (old) ts so the webview clearly marks it stale — we never
-  // show a stale value as if it were current.
-  _usageFor(a, cb) {
-    let email = '';
-    try { email = (JSON.parse(fs.readFileSync(a.json, 'utf8')).oauthAccount || {}).emailAddress || ''; } catch {}
-    let file = null;
-    try { file = JSON.parse(fs.readFileSync(path.join(a.dir, 'rate-limits.json'), 'utf8')); } catch {}
-    const now = Math.floor(Date.now() / 1000);
-    const hasNums = (d) => d && (typeof (d.five_hour || {}).used === 'number' || typeof (d.seven_day || {}).used === 'number');
-    const ofFile = (f) => ({ name: a.name, email: email || (f && f.email) || '', five_hour: f && f.five_hour, seven_day: f && f.seven_day, ts: f && f.ts });
-    // fallback when the live fetch can't run/succeeds: file (if it has real numbers) else last-known
-    // cache — both keep their OLD ts so the webview dims them + shows "⟳ Nm old". Never blank.
-    const fallback = () => {
-      if (hasNums(ofFile(file))) return cb(ofFile(file));
-      if (this._lastUsage[a.name]) return cb({ ...this._lastUsage[a.name], email: email || this._lastUsage[a.name].email });
-      return cb({ name: a.name, email, nologin: !email });
-    };
-    let tok = '';
-    try { tok = (JSON.parse(fs.readFileSync(path.join(a.dir, '.credentials.json'), 'utf8')).claudeAiOauth || {}).accessToken || ''; } catch {}
-    if (!tok) return fallback();
-    this._fetchUsage(tok, (u) => {
-      if (u && hasNums(u)) {
-        const fresh = { name: a.name, email, five_hour: u.five_hour, seven_day: u.seven_day, ts: now };
-        this._lastUsage[a.name] = fresh;       // keep the cache current for offline fallback
-        return cb(fresh);
-      }
-      fallback();   // fetch failed (429/expired/offline) → stale file / last-known, marked stale, never blank
-    });
-  }
 
-  // Live usage straight from the same endpoint the /usage panel uses. Zero token cost. Returns the
-  // webview's data shape, or null on any failure (token missing/expired, offline) so we fall back.
-  // live usage for a given token: { five_hour:{used,resets_at}, seven_day:{...} } or null on failure
-  _fetchUsage(tok, cb) {
-    const num = (x) => (typeof x === 'number' && isFinite(x)) ? Math.round(x) : null;
-    const epoch = (s) => { const t = Date.parse(s); return isNaN(t) ? 0 : Math.floor(t / 1000); };
-    // In the extension host, https is monkey-patched by VSCode's proxy agent — a bad proxy config can
-    // make get() throw SYNCHRONOUSLY, so the whole call is guarded; any failure just means fallback.
-    let req;
-    try {
-      req = https.get({
-        host: 'api.anthropic.com', path: '/api/oauth/usage', timeout: 10000,
-        headers: { 'Authorization': 'Bearer ' + tok, 'anthropic-beta': 'oauth-2025-04-20', 'Content-Type': 'application/json' },
-      }, (res) => {
-        if (res.statusCode !== 200) { res.resume(); return cb(null); }
-        let b = ''; res.on('data', (d) => b += d);
-        res.on('end', () => {
-          try {
-            const j = JSON.parse(b), f = j.five_hour || {}, s = j.seven_day || {};
-            cb({ five_hour: { used: num(f.utilization), resets_at: epoch(f.resets_at) },
-                 seven_day: { used: num(s.utilization), resets_at: epoch(s.resets_at) } });
-          } catch { cb(null); }
-        });
-      });
-      req.on('error', () => cb(null));
-      req.on('timeout', () => { req.destroy(); cb(null); });
-    } catch (e) { _dbg('usage fetch threw: ' + ((e && e.stack) || e)); cb(null); }
-  }
 
   async _postRoster(opts) {
     if (!this.view || !this.view.visible) return;
@@ -1240,13 +1052,7 @@ class DevSummaryProvider {
   }
 
   async _postRosterNow(opts) {
-    let rows, live;
-    if (this._daemonMode()) {
-      ({ rows, live } = this._daemonRows());
-    } else {
-      rows = await this._roster(!!(opts && opts.git));
-      live = await this._liveSessions();   // session names with a live tmux session
-    }
+    const { rows, live } = this._daemonRows();
     // resolve which row is the currently-focused session: by exact terminal if we opened it, else
     // (e.g. after a window reload, when _terms is empty) fall back to matching the terminal's name.
     // sync the focused terminal from VSCode (covers editor-area terminals — assistant/terminal/sessions —
@@ -1271,9 +1077,7 @@ class DevSummaryProvider {
     // to 'input' (your turn) while you're not focused on it → highlight yellow; cleared when you focus it.
     const asstTerm = vscode.window.terminals.find((x) => termName(x) === ASST_NAME);
     const asstCurrent = !!cur && termName(cur) === ASST_NAME;
-    let asstStatus = '';
-    if (this._daemonMode()) { const d = this.daemon.wts.get('_dev'); asstStatus = d && d.status !== 'none' ? d.status : ''; }
-    else { try { asstStatus = fs.readFileSync(path.join(DEV, STATUS_FILE), 'utf8').trim(); } catch {} }
+    const dv0 = this.daemon.wts.get('_dev'); const asstStatus = dv0 && dv0.status !== 'none' ? dv0.status : '';
     const aprev = this._lastStatus[ASST_NAME];
     if (asstStatus === 'input' && aprev !== undefined && aprev !== 'input' && !asstCurrent) this._unread[ASST_NAME] = true;
     this._lastStatus[ASST_NAME] = asstStatus;
@@ -1284,13 +1088,13 @@ class DevSummaryProvider {
     const terminal = { active: !!plainTerm, current: !!cur && termName(cur) === TERM_NAME };
     let multiAccount = false; try { multiAccount = this._accounts().length > 1; } catch {}
     // groups: null = legacy grouping by repo (no daemon installed); edits need the daemon running
-    const groups = this._daemonMode() ? (this.daemon.groups || []) : null;
-    const canEditGroups = this._daemonMode() && this.daemon.running;
+    const groups = this.daemon.groups || [];
+    const canEditGroups = this.daemon.running;
     if (this.view && this.view.visible) this.view.webview.postMessage({ type: 'roster', rows, assistant, terminal, multiAccount, groups, canEditGroups });
   }
 
   // daemon mode = wtd.exe is installed (whether or not the daemon is running right now)
-  _daemonMode() { return !!this.daemon && daemonInstalled(); }
+  _daemonMode() { return !!this.daemon; }
 
   _postDaemon() {
     if (!this.view || !this.view.visible) return;
@@ -1319,126 +1123,19 @@ class DevSummaryProvider {
     });
   }
 
-  // names of worktrees with a live session (session name = "<slug>-<name>"). On Windows there's no
-  // tmux: the on-disk registry (written by agent.sh) is the source of truth — filenames encode '/'
-  // as '__', so decode them back. On Unix, ask tmux.
-  _liveSessions() {
-    return new Promise((res) => {
-      if (IS_WIN) {
-        const s = new Set();
-        try { for (const f of fs.readdirSync(SESS_DIR)) s.add(f.replace(/__/g, '/')); } catch {}
-        return res(s);
-      }
-      cp.execFile('tmux', ['list-sessions', '-F', '#{session_name}'], { timeout: 3000 }, (e, out) => {
-        const s = new Set();
-        if (!e && out) for (const ln of out.split('\n')) { const n = ln.trim(); if (n) s.add(n); }
-        res(s);
-      });
-    });
-  }
 
-  // system monitor: tmux sessions, claude procs + RSS, reviews running, WSL mem, CPU load
-  _postMonitorLine(out) {
-    if (!this.view || !this.view.visible) return;
-    const p = (out || '').trim().split('|');   // sess|nag|rev|acpu|amem|mt|msys|ncpu|load
-    if (p.length < 9) return;
-    this.view.webview.postMessage({ type: 'monitor', m: {
-      sess: +p[0], nag: +p[1], rev: +p[2], acpu: +p[3], amem: +p[4], mt: +p[5], msys: +p[6], ncpu: +p[7], load: p[8] } });
-  }
 
   _postMonitor() {
     if (!this.view || !this.view.visible) return;
-    if (this._daemonMode()) {
-      const m = this.daemon.running ? this.daemon.metrics : null;
-      this.view.webview.postMessage({ type: 'monitor', m: m && {
-        sess: m.sessions, nag: m.agents, rev: m.reviews, acpu: m.cpu_pct, amem: m.mem_mb,
-        mt: m.sys_total_mb, msys: m.sys_used_mb, ncpu: m.ncpu, load: 'n/a' } });
-      return;
-    }
-    if (IS_WIN) return this._startMonitor();   // resident sampler; it pushes lines on its own
-    if (this._monBusy) return;                 // never stack runs (a slow sample used to overlap the next)
-    this._monBusy = true;
-    execScript(path.join(DEV, '.wtd', 'hooks', 'monitor-stats.sh'), [], { timeout: 8000 }, (e, out) => {
-      this._monBusy = false;
-      if (!e) this._postMonitorLine(out);
-    });
+    const m = this.daemon && this.daemon.running ? this.daemon.metrics : null;
+    this.view.webview.postMessage({ type: 'monitor', m: m && {
+      sess: m.sessions, nag: m.agents, rev: m.reviews, acpu: m.cpu_pct, amem: m.mem_mb,
+      mt: m.sys_total_mb, msys: m.sys_used_mb, ncpu: m.ncpu, load: 'n/a' } });
   }
 
-  // Windows: one long-lived PowerShell sampling every MON_SECS, instead of a fresh bash → powershell →
-  // WMI cold start per sample (~7s each, on a 5s timer). Runs only while the panel is visible.
-  _startMonitor() {
-    if (this._monProc) return;
-    const ps1 = path.join(DEV, '.wtd', 'hooks', 'monitor-stats.ps1');
-    let buf = '';
-    try {
-      const proc = cp.spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-        '-File', ps1, '-Loop', String(MON_SECS)], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
-      this._monProc = proc;
-      proc.stdout.on('data', (d) => {
-        buf += d; let i;
-        while ((i = buf.indexOf('\n')) >= 0) { this._postMonitorLine(buf.slice(0, i)); buf = buf.slice(i + 1); }
-      });
-      const gone = () => { if (this._monProc === proc) this._monProc = null; };
-      proc.on('exit', gone); proc.on('error', gone);
-    } catch (e) { _dbg('monitor spawn failed: ' + ((e && e.stack) || e)); this._monProc = null; }
-  }
 
-  _stopMonitor() {
-    const p = this._monProc; this._monProc = null;
-    if (p) { try { p.kill(); } catch {} }
-  }
 
-  _roster(git) {
-    const wts = [];
-    const walk = (dir, slug, rel, depth) => {
-      if (depth > 4) return;
-      let isWt = false;
-      try { isWt = fs.existsSync(path.join(dir, '.git')); } catch {}
-      if (isWt) { wts.push({ slug, name: rel, dir }); return; }
-      let es = [];
-      try { es = fs.readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory()); } catch {}
-      for (const e of es) {
-        if (rel === '' && e.name === 'archive') continue;   // reserved: archived worktrees
-        walk(path.join(dir, e.name), slug, rel ? rel + '/' + e.name : e.name, depth + 1);
-      }
-    };
-    let slugs = [];
-    try { slugs = fs.readdirSync(path.join(DEV, 'worktrees'), { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name); } catch {}
-    for (const slug of slugs) walk(path.join(DEV, 'worktrees', slug), slug, '', 0);
 
-    this._gitCache = this._gitCache || new Map();   // dir → { dirty, ahead }
-    const cache = this._gitCache;
-    for (const k of cache.keys()) if (!wts.some((w) => w.dir === k)) cache.delete(k);
-    // git status only when asked (timer / explicit refresh) or for a worktree never seen; otherwise
-    // reuse the cache — a status flip only needs the sentinel file, not a working-tree scan.
-    const stale = wts.filter((w) => git || !cache.has(w.dir));
-    return this._gitStatusAll(stale).then(() => wts.map((w) => {
-      let status = '';
-      try { status = fs.readFileSync(path.join(w.dir, STATUS_FILE), 'utf8').trim(); } catch {}
-      const g = cache.get(w.dir) || { dirty: false, ahead: 0 };
-      return { slug: w.slug, name: w.name, status, dirty: g.dirty, ahead: g.ahead };
-    }));
-  }
-
-  // `git status` the given worktrees into _gitCache, at most GIT_CONCURRENCY at a time.
-  _gitStatusAll(wts) {
-    const queue = wts.slice();
-    const one = (w) => new Promise((res) => {
-      cp.execFile('git', ['-C', w.dir, 'status', '--porcelain', '--branch'], { timeout: 10000, windowsHide: true }, (e, out) => {
-        let dirty = false, ahead = 0;
-        if (!e && out) {
-          dirty = out.split('\n').slice(1).some((l) => l.trim().length > 0);
-          const m = out.match(/ahead (\d+)/);
-          if (m) ahead = parseInt(m[1], 10) || 0;
-        }
-        if (!e) this._gitCache.set(w.dir, { dirty, ahead });
-        else if (!this._gitCache.has(w.dir)) this._gitCache.set(w.dir, { dirty: false, ahead: 0 });
-        res();
-      });
-    });
-    const worker = () => queue.length ? one(queue.shift()).then(worker) : Promise.resolve();
-    return Promise.all(Array.from({ length: Math.min(GIT_CONCURRENCY, queue.length) }, worker));
-  }
 
   _html() {
     return `<!DOCTYPE html><html><head><meta charset="utf-8">
@@ -1825,39 +1522,7 @@ class DevSummaryProvider {
   }
 }
 
-// Map a terminal's shell pid → the tmux session attached on its tty (so clicking a SHA in that
-// terminal repaints THAT session's diff pane). The VSCode terminal's shell runs `agent` → `tmux
-// attach`, so the tmux client's tty == the terminal's pty.
-// the worktree directory backing a session = its commit pane's (@cpane) cwd (-s: search all the
-// session's panes, across windows). Used to resolve a footer button's file to an absolute path.
-function tmuxCpanePath(session) {
-  return new Promise((res) => {
-    cp.execFile('tmux', ['list-panes', '-s', '-t', session, '-F', '#{?#{@cpane},#{pane_current_path},}'],
-      { timeout: 3000 }, (e, out) => {
-        if (e) return res('');
-        res((out || '').split('\n').map((s) => s.trim()).find(Boolean) || '');
-      });
-  });
-}
 
-function tmuxSessionForPid(pid) {
-  return new Promise((res) => {
-    cp.exec('ps -o tty= -p ' + pid, (e, out) => {
-      const tty = (out || '').trim();                 // e.g. "pts/5"
-      if (!tty) return res('');
-      // space-separated (client_tty and session names contain no spaces). NOTE: tmux does NOT expand
-      // \t in -F, so a tab separator would come through literal and break parsing.
-      cp.exec("tmux list-clients -F '#{client_tty} #{session_name}'", (e2, out2) => {
-        for (const ln of (out2 || '').split('\n')) {
-          const i = ln.indexOf(' '); if (i < 0) continue;
-          const ct = ln.slice(0, i), sn = ln.slice(i + 1);
-          if (ct === '/dev/' + tty || ct.endsWith('/' + tty)) return res(sn);
-        }
-        res('');
-      });
-    });
-  });
-}
 
 // ---------------------------------------------------------------------------------------------------
 // New Session: account → repo → work item → branch name (→ group). A native multi-step Quick Pick.
@@ -1998,7 +1663,10 @@ async function newSessionWizard(dev) {
         { label: '$(add) Blank session', description: 'start from ' + (st.repo.default_branch || 'the default branch'), blank: true },
         { label: '$(git-branch) Existing branch…', description: 'check out a branch that already exists', existing: true },
       ];
-      const loaded = wtdJson(['issues', 'ls', slug]).then((r) => {
+      const noSource = !(st.repo.github && st.repo.github.issueSource) && !st.repo.github_detected;
+      const loaded = noSource ? Promise.resolve([...base, { label: '', kind: vscode.QuickPickItemKind.Separator },
+        { label: '$(link) Link this repo to GitHub issues…', description: 'Settings', settings: true }])
+        : wtdJson(['issues', 'ls', slug]).then((r) => {
         const src = r.source || {};
         const where = src.kind === 'project' ? 'Project #' + src.number + (src.offer && src.offer.length ? ' · ' + src.offer.join(', ') : '') : 'Issues · ' + (src.repo || '');
         const list = (r.items || []).map((i) => ({
@@ -2075,8 +1743,8 @@ async function launchSession(dev, st) {
     fs.writeFileSync(file, issueMarkdown(st.item, detail));
     args.push('--issue-file', file.replace(/\\/g, '/'));
   }
-  const t = vscode.window.createTerminal({ name, location: vscode.TerminalLocation.Editor, env: wtdTermEnv(), shellPath: bashShell(),
-    shellArgs: ['-lc', ['agent', slug, name].concat(args).map(shq).join(' ')] });
+  const t = vscode.window.createTerminal({ name, location: vscode.TerminalLocation.Editor, env: wtdTermEnv(), shellPath: wtdExe(),
+    shellArgs: ['agent', slug, name].concat(args) });
   dev._terms.set(dev._key(slug, name), t); dev._current = t;
   t.show();
   // after the worktree exists: join the chosen group, move the project card
@@ -2120,6 +1788,7 @@ function activate(context) {
   dev.daemon = new DaemonClient((kind, wt, prev) => {
     // folder colours: refresh just the worktree whose status changed
     if (kind === 'fleet' && wt && (!prev || prev.status !== wt.status)) provider.refresh(vscode.Uri.file(wt.path));
+    if (kind === 'fleet' && wt && dev.gitView) dev.gitView.onWorktree(wt, prev);
     if (settings && (kind === 'daemon' || kind === 'accounts')) settings.onDaemonChange();
     if (kind === 'messages') { dev._onMessages(); kick('fleet'); }
     kick(kind);
@@ -2142,6 +1811,8 @@ function activate(context) {
   reg('claudeStatus.openAssistant', () => dev.openOrFocusAssistant());
   reg('claudeStatus.openTerminal', () => dev.openOrFocusTerminal());
   context.subscriptions.push(vscode.window.registerWebviewViewProvider('claudeStatus.limit', dev));
+  dev.gitView = new GitView(context, dev, TESTS_FLAG);
+  { const k = dev._terminalKey(vscode.window.activeTerminal); if (k) { const j = k.indexOf('\x01'); dev.gitView.follow(k.slice(0, j), k.slice(j + 1)); } }
   // ctrl+v in a focused session → image-aware paste (see DevSummaryProvider.smartPaste)
   context.subscriptions.push(vscode.commands.registerCommand('claudeStatus.smartPaste', () => dev.smartPaste()));
 
@@ -2201,50 +1872,6 @@ function activate(context) {
   const statusRewatch = setInterval(watchStatus, 30000);   // re-arm after an error or a dev-root change
   context.subscriptions.push({ dispose: () => { clearInterval(statusRewatch); if (statusWatch) try { statusWatch.close(); } catch {} } });
 
-  // Clickable commit SHAs in terminal output (e.g. an agent's chat): click → repaint that session's
-  // diff pane with the commit, like double-clicking a SHA in the commit pane.
-  // footer buttons in the commit pane: ctrl+click opens the backing file as RAW TEXT. We do this in
-  // the extension (not via a terminal path link or a tmux mouse binding) because (a) VSCode swallows
-  // ctrl+click for its own link handling, so it never reaches tmux, and (b) the user maps `*.md` to
-  // the markdown PREVIEW editor — showTextDocument({preview:false}) opens the source, ignoring that.
-  const FILE_BUTTONS = [
-    ['view_pr_notes', 'pr-notes.md', 'Open PR notes as text'],
-    ['view_active_plan', '.claude/plans/active-plan.md', 'Open active plan as text'],
-  ];
-  // The SHA→diff-pane and footer-button links are a tmux-pane feature (they repaint a tmux diff
-  // pane / resolve the commit pane's cwd). There are no tmux panes on Windows, so skip registration
-  // there — VSCode's native SCM/diff and the Source Control view cover diffs instead.
-  if (!IS_WIN) context.subscriptions.push(vscode.window.registerTerminalLinkProvider({
-    provideTerminalLinks(ctx) {
-      const links = []; const re = /\b[0-9a-f]{7,40}\b/g; let m;
-      while ((m = re.exec(ctx.line)) !== null) {
-        links.push({ startIndex: m.index, length: m[0].length, tooltip: 'Show commit diff', data: { sha: m[0], terminal: ctx.terminal } });
-      }
-      for (const [tok, rel, tip] of FILE_BUTTONS) {
-        for (let i = ctx.line.indexOf(tok); i !== -1; i = ctx.line.indexOf(tok, i + tok.length)) {
-          links.push({ startIndex: i, length: tok.length, tooltip: tip, data: { file: rel, terminal: ctx.terminal } });
-        }
-      }
-      return links;
-    },
-    async handleTerminalLink(link) {
-      try {
-        const pid = await link.data.terminal.processId;
-        if (!pid) return;
-        const session = await tmuxSessionForPid(pid);
-        if (!session) { vscode.window.showInformationMessage('claude-status: no tmux session found for this terminal'); return; }
-        if (link.data.file) {
-          const wt = await tmuxCpanePath(session);
-          if (!wt) { vscode.window.showInformationMessage('claude-status: could not locate the worktree for this session'); return; }
-          const fp = path.join(wt, link.data.file);
-          if (!fs.existsSync(fp)) { vscode.window.showInformationMessage('claude-status: no file at ' + fp); return; }
-          await vscode.window.showTextDocument(vscode.Uri.file(fp), { preview: false });
-          return;
-        }
-        cp.execFile(path.join(DEV, '.wtd', 'hooks', 'diff-commit.sh'), [session, link.data.sha]);
-      } catch {}
-    },
-  }));
 }
 
 function deactivate() {}
