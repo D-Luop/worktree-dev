@@ -14,9 +14,9 @@ dev root. Each repo is stored once as a bare clone.
 └── .wtd/                             # hooks, skills, VS Code extension, installer, state
 ```
 
-## Platfo| `account ls|add|login|rm|use|usage|switch …` |s
+## Platforms
 
-| Platfo| `account ls|add|login|rm|use|usage|switch …` | | How it runs | Setup |
+| Platform | How it runs | Setup |
 |---|---|---|
 | **Windows** (primary) | `wtd.exe` is a background daemon plus CLI. Sessions are hosted in pseudo-consoles, so they survive VS Code reloads. The VS Code extension talks to the daemon over a named pipe. | [README-windows.md](README-windows.md) |
 | Linux / WSL / macOS | The original bash tooling: one tmux session per worktree, with diff and commit panes. The Windows panel features below aren't there yet; a Rust sibling of the daemon is planned. | `make install` |
@@ -37,14 +37,14 @@ extension's:
   the account or Codex badge, and pending agent messages. Click a row to open its session. Hover
   for actions: end session, archive, delete, switch account, *Commits & diffs*, and *Move to
   group…*.
-- **Account | `account ls|add|login|rm|use|usage|switch …` |:** 5-hour and 7-day limit bars for every Claude account, plus a pinned
+- **Account usage:** 5-hour and 7-day limit bars for every Claude account, plus a pinned
   **assistant** row (a durable session in the dev root that helps manage the fleet).
 - **Start/Stop daemon** toggle. A tray icon does the same and can open the VS Code window.
 
 **New Session** is in the Command Palette (`Ctrl+Shift+P`, or `Ctrl+P` then `>`), as
 *WorkTreeDev: New Session*:
 
-1. Pick the account, showing live | `account ls|add|login|rm|use|usage|switch …` | for Claude and Codex.
+1. Pick the account, showing live usage for Claude and Codex.
 2. Pick the repo.
 3. Pick an issue from the repo's GitHub Issues or from its Project board (yours first), or start a
    blank session or an existing branch.
@@ -53,21 +53,21 @@ extension's:
 The chosen issue is seeded into the worktree's `CLAUDE.md`. If the repo's Project source names a
 "started" column, the card moves there.
 
-**Worktree Changes** (Explorer) is a native tree of the foc| `account ls|add|login|rm|use|usage|switch …` |d worktree's uncommitted changes and
+**Worktree Changes** (Explorer) is a native tree of the focused worktree's uncommitted changes and
 its branch commits:
 
 - Files open in VS Code's own diff editor.
 - *Open All Changes* shows a whole commit in the multi-diff editor.
-- Commit SHAs printed in a session's te| `account ls|add|login|rm|use|usage|switch …` |inal are clickable.
+- Commit SHAs printed in a session's terminal are clickable.
 - A beaker toggle hides test files.
 
 **Settings** (gear icon, or *WorkTreeDev: Open Settings*):
 
-- | `account ls|add|login|rm|use|usage|switch …` |, clone or remove repos
+- add, clone or remove repos
 - link each repo to GitHub and choose its issue source, either **repo issues** or a **Project (v2)
   board**
 - log Claude and Codex accounts in and out
-- set which account each role | `account ls|add|login|rm|use|usage|switch …` |s (dev sessions, reviews, assistant)
+- set which account each role uses (dev sessions, reviews, assistant)
 - check installed tools and GitHub scopes, and the daemon and tray
 
 **Agent messaging:** agents can see the rest of the fleet through the `wtd` MCP server
@@ -88,18 +88,18 @@ On Windows: `wtd help`. Each command below also works as a bare name through its
 
 | Command | Does |
 |---|---|
-| `agent <slug> <name> [--from <ref>] [--account <a>] [--issue-file <md>] [--no-claude] [ref…]` | Create or open a worktree and its session. A new name creates a new branch, off `--from` or the default branch. An archived name offers to restore it. `ref` tokens (`api@develop`) | `account ls|add|login|rm|use|usage|switch …` | read-only context. |
-| `agent ls` · `agent stop <slug> <name>` · `agent | `account ls|add|login|rm|use|usage|switch …` | <slug> <name> [--branch] [--force] [-y]` | List · end a session but keep the worktree · remove the worktree (and the branch with `--branch`). |
+| `agent <slug> <name> [--from <ref>] [--account <a>] [--issue-file <md>] [--no-claude] [ref…]` | Create or open a worktree and its session. A new name creates a new branch, off `--from` or the default branch. An archived name offers to restore it. `ref` tokens (`api@develop`) add read-only context. |
+| `agent ls` · `agent stop <slug> <name>` · `agent rm <slug> <name> [--branch] [--force] [-y]` | List · end a session but keep the worktree · remove the worktree (and the branch with `--branch`). |
 | `agent done` · `agent pr` · `agent wip` | Run inside a worktree: mark it done, PR-ready, or back to working. |
 | `archive <slug> <name>` | Park a worktree under `worktrees/<slug>/archive/`. The branch and changes are kept. |
-| `assistant` · `close` | Open the fleet assistant · end the session this te| `account ls|add|login|rm|use|usage|switch …` |inal belongs to. |
-| `review <slug> <name> [--main] [--base <ref>] [--model <m>] [--deep] [--account <a>]` · `wt-review` | A separate read-only reviewer (a review pass plus a skeptic pass) writes reports to `<wt>/.claude/reviews/<ts>/`. **You** start reviews; agents never do. If it hits a | `account ls|add|login|rm|use|usage|switch …` | limit, it is rescheduled automatically. |
+| `assistant` · `close` | Open the fleet assistant · end the session this terminal belongs to. |
+| `review <slug> <name> [--main] [--base <ref>] [--model <m>] [--deep] [--account <a>]` · `wt-review` | A separate read-only reviewer (a review pass plus a skeptic pass) writes reports to `<wt>/.claude/reviews/<ts>/`. **You** start reviews; agents never do. If it hits a usage limit, it is rescheduled automatically. |
 | `ask <slug>[@<branch>] [question]` | Ask an expert about a repo. It is read-only, cites `file:line`, and won't guess. With no question it is interactive. |
-| `ref | `account ls|add|login|rm|use|usage|switch …` |\|sync\|rm\|ls …` | Read-only reference checkouts under `refs/`. |
-| `account ls|add|login|rm|use|usage|switch …` |\|add\|rm\|use\|usage\|switch …` | Claude and Codex logins, role defaults, live usage, moving a session to another account. |
-| `repo ls\|| `account ls|add|login|rm|use|usage|switch …` |\|rm\|fetch …` · `add-repo <slug> <url>` | Register and bare-clone repos (`repo add --new <slug>` creates a local-only repo). |
+| `ref add\|sync\|rm\|ls …` | Read-only reference checkouts under `refs/`. |
+| `account ls\|add\|login\|rm\|use\|usage\|switch …` | Claude and Codex logins, role defaults, live usage, moving a session to another account. |
+| `repo ls\|add\|rm\|fetch …` · `add-repo <slug> <url>` | Register and bare-clone repos (`repo add --new <slug>` creates a local-only repo). |
 | `preview <file.html> [label]` | Stage an HTML design mockup for the preview panel. |
-| `tokens` | Token | `account ls|add|login|rm|use|usage|switch …` | and estimated cost per worktree. |
+| `tokens` | Token usage and estimated cost per worktree. |
 | `ship [out]` | Package the toolkit (no secrets, worktrees or repos) for another machine. |
 | `wtd daemon start\|stop\|status` · `wtd tray` · `wtd ls` | Daemon control, tray icon, and a fleet listing. |
 
@@ -123,7 +123,7 @@ Each worktree's `CLAUDE.md` is seeded with the team's working rules:
 - count the whole repo before calling something "standard"
 - keep PR notes terse
 
-No AI attribution is | `account ls|add|login|rm|use|usage|switch …` |ed to commits or PRs: a `commit-msg` hook strips it.
+No AI attribution is added to commits or PRs: a `commit-msg` hook strips it.
 
 ## Session continuity
 
@@ -134,11 +134,11 @@ the daemon is up, and reopening the row re-attaches to it.
 
 ## How it's built
 
-- **`wtd.exe`** (Rust): one daemon per | `account ls|add|login|rm|use|usage|switch …` |r, reached over the named pipe `\\.\pipe\wtd-<user>`. It
+- **`wtd.exe`** (Rust): one daemon per user, reached over the named pipe `\\.\pipe\wtd-<user>`. It
   provides:
   - the status machine, fed by Claude and Codex hooks (`wtd hook <event>`)
   - git state, driven by file watchers
-  - | `account ls|add|login|rm|use|usage|switch …` | polling and metrics
+  - usage polling and metrics
   - ConPTY session hosting inside kill-on-close Job Objects
   - the store for groups, messages and scheduled jobs (`.wtd/state/store.json`)
   - the MCP server
@@ -153,7 +153,8 @@ the daemon is up, and reopening the row re-attaches to it.
   own.
 - **Claude Code / Codex:** run interactively in each session, and headless for review, skeptic and
   ask. Status hooks come from `~/.claude/settings.json` (and the account's `CODEX_HOME/hooks.json`),
-  skills from `.wtd/templates/.claude/skills`, and subagent definitions for the reviewer, skeptic and expert.
+  skills from `.wtd/templates/.claude/skills`, and subagent definitions for the reviewer, skeptic
+  and expert.
 - **Linux / WSL / macOS:** bash and tmux (`.wtd/scripts`, `.wtd/hooks`), with delta-rendered diff
   and commit panes.
 
