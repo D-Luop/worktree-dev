@@ -52,8 +52,18 @@ if grep -q '>>> agent worktree launcher >>>' "$BASHRC" 2>/dev/null; then
   sed '/# >>> agent worktree launcher >>>/,/# <<< agent worktree launcher <<</d' "$BASHRC" > "$tmp" && mv "$tmp" "$BASHRC"
   echo "    removed obsolete ~/.bashrc agent() function"
 fi
-if ! printf '%s' "$PATH" | tr ':' '\n' | grep -qxF "$HOME/.local/bin"; then
-  echo "    NOTE: ~/.local/bin not on PATH in this shell; ~/.profile adds it for login shells."
+# Put ~/.local/bin on PATH for every bash: ~/.bashrc exports it, and ~/.bash_profile (what a login
+# shell reads — Git Bash and VSCode's bash terminals are login shells) sources ~/.bashrc. Without this
+# a fresh machine fails `agent` / `assistant` with "command not found".
+if ! grep -q 'wtd: ~/.local/bin on PATH' "$BASHRC" 2>/dev/null; then
+  { [ -s "$BASHRC" ] && [ -n "$(tail -c1 "$BASHRC")" ] && printf '\n'
+    printf '# wtd: ~/.local/bin on PATH (worktree-dev commands: agent, assistant, review, …)\n'
+    printf 'case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac\n'; } >> "$BASHRC"
+  echo "    added ~/.local/bin to PATH in ~/.bashrc"
+fi
+if ! grep -qs 'bashrc' "$HOME/.bash_profile"; then
+  printf '# load ~/.bashrc in login shells too\n[ -f ~/.bashrc ] && . ~/.bashrc\n' >> "$HOME/.bash_profile"
+  echo "    ~/.bash_profile now sources ~/.bashrc"
 fi
 # bash tab-completion for agent/archive/review (slugs + branch/worktree names). bash-completion
 # auto-sources ~/.local/share/bash-completion/completions/<cmd> on first <cmd><TAB> in a new shell.

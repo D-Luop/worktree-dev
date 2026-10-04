@@ -122,6 +122,12 @@ function registeredSlugs() {
 // Non-login `bash -c`: a login shell re-sources the whole profile on every call (~0.5-0.8s on Windows).
 // Git's bin\bash.exe launcher already puts /usr/bin + /mingw64/bin on PATH; we add ~/.local/bin.
 const LOCAL_BIN = path.join(HOME, '.local', 'bin');
+// env for the bash terminals we open (sessions, assistant, dev shell): the wtd commands live in
+// ~/.local/bin, which a fresh Git Bash login shell doesn't have on PATH unless the user's profile adds it.
+function wtdTermEnv() {
+  const pk = Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
+  return { [pk]: LOCAL_BIN + path.delimiter + (process.env[pk] || '') };
+}
 function execScript(file, args, opts, cb) {
   const done = typeof cb === 'function' ? cb : () => {};
   try {
@@ -408,7 +414,7 @@ class DevSummaryProvider {
       disposeDeadTerminals(name);   // reap reload-orphaned dead tabs so they can't be focused instead
       const nm = name;   // tab = worktree name only (no slug, no status glyph — status shows in the roster)
       t = vscode.window.createTerminal({ name: nm, location: vscode.TerminalLocation.Editor,
-        shellPath: bashShell(), shellArgs: ['-lc', 'agent ' + shq(slug) + ' ' + shq(name)] });
+        env: wtdTermEnv(), shellPath: bashShell(), shellArgs: ['-lc', 'agent ' + shq(slug) + ' ' + shq(name)] });
       t.show();
     }
     this._terms.set(key, t);
@@ -431,7 +437,7 @@ class DevSummaryProvider {
     else {
       disposeDeadTerminals(ASST_NAME);
       t = vscode.window.createTerminal({ name: ASST_NAME, location: vscode.TerminalLocation.Editor,
-        shellPath: bashShell(), shellArgs: ['-lc', 'assistant'] });
+        env: wtdTermEnv(), shellPath: bashShell(), shellArgs: ['-lc', 'assistant'] });
       t.show();
     }
     this._asstTerm = t; this._current = t;
@@ -448,7 +454,7 @@ class DevSummaryProvider {
     else {
       disposeDeadTerminals(TERM_NAME);
       t = vscode.window.createTerminal({ name: TERM_NAME, location: vscode.TerminalLocation.Editor,
-        shellPath: bashShell(), shellArgs: ['-l', '-i'] });
+        env: wtdTermEnv(), shellPath: bashShell(), shellArgs: ['-l', '-i'] });
       t.show();
     }
     this._term = t; this._current = t;
@@ -771,7 +777,7 @@ class DevSummaryProvider {
       const launch = () => {
         const nm = name || slug || 'agent';   // tab = the <name> token (no slug)
         const t = vscode.window.createTerminal({ name: nm, location: vscode.TerminalLocation.Editor,
-          shellPath: bashShell(), shellArgs: ['-lc', 'agent ' + raw] });
+          env: wtdTermEnv(), shellPath: bashShell(), shellArgs: ['-lc', 'agent ' + raw] });
         t.show();
         setTimeout(() => this._postRoster(), 2500);
       };
