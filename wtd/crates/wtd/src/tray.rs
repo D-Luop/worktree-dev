@@ -125,23 +125,30 @@ fn watch_daemon(hwnd: isize) {
         if let Ok(Some(mut c)) = Client::connect() {
             if c.hello("tray").is_ok() && c.request(method::SUBSCRIBE, serde_json::json!({})).is_ok() {
                 let mut wts: std::collections::BTreeMap<String, Worktree> = Default::default();
-                let summarize = |wts: &std::collections::BTreeMap<String, Worktree>| View {
+                let mut approvals: u32 = 0; // agent messages waiting for the user's approval
+                let summarize = |wts: &std::collections::BTreeMap<String, Worktree>, approvals: u32| View {
                     running: true,
                     sessions: wts.values().filter(|w| w.live).count() as u32,
-                    need_you: wts.values().filter(|w| w.status == Status::Input).count() as u32,
+                    need_you: wts.values().filter(|w| w.status == Status::Input).count() as u32 + approvals,
                     hosted: wts.values().filter(|w| w.hosted).count() as u32,
                 };
                 loop {
                     match c.read() {
                         Ok(Some(ServerLine::Push(p))) => {
                             match p {
-                                Push::Snapshot { snapshot, .. } => wts = snapshot.worktrees.into_iter().map(|w| (w.id.clone(), w)).collect(),
+                                Push::Snapshot { snapshot, .. } => {
+                                    approvals = snapshot.messages.iter().filter(|m| m.state == wtd_core::model::MessageState::Pending).count() as u32;
+                                    wts = snapshot.worktrees.into_iter().map(|w| (w.id.clone(), w)).collect();
+                                }
+                                Push::Messages { messages, .. } => {
+                                    approvals = messages.iter().filter(|m| m.state == wtd_core::model::MessageState::Pending).count() as u32;
+                                }
                                 Push::Upsert { worktree, .. } => { wts.insert(worktree.id.clone(), worktree); }
                                 Push::Remove { id, .. } => { wts.remove(&id); }
                                 Push::Shutdown => break,
                                 _ => continue,
                             }
-                            post(summarize(&wts));
+                            post(summarize(&wts, approvals));
                         }
                         Ok(Some(_)) => continue,
                         _ => break,

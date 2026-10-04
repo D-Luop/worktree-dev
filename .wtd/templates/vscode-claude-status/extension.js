@@ -822,6 +822,47 @@ class DevSummaryProvider {
     });
   }
 
+  // Agent messages awaiting the user's approval: a notification per new request; Review shows the full
+  // text with Send / Edit & send / Deny. Nothing reaches the target agent without one of those clicks.
+  _onMessages() {
+    this._notifiedMsgs = this._notifiedMsgs || new Set();
+    for (const m of (this.daemon && this.daemon.messages) || []) {
+      if (m.state !== 'pending' || this._notifiedMsgs.has(m.id)) continue;
+      this._notifiedMsgs.add(m.id);
+      const first = (m.body.split('\n').find((l) => l.trim()) || '').slice(0, 90);
+      vscode.window.showInformationMessage('$(comment-discussion) ' + m.from + ' wants to message ' + m.to + ': “' + first + (m.body.length > first.length ? '…' : '') + '”', 'Review', 'Deny')
+        .then((ch) => { if (ch === 'Review') this.reviewMessage(m.id); else if (ch === 'Deny') this._decide(m.id, false); });
+    }
+  }
+
+  _decide(id, approve, body) {
+    return this.daemon.request('message.decide', Object.assign({ id, approve }, body ? { body } : {}))
+      .then(() => vscode.window.setStatusBarMessage(approve ? '$(check) Message #' + id + ' approved — delivered when the target finishes its turn' : '$(x) Message #' + id + ' denied', 5000),
+            (e) => vscode.window.showErrorMessage('Message #' + id + ': ' + e.message));
+  }
+
+  async reviewMessage(id) {
+    const m = ((this.daemon && this.daemon.messages) || []).find((x) => x.id === id && x.state === 'pending');
+    if (!m) return;
+    const ch = await vscode.window.showInformationMessage('Message from ' + m.from + ' to ' + m.to, { modal: true,
+      detail: m.body + '\n\n— It is delivered to ' + m.to + '’s agent as a prompt when its current turn ends.' }, 'Send', 'Edit & send', 'Deny');
+    if (ch === 'Send') return this._decide(id, true);
+    if (ch === 'Deny') return this._decide(id, false);
+    if (ch === 'Edit & send') {
+      const doc = await vscode.workspace.openTextDocument({ content: m.body, language: 'markdown' });
+      await vscode.window.showTextDocument(doc, { preview: false });
+      const go = await vscode.window.showInformationMessage('Edit message #' + id + ' to ' + m.to + ' in the editor, then send it.', 'Send edited', 'Deny');
+      if (go === 'Send edited') { await this._decide(id, true, doc.getText()); }
+      else if (go === 'Deny') { await this._decide(id, false); }
+      if (vscode.window.activeTextEditor && vscode.window.activeTextEditor.document === doc)
+        await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+    }
+  }
+
+  async reviewMessagesFrom(worktree) {
+    for (const m of ((this.daemon && this.daemon.messages) || []).filter((x) => x.state === 'pending' && x.from === worktree)) await this.reviewMessage(m.id);
+  }
+
   // user-defined roster groups (stored by the daemon). Names come from native input boxes.
   async _groupOp(m) {
     const d = this.daemon;
@@ -968,6 +1009,8 @@ class DevSummaryProvider {
         this.moreMenu();
       } else if (m.cmd && m.cmd.startsWith('group')) {
         this._groupOp(m).catch((e) => vscode.window.showErrorMessage('Group: ' + e.message));
+      } else if (m.cmd === 'reviewMessages' && m.worktree) {
+        this.reviewMessagesFrom(m.worktree);
       } else if (m.cmd === 'settings') {
         if (this._openSettings) this._openSettings();
       } else if (m.cmd === 'newAssistant') {
@@ -1184,11 +1227,13 @@ class DevSummaryProvider {
   // daemon mode: rows straight from the pushed fleet state (no disk scan, no git, no registry reads)
   _daemonRows() {
     const rows = []; const live = new Set();
+    const pendingFrom = {};
+    for (const m of this.daemon.messages || []) if (m.state === 'pending') pendingFrom[m.from] = (pendingFrom[m.from] || 0) + 1;
     for (const w of this.daemon.wts.values()) {
       if (w.kind === 'dev') continue;   // the assistant has its own pinned row
       const slug = w.slug, name = w.name;
       rows.push({ id: w.id, group: w.group || null, slug, name, status: w.status === 'none' ? '' : w.status, dirty: !!(w.git && w.git.dirty), ahead: (w.git && w.git.ahead) || 0,
-                  branch: (w.git && w.git.branch) || '', plan: w.plan_title || '', account: w.account || '', live: !!w.live, program: w.program || '' });
+                  branch: (w.git && w.git.branch) || '', plan: w.plan_title || '', account: w.account || '', live: !!w.live, program: w.program || '', msgPending: pendingFrom[w.id] || 0 });
       if (w.live) live.add(slug + '-' + name);
     }
     return { rows, live };
@@ -1480,6 +1525,8 @@ class DevSummaryProvider {
   .gbody{min-height:4px;border-radius:3px;}
   .gempty{font-size:12px;color:var(--vscode-descriptionForeground);padding:2px 0 4px 24px;font-style:italic;}
   .row.dragging{opacity:.4;}
+  .msgp{flex:none;color:var(--vscode-editorWarning-foreground,#d2a000);padding:2px;border-radius:3px;}
+  .msgp:hover{background:var(--vscode-toolbar-hoverBackground);}
   .row.wt:not(.live) .st{opacity:.55;} .row.wt:not(.live) .nm{color:var(--vscode-descriptionForeground);}
   .row.unread{box-shadow:inset 2px 0 0 var(--vscode-charts-yellow,#d2a000);background:rgba(255,216,61,.08);}
   .row.unread .nm{font-weight:600;color:var(--vscode-foreground);}
@@ -1632,6 +1679,7 @@ class DevSummaryProvider {
     return '<div class="row wt'+(w.active?' live':'')+(w.unread?' unread':'')+(w.current?' current':'')+'" data-id="'+esc(w.id||'')+'" data-slug="'+esc(w.slug)+'" data-name="'+esc(w.name)+'" data-glyph="'+g+'" title="'+esc(tip)+'"'+(drag?' draggable="true"':'')+'>'
       +'<span class="st" style="color:'+s[3]+'">'+ico(s[2])+'</span>'
       +'<span class="nm">'+esc(w.name)+'</span>'+(groupsData?'<span class="rb" title="repository">'+esc(w.slug)+'</span>':'')+acct
+      +(w.msgPending?'<i class="codicon codicon-comment-unresolved msgp" title="'+w.msgPending+' message'+(w.msgPending===1?'':'s')+' from this agent awaiting your approval — click to review"></i>':'')
       +'<span class="git">'+git+'</span>'
       +'<span class="acts">'
       +'<i class="codicon codicon-diff dif" title="Commits & diffs"></i>'
@@ -1688,6 +1736,7 @@ class DevSummaryProvider {
     el.querySelectorAll('.wt').forEach(x=>x.onclick=()=>vsc.postMessage({cmd:'open',slug:x.dataset.slug,name:x.dataset.name,glyph:x.dataset.glyph}));
     on('.arch','archive'); on('.del','delete'); on('.term','terminate'); on('.unr','markunread'); on('.acc','switchAccount'); on('.dif','openCommits');
     el.querySelectorAll('.mv').forEach(x=>x.onclick=(ev)=>{ ev.stopPropagation(); vsc.postMessage({cmd:'groupMove', worktree:x.closest('.wt').dataset.id}); });
+    el.querySelectorAll('.msgp').forEach(x=>x.onclick=(ev)=>{ ev.stopPropagation(); vsc.postMessage({cmd:'reviewMessages', worktree:x.closest('.wt').dataset.id}); });
   }
 
   // group headers: collapse, rename, delete; drag rows onto a group, drag headers to reorder
@@ -2072,6 +2121,7 @@ function activate(context) {
     // folder colours: refresh just the worktree whose status changed
     if (kind === 'fleet' && wt && (!prev || prev.status !== wt.status)) provider.refresh(vscode.Uri.file(wt.path));
     if (settings && (kind === 'daemon' || kind === 'accounts')) settings.onDaemonChange();
+    if (kind === 'messages') { dev._onMessages(); kick('fleet'); }
     kick(kind);
   });
   settings = new SettingsPanel({

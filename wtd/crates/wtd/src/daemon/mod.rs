@@ -6,6 +6,7 @@
 pub mod git;
 pub mod scan;
 mod host;
+mod messages;
 mod pty;
 mod store;
 mod usage;
@@ -426,6 +427,9 @@ async fn dispatch(d: &Arc<Daemon>, conn: u64, req: &Request, out: &mpsc::Unbound
                     None => false,
                 }
             };
+            if known && h.status == wtd_core::status::Status::Input {
+                messages::deliver_next(d, &id);
+            }
             if !known {
                 rescan(d).await; // a worktree we haven't seen yet (just created)
             }
@@ -558,6 +562,9 @@ async fn dispatch(d: &Arc<Daemon>, conn: u64, req: &Request, out: &mpsc::Unbound
             d.apply_membership(&mut inner, &wt);
             Ok(json!({}))
         }
+        method::MESSAGE_SEND => messages::send(d, p),
+        method::MESSAGE_DECIDE => messages::decide(d, p),
+        method::MESSAGE_LIST => messages::list(d, p),
         m => bail!("unknown method '{m}'"),
     }
 }

@@ -130,6 +130,13 @@ pub fn open(d: &Arc<Daemon>, method: &str, p: &Value) -> Result<(Arc<Hosted>, Va
         });
         d.refresh_liveness(&mut inner, &wt);
     }
+    // queued messages for this worktree: deliver once the agent is up and waiting (not mid-boot)
+    let d_msg = d.clone();
+    let wt_msg = wt.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        super::messages::deliver_next(&d_msg, &wt_msg);
+    });
     Ok((hosted, json!({ "session": id, "worktree": wt, "created": true }), true))
 }
 
