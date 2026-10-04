@@ -1188,7 +1188,7 @@ class DevSummaryProvider {
       if (w.kind === 'dev') continue;   // the assistant has its own pinned row
       const slug = w.slug, name = w.name;
       rows.push({ id: w.id, group: w.group || null, slug, name, status: w.status === 'none' ? '' : w.status, dirty: !!(w.git && w.git.dirty), ahead: (w.git && w.git.ahead) || 0,
-                  branch: (w.git && w.git.branch) || '', plan: w.plan_title || '', account: w.account || '', live: !!w.live });
+                  branch: (w.git && w.git.branch) || '', plan: w.plan_title || '', account: w.account || '', live: !!w.live, program: w.program || '' });
       if (w.live) live.add(slug + '-' + name);
     }
     return { rows, live };
@@ -1616,7 +1616,9 @@ class DevSummaryProvider {
     const s=SMAP[w.status]||['','No status','circle-outline','var(--vscode-descriptionForeground)'];
     const g=GLYPH[w.status]||GLYPH.stopped;
     const git=(w.ahead?'<span class="ahead" title="'+w.ahead+' unpushed commit(s)">↑'+w.ahead+'</span>':'')+(w.dirty?'<span class="dirty" title="uncommitted changes">●</span>':'');
-    const acct = (multiAcct && w.active && w.account && w.account!=='default') ? '<span class="badge" title="Claude account">'+esc(w.account)+'</span>' : '';
+    const acctName = (w.account||'').replace(/^codex:/,'');
+    const acct = (w.active && w.program==='codex') ? '<span class="badge" title="Codex session'+(acctName&&acctName!=='default'?' · account '+esc(acctName):'')+'">codex'+(acctName&&acctName!=='default'?' · '+esc(acctName):'')+'</span>'
+      : (multiAcct && w.active && w.account && w.account!=='default') ? '<span class="badge" title="Claude account">'+esc(w.account)+'</span>' : '';
     const tip = w.slug+'/'+w.name+' — '+s[1]+(w.active?' · live session':'')+(w.branch?' · '+w.branch:'')+(w.plan?'\\n'+w.plan:'')+'\\nclick to open';
     const drag = groupsData && canEditGroups;
     return '<div class="row wt'+(w.active?' live':'')+(w.unread?' unread':'')+(w.current?' current':'')+'" data-id="'+esc(w.id||'')+'" data-slug="'+esc(w.slug)+'" data-name="'+esc(w.name)+'" data-glyph="'+g+'" title="'+esc(tip)+'"'+(drag?' draggable="true"':'')+'>'

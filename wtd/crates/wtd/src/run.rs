@@ -37,8 +37,18 @@ pub fn main(args: &[String]) -> Result<i32> {
     };
     win::ignore_ctrl_c_in_this_process();
 
-    let exe = resolve_program(program);
-    let mut child = Command::new(&exe).args(rest).spawn().with_context(|| format!("starting {}", exe.display()))?;
+    let (exe, prefix) = command_for(program);
+    // the program asked for (`codex`), not the file that runs it (codex's npm shim runs node.exe)
+    let stem = std::path::Path::new(program).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
+    if stem == "codex" {
+        // status hooks, fleet MCP server and project trust for this account's CODEX_HOME
+        if let (Some(home), Ok(cwd)) = (crate::codex::home(), std::env::current_dir()) {
+            if let Err(e) = crate::codex::prepare(&home, &cwd) {
+                eprintln!("wtd run: preparing Codex ({}): {e:#}", home.display());
+            }
+        }
+    }
+    let mut child = Command::new(&exe).args(&prefix).args(rest).spawn().with_context(|| format!("starting {}", exe.display()))?;
 
     let params = SessionParams {
         dir: std::env::current_dir()?.to_string_lossy().into(),
@@ -46,7 +56,7 @@ pub fn main(args: &[String]) -> Result<i32> {
         account,
         job: if job.is_some() { job_name } else { String::new() },
         pid: child.id(),
-        program: exe.file_stem().map(|s| s.to_string_lossy().to_lowercase()),
+        program: Some(stem).filter(|s| !s.is_empty()),
     };
     let job_for_thread = job.clone();
     std::thread::spawn(move || hold_registration(params, job_for_thread));
@@ -101,14 +111,32 @@ pub fn resolve_program(program: &str) -> PathBuf {
     p
 }
 
+/// How to start `program`: (executable, leading args). npm shims that run a `.js` file become
+/// `node <script>` (Codex), ones that point at a native `.exe` run it directly (Claude).
+pub fn command_for(program: &str) -> (PathBuf, Vec<PathBuf>) {
+    let t = resolve_program(program);
+    if t.extension().is_some_and(|e| e.eq_ignore_ascii_case("js")) {
+        let node = t
+            .ancestors()
+            .find_map(|d| Some(d.join("node.exe")).filter(|n| n.is_file())) // npm's own node, if bundled
+            .unwrap_or_else(|| resolve_program("node"));
+        return (node, vec![t]);
+    }
+    (t, vec![])
+}
+
+/// The `"%dp0%\…"` target an npm `.cmd` shim launches: a native `.exe` or a node `.js` script.
 fn cmd_shim_target(cmd: &Path) -> Option<PathBuf> {
     let text = std::fs::read_to_string(cmd).ok()?;
     let dir = cmd.parent()?;
     for line in text.lines() {
-        // "%dp0%\node_modules\…\claude.exe"   %*
-        if let Some(rest) = line.trim().strip_prefix("\"%dp0%\\") {
+        // claude: "%dp0%\node_modules\…\claude.exe"   %*      codex: … "%_prog%"  "%dp0%\node_modules\…\codex.js" %*
+        let mut rest = line;
+        while let Some(i) = rest.find("\"%dp0%\\") {
+            rest = &rest[i + 7..];
             let rel = rest.split('"').next()?;
-            if rel.to_ascii_lowercase().ends_with(".exe") {
+            let lower = rel.to_ascii_lowercase();
+            if lower.ends_with(".exe") || lower.ends_with(".js") {
                 let t = dir.join(rel);
                 if t.is_file() {
                     return Some(t);

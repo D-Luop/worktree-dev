@@ -2,6 +2,7 @@
 //! Two binaries share this library: `wtd.exe` (console CLI) and `wtd-tray.exe` (windowless tray).
 
 pub mod client;
+pub mod codex;
 pub mod daemon;
 pub mod hook;
 pub mod issues;

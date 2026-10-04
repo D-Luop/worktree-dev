@@ -279,6 +279,16 @@ wtd_session_run_claude() {
   fi
   [ -n "$ccdir" ] && export CLAUDE_CONFIG_DIR="$ccdir"
 
+  # Codex sessions: resume this worktree's last Codex conversation (`resume --last` is filtered to the
+  # current folder) once one exists; the marker records that a Codex session ran here.
+  if [ "${WTD_PROVIDER:-claude}" = codex ]; then
+    local cmark; cmark="$(wtd_session_idsdir)/${session//\//__}.codex"
+    mkdir -p "$(wtd_session_idsdir)"
+    if [ -f "$cmark" ]; then wtd_exec_agent codex resume --last; fi
+    : > "$cmark"
+    wtd_exec_agent codex
+  fi
+
   # Per-worktree session continuity: a durable id makes reopening this worktree RESUME its Claude
   # conversation instead of starting cold — including after a reboot (the process dies, the transcript
   # doesn't). First open mints an id and starts with --session-id; later opens pass --resume once that

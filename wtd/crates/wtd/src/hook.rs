@@ -16,14 +16,9 @@ struct HookInput {
     #[serde(default)]
     cwd: Option<String>,
     #[serde(default)]
-    tool_input: Option<ToolInput>,
+    tool_input: Option<serde_json::Value>,
     #[serde(default)]
     tool_response: Option<ToolResponse>,
-}
-#[derive(Deserialize, Default)]
-struct ToolInput {
-    #[serde(default)]
-    file_path: Option<String>,
 }
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -52,11 +47,20 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             input = serde_json::from_str(&buf).unwrap_or_default();
         }
     }
-    let path = input
+    // Claude: tool_input.file_path. Codex edits through apply_patch: the path is inside the patch.
+    let mut path = input
         .tool_input
-        .and_then(|t| t.file_path)
+        .as_ref()
+        .and_then(|t| t.get("file_path").and_then(|p| p.as_str()).map(String::from))
         .or_else(|| input.tool_response.and_then(|t| t.file_path))
+        .or_else(|| input.tool_input.as_ref().and_then(crate::codex::patched_path))
         .unwrap_or_default();
+    // relative paths (Codex patches) → absolute, so the scratch-file checks see `/pr-notes.md` etc.
+    if !path.is_empty() && !std::path::Path::new(&path).is_absolute() && !path.starts_with('/') {
+        if let Some(c) = input.cwd.as_deref() {
+            path = format!("{}/{}", c.trim_end_matches(['/', '\\']), path);
+        }
+    }
     let Some(ev) = Event::from_word(word, &path) else { anyhow::bail!("unknown event '{word}'") };
 
     let dir: PathBuf = std::env::var("CLAUDE_PROJECT_DIR")

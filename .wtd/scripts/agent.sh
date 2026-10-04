@@ -220,11 +220,27 @@ done
 bind_session="${repo}-${name}"; bind_session="${bind_session//[.:]/-}"
 bound_acct="$(wtd_session_account_get "$bind_session")"
 ccdir=""; account_label="$account"
-if [ "$account" = default ]; then
+# A Codex account (`codex:<name>`) — from --account, this session's binding, or the dev role — runs
+# `codex` with CODEX_HOME set to that login instead of claude. Claude routing below is skipped.
+provider=claude; codex_home=""
+cand="$account"; [ -z "$cand" ] && cand="$bound_acct"; [ -z "$cand" ] && cand="$(account_name_for_role dev)"
+case "$cand" in
+  codex:*)
+    provider=codex; cname="${cand#codex:}"
+    if [ "$cname" = default ]; then codex_home="$HOME/.codex"; else codex_home="$HOME/.codex-accounts/$cname"; fi
+    [ -d "$codex_home" ] || [ "$cname" = default ] || { echo "error: no Codex account '$cname' (add it in Settings → Accounts)"; exit 1; }
+    command -v codex >/dev/null 2>&1 || { echo "error: the Codex CLI isn't installed (npm i -g @openai/codex)"; exit 1; }
+    account="codex-skip"; account_label="codex:$cname" ;;
+esac
+if [ "$provider" = codex ]; then
+  : # CODEX_HOME is exported at launch
+elif [ "$account" = default ]; then
   wtd_session_account_set "$bind_session" default    # explicitly the default login (~/.claude), over any role
   bound_acct=default; account=""
 fi
-if [ -n "$account" ]; then
+if [ "$provider" = codex ]; then
+  :
+elif [ -n "$account" ]; then
   ccdir="$(account_dir_for_name "$account")"
   [ -n "$ccdir" ] || { echo "error: no Claude account '$account'."; echo "       create it with:  account add $account"; exit 1; }
 elif [ -n "$bound_acct" ] && [ "$bound_acct" != default ]; then
@@ -470,6 +486,8 @@ if [ "$(wtd_session_backend)" != tmux ]; then
   # wtd_session_run_claude registers the session, exports WTD_SESSION, cd's to the worktree, and
   # exec's claude (replacing this shell). The trap it sets deregisters on exit so liveness is accurate.
   export WTD_ACCOUNT="${account_label:-}"   # shown on the roster row (wtd run reports it to the daemon)
+  export WTD_PROVIDER="$provider"
+  [ "$provider" = codex ] && export CODEX_HOME="$codex_home"
   wtd_session_run_claude "$session" "$repo" "$name" "$wt" "$ccdir" "$pmode" "$launch_claude"
   exit 0   # safety net: wtd_session_run_claude exec's, so we never get here
 fi

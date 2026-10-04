@@ -352,7 +352,7 @@ function settingsHtml() {
     const f=ui.forms['acct:+']||(ui.forms['acct:+']={provider:'claude'});
     let h='<h3>'+ico('sparkle')+' Claude</h3>'+claude.map(accountCard).join('');
     h+='<h3>'+ico('symbol-misc')+' Codex</h3>';
-    if(!D.env.codex) h+='<div class="note warn">'+ico('info')+'<div>The Codex CLI isn’t installed. <a data-act="installCodex">Install it</a> (npm i -g @openai/codex), then log in below. Running Codex sessions arrives with the New Session flow.</div></div>';
+    if(!D.env.codex) h+='<div class="note warn">'+ico('info')+'<div>The Codex CLI isn’t installed. <a data-act="installCodex">Install it</a> (npm i -g @openai/codex), then log in below. Then pick a Codex account in New Session.</div></div>';
     h+=codex.map(accountCard).join('');
     h+='<div class="card"><div class="hd"><div class="ico">'+ico('person-add')+'</div><div class="main"><div class="name">Add an account</div>'
       +'<div class="sub">Each account is its own login with separate usage and billing.</div></div></div><div class="body">'
@@ -372,10 +372,9 @@ function settingsHtml() {
       + accts.map(a=>{ const v=a.provider+':'+a.name; const dis=(a.provider==='codex'&&!allowCodex)||(!a.logged_in&&v!==cur(role));
           return '<option value="'+esc(v)+'"'+(v===cur(role)?' selected':'')+(dis?' disabled':'')+'>'+(a.provider==='codex'?'Codex':'Claude')+' · '+esc(a.name)+(a.email?' ('+esc(a.email)+')':'')+(a.logged_in?'':' — not logged in')+'</option>'; }).join('')
       + '</select><div class="help">'+help+'</div></div></div>';
-    return sel('dev','New sessions','The login new agent sessions run under (you can still pick another per session).',false)
+    return sel('dev','New sessions','The login new agent sessions run under — Claude or Codex (you can still pick another per session).',true)
       + sel('review','Reviews','The reviewer and skeptic bill here.',false)
-      + sel('assistant','Assistant','The fleet assistant session.',false)
-      + '<div class="help" style="margin-left:162px">Codex accounts become selectable for sessions when Codex sessions ship.</div>';
+      + sel('assistant','Assistant','The fleet assistant session.',false);
   }
 
   // ---------- GitHub ----------
