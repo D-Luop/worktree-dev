@@ -118,10 +118,14 @@ fn rm(dev: &Path, args: &[String]) -> Result<i32> {
     }
     let log = match Client::connect()? {
         // the daemon owns it: stops the session, releases its file watch, then removes
-        Some(mut c) => {
-            let v = c.request(method::WORKTREE_REMOVE, json!({ "id": format!("{slug}/{name}"), "force": force, "branch": del_branch }))?;
-            serde_json::from_value::<Vec<String>>(v["log"].clone()).unwrap_or_default()
-        }
+        Some(mut c) => match c.request(method::WORKTREE_REMOVE, json!({ "id": format!("{slug}/{name}"), "force": force, "branch": del_branch })) {
+            Ok(v) => serde_json::from_value::<Vec<String>>(v["log"].clone()).unwrap_or_default(),
+            Err(e) if older_daemon(&e) => {
+                stop_sessions(&format!("{slug}/{name}"));
+                wt::remove(dev, slug, name, force, del_branch)?
+            }
+            Err(e) => return Err(e),
+        },
         None => wt::remove(dev, slug, name, force, del_branch)?,
     };
     for l in log {
@@ -131,12 +135,25 @@ fn rm(dev: &Path, args: &[String]) -> Result<i32> {
     Ok(0)
 }
 
+/// A daemon started from an older wtd.exe (it keeps running across installs) doesn't know the newer
+/// methods. It holds no file watches either, so doing the operation here is safe.
+fn older_daemon(e: &anyhow::Error) -> bool {
+    e.to_string().contains("unknown method")
+}
+
 pub fn archive_main(args: &[String]) -> Result<i32> {
     let dev = paths::dev_root()?;
     let (Some(slug), Some(name)) = (args.first(), args.get(1)) else { bail!("usage: archive <slug> <name>") };
     let name = wt::resolve_name(&dev, slug, name)?;
     let arc = match Client::connect()? {
-        Some(mut c) => c.request(method::WORKTREE_ARCHIVE, json!({ "id": format!("{slug}/{name}") }))?["path"].as_str().unwrap_or("").to_string(),
+        Some(mut c) => match c.request(method::WORKTREE_ARCHIVE, json!({ "id": format!("{slug}/{name}") })) {
+            Ok(v) => v["path"].as_str().unwrap_or("").to_string(),
+            Err(e) if older_daemon(&e) => {
+                stop_sessions(&format!("{slug}/{name}"));
+                s(&wt::archive(&dev, slug, &name)?)
+            }
+            Err(e) => return Err(e),
+        },
         None => s(&wt::archive(&dev, slug, &name)?),
     };
     println!("archived {slug}/{name} → {arc}\n  (branch, changes and reviews kept; reopen it with: agent {slug} {name})");
