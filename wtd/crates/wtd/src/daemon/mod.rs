@@ -5,6 +5,10 @@
 
 pub mod git;
 pub mod scan;
+mod host;
+mod messages;
+mod pty;
+mod store;
 mod usage;
 
 use std::collections::{BTreeMap, HashMap};
@@ -20,7 +24,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::sync::{broadcast, mpsc, Semaphore};
-use wtd_core::model::{Account, Metrics, Snapshot, Worktree, DEV_ID};
+use wtd_core::model::{Account, Group, Metrics, Snapshot, Worktree, DEV_ID};
 use wtd_core::protocol::{method, HookParams, Push, Request, Response, ServerLine, SessionParams, PROTOCOL_VERSION};
 
 use crate::{client::Client, paths, win};
@@ -39,7 +43,7 @@ const GIT_CONCURRENCY: usize = 2;
 pub fn main(args: &[String]) -> Result<i32> {
     match args.first().map(String::as_str) {
         Some("start") => start(),
-        Some("stop") => stop(),
+        Some("stop") => stop(args.iter().any(|a| a == "--force" || a == "-f")),
         Some("status") => status(),
         Some("run") => run_foreground(),
         _ => bail!("usage: wtd daemon start|stop|status|run"),
@@ -69,12 +73,12 @@ fn start() -> Result<i32> {
     bail!("daemon didn't come up; see {}", log_path.display())
 }
 
-fn stop() -> Result<i32> {
+fn stop(force: bool) -> Result<i32> {
     let Some(mut c) = Client::connect()? else {
         println!("daemon not running");
         return Ok(0);
     };
-    c.request(method::SHUTDOWN, json!({}))?;
+    c.request(method::SHUTDOWN, json!({ "force": force }))?;
     for _ in 0..100 {
         if Client::connect()?.is_none() {
             println!("daemon stopped");
@@ -117,6 +121,9 @@ struct Session {
     kind: String,
     account: Option<String>,
     job: String,
+    program: Option<String>,
+    /// Set for daemon-hosted sessions (Phase 3); None for terminal sessions under `wtd run`.
+    hosted: Option<Arc<host::Hosted>>,
 }
 
 #[derive(Clone, Copy)]
@@ -138,6 +145,8 @@ struct Inner {
     git_running: HashMap<String, ()>,
     /// Last (job CPU 100ns, sample instant) per job for CPU% deltas.
     cpu_prev: HashMap<String, (u64, Instant)>,
+    /// Groups, membership, messages (persisted).
+    store: store::Store,
 }
 
 struct Daemon {
@@ -177,6 +186,26 @@ impl Daemon {
             worktrees: inner.worktrees.values().cloned().collect(),
             accounts: inner.accounts.clone(),
             metrics: inner.metrics.clone(),
+            groups: inner.store.groups.clone(),
+            messages: inner.store.open_messages(),
+        }
+    }
+
+    /// Write the store and push the group list. Call with the lock held after a group change.
+    fn groups_changed(&self, inner: &mut Inner) {
+        if let Err(e) = inner.store.save(&self.dev) {
+            eprintln!("[{}] saving store: {e}", now());
+        }
+        inner.rev += 1;
+        let _ = self.tx.send(Push::Groups { rev: inner.rev, groups: inner.store.groups.clone() });
+    }
+
+    /// Set a worktree's group field from the membership table and push it.
+    fn apply_membership(&self, inner: &mut Inner, id: &str) {
+        let g = inner.store.membership.get(id).cloned();
+        if let Some(mut wt) = inner.worktrees.get(id).cloned() {
+            wt.group = g;
+            self.upsert(inner, wt);
         }
     }
 
@@ -186,6 +215,8 @@ impl Daemon {
         let s = inner.sessions.values().find(|s| s.wt == id && s.kind != "review" && s.kind != "ask");
         wt.live = s.is_some();
         wt.account = s.map(|s| s.account.clone().unwrap_or_else(|| "default".into()));
+        wt.program = s.and_then(|s| s.program.clone());
+        wt.hosted = s.is_some_and(|s| s.hosted.is_some());
         self.upsert(inner, wt);
     }
 
@@ -220,7 +251,8 @@ async fn serve(dev: PathBuf) -> Result<()> {
     let mut server = create(true).context("another wtd daemon is already running")?;
 
     let (tx, _) = broadcast::channel(1024);
-    let d = Arc::new(Daemon { dev: dev.clone(), inner: Mutex::new(Inner::default()), tx, next_conn: AtomicU64::new(1) });
+    let inner = Inner { store: store::Store::load(&dev), ..Default::default() };
+    let d = Arc::new(Daemon { dev: dev.clone(), inner: Mutex::new(inner), tx, next_conn: AtomicU64::new(1) });
     eprintln!("[{}] wtd daemon {} up: pid {}, dev {}", now(), env!("CARGO_PKG_VERSION"), std::process::id(), dev.display());
 
     rescan(&d).await;
@@ -242,19 +274,19 @@ async fn serve(dev: PathBuf) -> Result<()> {
     }
 }
 
-fn line(msg: &ServerLine) -> String {
-    let mut s = serde_json::to_string(msg).unwrap_or_default();
-    s.push('\n');
+fn line(msg: &ServerLine) -> Vec<u8> {
+    let mut s = serde_json::to_vec(msg).unwrap_or_default();
+    s.push(b'\n');
     s
 }
 
 async fn handle(d: Arc<Daemon>, conn: NamedPipeServer) -> Result<()> {
     let id = d.next_conn.fetch_add(1, Ordering::Relaxed);
     let (r, mut w) = tokio::io::split(conn);
-    let (out, mut out_rx) = mpsc::unbounded_channel::<String>();
+    let (out, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer = tokio::spawn(async move {
         while let Some(l) = out_rx.recv().await {
-            if w.write_all(l.as_bytes()).await.is_err() {
+            if w.write_all(&l).await.is_err() {
                 break;
             }
         }
@@ -262,6 +294,7 @@ async fn handle(d: Arc<Daemon>, conn: NamedPipeServer) -> Result<()> {
 
     let mut forwarder: Option<tokio::task::JoinHandle<()>> = None;
     let mut wants_metrics = false;
+    let mut attach_to: Option<(Arc<host::Hosted>, bool, u16, u16)> = None;
     let mut lines = BufReader::new(r).lines();
     while let Some(l) = lines.next_line().await? {
         if l.trim().is_empty() {
@@ -282,6 +315,21 @@ async fn handle(d: Arc<Daemon>, conn: NamedPipeServer) -> Result<()> {
                 start_sub = forwarder.is_none();
                 Ok(json!({}))
             }
+            method::SESSION_SPAWN | method::SESSION_ATTACH => {
+                let known = d.worktree_id_for(req.params.get("dir").and_then(Value::as_str).unwrap_or(""));
+                if known.is_some_and(|w| !d.lock().worktrees.contains_key(&w)) {
+                    rescan(&d).await; // a worktree created moments ago
+                }
+                match host::open(&d, &req.method, &req.params) {
+                    Ok((h, info, created)) => {
+                        let c = req.params.get("cols").and_then(Value::as_u64).unwrap_or(120) as u16;
+                        let r = req.params.get("rows").and_then(Value::as_u64).unwrap_or(30) as u16;
+                        attach_to = Some((h, created, c, r));
+                        Ok(info)
+                    }
+                    Err(e) => Err(e),
+                }
+            }
             _ => dispatch(&d, id, &req, &out).await,
         };
         if let Some(rid) = rid {
@@ -295,6 +343,12 @@ async fn handle(d: Arc<Daemon>, conn: NamedPipeServer) -> Result<()> {
         if start_sub {
             forwarder = Some(subscribe(&d, out.clone(), wants_metrics));
         }
+        if attach_to.is_some() {
+            break; // the rest of this connection is the binary attach stream
+        }
+    }
+    if let Some((h, created, c, r)) = attach_to {
+        host::attach(h, created, c, r, lines.into_inner(), out.clone()).await;
     }
 
     // disconnected
@@ -319,7 +373,7 @@ async fn handle(d: Arc<Daemon>, conn: NamedPipeServer) -> Result<()> {
 
 /// Send a snapshot, then forward every later push. Snapshot + subscribe happen under one lock so no
 /// change can slip between them.
-fn subscribe(d: &Arc<Daemon>, out: mpsc::UnboundedSender<String>, metrics: bool) -> tokio::task::JoinHandle<()> {
+fn subscribe(d: &Arc<Daemon>, out: mpsc::UnboundedSender<Vec<u8>>, metrics: bool) -> tokio::task::JoinHandle<()> {
     let (mut rx, snap) = {
         let mut inner = d.lock();
         if metrics {
@@ -348,7 +402,7 @@ fn subscribe(d: &Arc<Daemon>, out: mpsc::UnboundedSender<String>, metrics: bool)
     })
 }
 
-async fn dispatch(d: &Arc<Daemon>, conn: u64, req: &Request, out: &mpsc::UnboundedSender<String>) -> Result<Value> {
+async fn dispatch(d: &Arc<Daemon>, conn: u64, req: &Request, out: &mpsc::UnboundedSender<Vec<u8>>) -> Result<Value> {
     let p = &req.params;
     match req.method.as_str() {
         method::HELLO => Ok(json!({
@@ -373,6 +427,9 @@ async fn dispatch(d: &Arc<Daemon>, conn: u64, req: &Request, out: &mpsc::Unbound
                     None => false,
                 }
             };
+            if known && h.status == wtd_core::status::Status::Input {
+                messages::deliver_next(d, &id);
+            }
             if !known {
                 rescan(d).await; // a worktree we haven't seen yet (just created)
             }
@@ -385,15 +442,24 @@ async fn dispatch(d: &Arc<Daemon>, conn: u64, req: &Request, out: &mpsc::Unbound
                 rescan(d).await;
             }
             let mut inner = d.lock();
-            inner.sessions.insert(conn, Session { wt: id.clone(), kind: s.kind, account: s.account, job: s.job });
+            inner.sessions.insert(conn, Session { wt: id.clone(), kind: s.kind, account: s.account, job: s.job, program: s.program, hosted: None });
             let _ = out; // the session's own connection; `terminate` is pushed on it via session.stop
             d.refresh_liveness(&mut inner, &id);
             Ok(json!({}))
         }
         method::SESSION_STOP => {
             let id = p.get("id").and_then(Value::as_str).context("missing id")?.to_string();
-            let jobs: Vec<String> = d.lock().sessions.values().filter(|s| s.wt == id).map(|s| s.job.clone()).collect();
+            let (jobs, hosted): (Vec<String>, Vec<Arc<host::Hosted>>) = {
+                let inner = d.lock();
+                let mine: Vec<&Session> = inner.sessions.values().filter(|s| s.wt == id).collect();
+                (mine.iter().filter(|s| s.hosted.is_none()).map(|s| s.job.clone()).collect(),
+                 mine.iter().filter_map(|s| s.hosted.clone()).collect())
+            };
             let mut n = 0;
+            for h in &hosted {
+                h.pty.kill();
+                n += 1;
+            }
             for j in &jobs {
                 if !j.is_empty() && win::terminate_job(j).unwrap_or(false) {
                     n += 1;
@@ -422,7 +488,11 @@ async fn dispatch(d: &Arc<Daemon>, conn: u64, req: &Request, out: &mpsc::Unbound
             Ok(json!({}))
         }
         method::SHUTDOWN => {
-            eprintln!("[{}] shutdown requested", now());
+            let hosted = d.lock().sessions.values().filter(|s| s.hosted.is_some()).count();
+            if hosted > 0 && !p.get("force").and_then(Value::as_bool).unwrap_or(false) {
+                bail!("{hosted} hosted session(s) are running and would end — stop with force to confirm");
+            }
+            eprintln!("[{}] shutdown requested ({hosted} hosted session(s) end)", now());
             let _ = d.tx.send(Push::Shutdown);
             tokio::spawn(async {
                 tokio::time::sleep(Duration::from_millis(200)).await;
@@ -430,6 +500,71 @@ async fn dispatch(d: &Arc<Daemon>, conn: u64, req: &Request, out: &mpsc::Unbound
             });
             Ok(json!({}))
         }
+        method::GROUP_CREATE => {
+            let name = group_name(p)?;
+            let mut inner = d.lock();
+            let id = format!("g{}", inner.store.next());
+            inner.store.groups.push(Group { id: id.clone(), name, collapsed: false });
+            d.groups_changed(&mut inner);
+            Ok(json!({ "id": id }))
+        }
+        method::GROUP_UPDATE => {
+            let id = p.get("id").and_then(Value::as_str).context("missing id")?;
+            let name = p.get("name").map(|_| group_name(p)).transpose()?;
+            let mut inner = d.lock();
+            let g = inner.store.groups.iter_mut().find(|g| g.id == id).with_context(|| format!("no group '{id}'"))?;
+            if let Some(n) = name {
+                g.name = n;
+            }
+            if let Some(c) = p.get("collapsed").and_then(Value::as_bool) {
+                g.collapsed = c;
+            }
+            d.groups_changed(&mut inner);
+            Ok(json!({}))
+        }
+        method::GROUP_DELETE => {
+            let id = p.get("id").and_then(Value::as_str).context("missing id")?.to_string();
+            let mut inner = d.lock();
+            inner.store.groups.retain(|g| g.id != id);
+            let members: Vec<String> = inner.store.membership.iter().filter(|(_, g)| **g == id).map(|(w, _)| w.clone()).collect();
+            for w in &members {
+                inner.store.membership.remove(w);
+                d.apply_membership(&mut inner, w);
+            }
+            d.groups_changed(&mut inner);
+            Ok(json!({ "ungrouped": members.len() }))
+        }
+        method::GROUP_REORDER => {
+            let ids: Vec<String> = serde_json::from_value(p.get("ids").cloned().unwrap_or_default())?;
+            let mut inner = d.lock();
+            let mut rest = std::mem::take(&mut inner.store.groups);
+            let mut ordered: Vec<Group> = ids.iter().filter_map(|id| rest.iter().position(|g| &g.id == id).map(|i| rest.remove(i))).collect();
+            ordered.extend(rest); // anything not named keeps its relative order at the end
+            inner.store.groups = ordered;
+            d.groups_changed(&mut inner);
+            Ok(json!({}))
+        }
+        method::GROUP_ASSIGN => {
+            let wt = p.get("worktree").and_then(Value::as_str).context("missing worktree")?.to_string();
+            let group = p.get("group").and_then(Value::as_str).map(String::from);
+            let mut inner = d.lock();
+            if !inner.worktrees.contains_key(&wt) {
+                bail!("no worktree '{wt}'");
+            }
+            match &group {
+                Some(g) if !inner.store.groups.iter().any(|x| &x.id == g) => bail!("no group '{g}'"),
+                Some(g) => { inner.store.membership.insert(wt.clone(), g.clone()); }
+                None => { inner.store.membership.remove(&wt); }
+            }
+            if let Err(e) = inner.store.save(&d.dev) {
+                eprintln!("[{}] saving store: {e}", now());
+            }
+            d.apply_membership(&mut inner, &wt);
+            Ok(json!({}))
+        }
+        method::MESSAGE_SEND => messages::send(d, p),
+        method::MESSAGE_DECIDE => messages::decide(d, p),
+        method::MESSAGE_LIST => messages::list(d, p),
         m => bail!("unknown method '{m}'"),
     }
 }
@@ -447,11 +582,14 @@ async fn rescan(d: &Arc<Daemon>) {
     let mut seen = std::collections::HashSet::new();
     for mut wt in found {
         seen.insert(wt.id.clone());
+        wt.group = inner.store.membership.get(&wt.id).cloned();
         match inner.worktrees.get(&wt.id) {
             Some(old) => {
                 wt.git = old.git.clone();
                 wt.live = old.live;
                 wt.account = old.account.clone();
+                wt.hosted = old.hosted;
+                wt.program = old.program.clone();
                 wt.last_activity = if wt.status != old.status { now() } else { old.last_activity };
             }
             None => {
@@ -460,7 +598,12 @@ async fn rescan(d: &Arc<Daemon>) {
                 }
             }
         }
+        let id = wt.id.clone();
+        let fresh = !inner.worktrees.contains_key(&id);
         d.upsert(&mut inner, wt);
+        if fresh {
+            d.refresh_liveness(&mut inner, &id);
+        }
     }
     let gone: Vec<String> = inner.worktrees.keys().filter(|k| !seen.contains(*k)).cloned().collect();
     for id in gone {
@@ -603,4 +746,12 @@ async fn metrics_loop(d: Arc<Daemon>) {
         inner.metrics = Some(m.clone());
         let _ = d.tx.send(Push::Metrics { rev: inner.rev, metrics: m });
     }
+}
+
+fn group_name(p: &Value) -> Result<String> {
+    let n = p.get("name").and_then(Value::as_str).unwrap_or("").trim().to_string();
+    if n.is_empty() || n.chars().count() > 60 {
+        bail!("group name must be 1-60 characters");
+    }
+    Ok(n)
 }

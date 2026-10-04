@@ -1,7 +1,7 @@
 //! `wtd mcp`: stdio MCP server giving every agent read-only fleet awareness.
 //!
-//! Tools: `fleet_list`, `fleet_get`, `fleet_read_file`. Sending prompts to other worktrees
-//! (`fleet_send`, user-approved) arrives in Phase 2.
+//! Tools: `fleet_list`, `fleet_get`, `fleet_read_file` (read-only), `fleet_send` (a prompt to another
+//! worktree's agent — held by the daemon until the user approves it in VSCode), `fleet_inbox`.
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -42,7 +42,7 @@ pub fn main() -> Result<i32> {
                 "protocolVersion": params.get("protocolVersion").cloned().unwrap_or(json!("2025-06-18")),
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "wtd", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "WorkTreeDev fleet tools. Other worktrees (parallel agents on other branches/repos) can be inspected read-only. Never modify another worktree.",
+                "instructions": "WorkTreeDev fleet tools. Other worktrees (parallel agents on other branches/repos) can be inspected read-only — never modify another worktree. To message another worktree's agent, first propose the message and the reason to the user in chat; only call fleet_send if they agree. The user then approves it again in VS Code before anything is delivered.",
             }),
             "ping" => json!({}),
             "tools/list" => json!({ "tools": tools() }),
@@ -82,6 +82,20 @@ fn tools() -> Value {
             "annotations": { "readOnlyHint": true }
         },
         {
+            "name": "fleet_send",
+            "description": "Send a prompt to ANOTHER worktree's agent (e.g. to coordinate on a shared API or ask about unmerged work). ONLY call this after you proposed the exact message and the reason to the user in chat and they agreed. Nothing is delivered until the user approves it in VS Code (they may edit or deny it); then it reaches the target agent when its current turn ends. Never send unprompted, never to yourself.",
+            "inputSchema": { "type": "object", "properties": {
+                "to": { "type": "string", "description": "target worktree id from fleet_list, e.g. luop/feat/billing" },
+                "message": { "type": "string", "description": "the prompt for the other agent; self-contained (it can't see your conversation)" }
+            }, "required": ["to", "message"], "additionalProperties": false }
+        },
+        {
+            "name": "fleet_inbox",
+            "description": "Messages this worktree sent or received through fleet_send, with their state (pending = waiting for the user's approval, queued = approved and waiting for the target's turn to end, delivered, denied). Read-only.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+            "annotations": { "readOnlyHint": true }
+        },
+        {
             "name": "fleet_read_file",
             "description": "Read a file from another worktree (path relative to that worktree's root). Read-only; never edit another worktree.",
             "inputSchema": { "type": "object", "properties": {
@@ -114,6 +128,30 @@ fn call(dev: &Path, me: Option<&str>, name: &str, args: &Value) -> Result<String
             let id = args.get("id").and_then(Value::as_str).context("id is required")?;
             let wt = list(dev)?.into_iter().find(|w| w.id == id).with_context(|| format!("no worktree '{id}' (see fleet_list)"))?;
             get(&wt, me)
+        }
+        "fleet_send" => {
+            let me = me.context("can't tell which worktree this session is in")?;
+            let to = args.get("to").and_then(Value::as_str).context("to is required")?;
+            let body = args.get("message").and_then(Value::as_str).context("message is required")?;
+            let mut c = Client::connect()?.context("the WorkTreeDev daemon isn't running, so messages can't be sent — ask the user to start it (tray icon or fleet panel)")?;
+            let r = c.request(method::MESSAGE_SEND, json!({ "from_dir": paths::worktree_path(dev, me).to_string_lossy(), "to": to, "body": body }))?;
+            Ok(format!(
+                "Message #{} to {to} is waiting for the user's approval in VS Code (they can edit or deny it). Once approved it's delivered when {to}'s agent finishes its current turn. Let the user know it's waiting for them.",
+                r["id"]
+            ))
+        }
+        "fleet_inbox" => {
+            let me = me.context("can't tell which worktree this session is in")?;
+            let mut c = Client::connect()?.context("the WorkTreeDev daemon isn't running")?;
+            let v = c.request(method::MESSAGE_LIST, json!({ "worktree": me }))?;
+            let msgs = v.as_array().cloned().unwrap_or_default();
+            if msgs.is_empty() {
+                return Ok("No messages.".into());
+            }
+            Ok(msgs.iter().map(|m| {
+                let dir = if m["from"] == me { format!("→ to {}", m["to"].as_str().unwrap_or("?")) } else { format!("← from {}", m["from"].as_str().unwrap_or("?")) };
+                format!("#{} {dir} [{}]\n{}", m["id"], m["state"].as_str().unwrap_or("?"), m["body"].as_str().unwrap_or(""))
+            }).collect::<Vec<_>>().join("\n\n"))
         }
         "fleet_read_file" => {
             let id = args.get("id").and_then(Value::as_str).context("id is required")?;

@@ -160,6 +160,8 @@ class DaemonClient {
     this.wts = new Map();       // id → Worktree (see wtd-core model.rs)
     this.accounts = [];
     this.metrics = null;
+    this.groups = [];     // user-defined roster groups, in display order
+    this.messages = [];   // agent messages still in flight (pending approval / queued)
     this._sock = null; this._buf = ''; this._pending = new Map(); this._next = 1; this._retry = null; this._stopped = false;
   }
   start() { this._stopped = false; this._connect(); }
@@ -224,7 +226,9 @@ class DaemonClient {
         this.wts = new Map((m.snapshot.worktrees || []).map((w) => [w.id, w]));
         this.accounts = m.snapshot.accounts || [];
         this.metrics = m.snapshot.metrics || null;
-        this.onChange('fleet'); this.onChange('accounts'); this.onChange('metrics');
+        this.groups = m.snapshot.groups || [];
+        this.messages = m.snapshot.messages || [];
+        this.onChange('fleet'); this.onChange('accounts'); this.onChange('metrics'); this.onChange('messages');
         break;
       case 'upsert': {
         const prev = this.wts.get(m.worktree.id);
@@ -235,6 +239,8 @@ class DaemonClient {
       case 'remove': this.wts.delete(m.id); this.onChange('fleet'); break;
       case 'accounts': this.accounts = m.accounts || []; this.onChange('accounts'); break;
       case 'metrics': this.metrics = m.metrics; this.onChange('metrics'); break;
+      case 'groups': this.groups = m.groups || []; this.onChange('fleet'); break;
+      case 'messages': this.messages = m.messages || []; this.onChange('messages'); break;
       case 'shutdown': break;   // the pipe closes next → 'daemon' change
     }
   }
@@ -764,8 +770,14 @@ class DevSummaryProvider {
     for (const k of Object.keys(this._unread)) { const name = k.split('')[1]; if (this._unread[k] && termName(t) === name) { this.clearUnread(k); return; } }
   }
 
-  // "New session": the toolbar button and the `WorkTreeDev: New Session` palette command.
+  // "New session": the toolbar button and the `WorkTreeDev: New Session` palette command. With wtd.exe
+  // installed it's the guided picker; without it, the original free-text prompt.
   newAgent() {
+    if (daemonInstalled()) return newSessionWizard(this).catch((e) => vscode.window.showErrorMessage('New session: ' + e.message));
+    return this._legacyNewAgent();
+  }
+
+  _legacyNewAgent() {
     vscode.window.showInputBox({
       prompt: 'New agent — enter: <slug> <name> [ref-tokens…]   (slug "plan" = a repo-less planning agent)',
       placeHolder: 'plan my-new-app    ·    <slug> feat/my-thing',
@@ -808,6 +820,86 @@ class DevSummaryProvider {
         }
       });
     });
+  }
+
+  // Agent messages awaiting the user's approval: a notification per new request; Review shows the full
+  // text with Send / Edit & send / Deny. Nothing reaches the target agent without one of those clicks.
+  _onMessages() {
+    this._notifiedMsgs = this._notifiedMsgs || new Set();
+    for (const m of (this.daemon && this.daemon.messages) || []) {
+      if (m.state !== 'pending' || this._notifiedMsgs.has(m.id)) continue;
+      this._notifiedMsgs.add(m.id);
+      const first = (m.body.split('\n').find((l) => l.trim()) || '').slice(0, 90);
+      vscode.window.showInformationMessage('$(comment-discussion) ' + m.from + ' wants to message ' + m.to + ': “' + first + (m.body.length > first.length ? '…' : '') + '”', 'Review', 'Deny')
+        .then((ch) => { if (ch === 'Review') this.reviewMessage(m.id); else if (ch === 'Deny') this._decide(m.id, false); });
+    }
+  }
+
+  _decide(id, approve, body) {
+    return this.daemon.request('message.decide', Object.assign({ id, approve }, body ? { body } : {}))
+      .then(() => vscode.window.setStatusBarMessage(approve ? '$(check) Message #' + id + ' approved — delivered when the target finishes its turn' : '$(x) Message #' + id + ' denied', 5000),
+            (e) => vscode.window.showErrorMessage('Message #' + id + ': ' + e.message));
+  }
+
+  async reviewMessage(id) {
+    const m = ((this.daemon && this.daemon.messages) || []).find((x) => x.id === id && x.state === 'pending');
+    if (!m) return;
+    const ch = await vscode.window.showInformationMessage('Message from ' + m.from + ' to ' + m.to, { modal: true,
+      detail: m.body + '\n\n— It is delivered to ' + m.to + '’s agent as a prompt when its current turn ends.' }, 'Send', 'Edit & send', 'Deny');
+    if (ch === 'Send') return this._decide(id, true);
+    if (ch === 'Deny') return this._decide(id, false);
+    if (ch === 'Edit & send') {
+      const doc = await vscode.workspace.openTextDocument({ content: m.body, language: 'markdown' });
+      await vscode.window.showTextDocument(doc, { preview: false });
+      const go = await vscode.window.showInformationMessage('Edit message #' + id + ' to ' + m.to + ' in the editor, then send it.', 'Send edited', 'Deny');
+      if (go === 'Send edited') { await this._decide(id, true, doc.getText()); }
+      else if (go === 'Deny') { await this._decide(id, false); }
+      if (vscode.window.activeTextEditor && vscode.window.activeTextEditor.document === doc)
+        await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+    }
+  }
+
+  async reviewMessagesFrom(worktree) {
+    for (const m of ((this.daemon && this.daemon.messages) || []).filter((x) => x.state === 'pending' && x.from === worktree)) await this.reviewMessage(m.id);
+  }
+
+  // user-defined roster groups (stored by the daemon). Names come from native input boxes.
+  async _groupOp(m) {
+    const d = this.daemon;
+    if (!d || !d.running) { vscode.window.showWarningMessage('Start the daemon to edit groups.'); return; }
+    const groups = d.groups || [];
+    const nameOf = (id) => (groups.find((g) => g.id === id) || {}).name || '';
+    const ask = (value, title) => vscode.window.showInputBox({ title, value, prompt: 'Group name', validateInput: (v) => (v.trim() && v.trim().length <= 60) ? null : '1–60 characters' });
+    switch (m.cmd) {
+      case 'groupNew': {
+        const name = await ask('', 'New group'); if (!name) return;
+        const r = await d.request('group.create', { name: name.trim() });
+        if (m.worktree) await d.request('group.assign', { worktree: m.worktree, group: r.id });
+        return;
+      }
+      case 'groupRename': {
+        const name = await ask(nameOf(m.id), 'Rename group'); if (!name) return;
+        return d.request('group.update', { id: m.id, name: name.trim() });
+      }
+      case 'groupDelete': {
+        const ch = await vscode.window.showWarningMessage('Delete the group "' + nameOf(m.id) + '"?', { modal: true, detail: 'Its worktrees move to Ungrouped. Nothing else changes.' }, 'Delete group');
+        if (ch === 'Delete group') return d.request('group.delete', { id: m.id });
+        return;
+      }
+      case 'groupCollapse': return d.request('group.update', { id: m.id, collapsed: !!m.collapsed });
+      case 'groupAssign': return d.request('group.assign', { worktree: m.worktree, group: m.group || null });
+      case 'groupReorder': return d.request('group.reorder', { ids: m.ids || [] });
+      case 'groupMove': {
+        const wt = d.wts.get(m.worktree);
+        const items = groups.map((g) => ({ label: '$(folder) ' + g.name, id: g.id, description: wt && wt.group === g.id ? 'current' : '' }));
+        items.push({ label: '$(circle-outline) Ungrouped', id: null, description: wt && !wt.group ? 'current' : '' });
+        items.push({ label: '$(new-folder) New group…', id: '__new__' });
+        const it = await vscode.window.showQuickPick(items, { placeHolder: 'Move ' + m.worktree + ' to…' });
+        if (!it) return;
+        if (it.id === '__new__') return this._groupOp({ cmd: 'groupNew', worktree: m.worktree });
+        return d.request('group.assign', { worktree: m.worktree, group: it.id });
+      }
+    }
   }
 
   // the toolbar's ⋯ menu: occasional actions, kept out of the main row
@@ -915,6 +1007,10 @@ class DevSummaryProvider {
         this.toggleDaemon();
       } else if (m.cmd === 'more') {
         this.moreMenu();
+      } else if (m.cmd && m.cmd.startsWith('group')) {
+        this._groupOp(m).catch((e) => vscode.window.showErrorMessage('Group: ' + e.message));
+      } else if (m.cmd === 'reviewMessages' && m.worktree) {
+        this.reviewMessagesFrom(m.worktree);
       } else if (m.cmd === 'settings') {
         if (this._openSettings) this._openSettings();
       } else if (m.cmd === 'newAssistant') {
@@ -1131,11 +1227,13 @@ class DevSummaryProvider {
   // daemon mode: rows straight from the pushed fleet state (no disk scan, no git, no registry reads)
   _daemonRows() {
     const rows = []; const live = new Set();
+    const pendingFrom = {};
+    for (const m of this.daemon.messages || []) if (m.state === 'pending') pendingFrom[m.from] = (pendingFrom[m.from] || 0) + 1;
     for (const w of this.daemon.wts.values()) {
       if (w.kind === 'dev') continue;   // the assistant has its own pinned row
       const slug = w.slug, name = w.name;
-      rows.push({ slug, name, status: w.status === 'none' ? '' : w.status, dirty: !!(w.git && w.git.dirty), ahead: (w.git && w.git.ahead) || 0,
-                  branch: (w.git && w.git.branch) || '', plan: w.plan_title || '', account: w.account || '', live: !!w.live });
+      rows.push({ id: w.id, group: w.group || null, slug, name, status: w.status === 'none' ? '' : w.status, dirty: !!(w.git && w.git.dirty), ahead: (w.git && w.git.ahead) || 0,
+                  branch: (w.git && w.git.branch) || '', plan: w.plan_title || '', account: w.account || '', live: !!w.live, program: w.program || '', msgPending: pendingFrom[w.id] || 0 });
       if (w.live) live.add(slug + '-' + name);
     }
     return { rows, live };
@@ -1185,7 +1283,10 @@ class DevSummaryProvider {
     const plainTerm = vscode.window.terminals.find((x) => termName(x) === TERM_NAME);
     const terminal = { active: !!plainTerm, current: !!cur && termName(cur) === TERM_NAME };
     let multiAccount = false; try { multiAccount = this._accounts().length > 1; } catch {}
-    if (this.view && this.view.visible) this.view.webview.postMessage({ type: 'roster', rows, assistant, terminal, multiAccount });
+    // groups: null = legacy grouping by repo (no daemon installed); edits need the daemon running
+    const groups = this._daemonMode() ? (this.daemon.groups || []) : null;
+    const canEditGroups = this._daemonMode() && this.daemon.running;
+    if (this.view && this.view.visible) this.view.webview.postMessage({ type: 'roster', rows, assistant, terminal, multiAccount, groups, canEditGroups });
   }
 
   // daemon mode = wtd.exe is installed (whether or not the daemon is running right now)
@@ -1202,8 +1303,16 @@ class DevSummaryProvider {
     const start = want === undefined ? !running : want;
     if (!daemonInstalled()) { vscode.window.showWarningMessage('wtd.exe is not installed — run install.sh (needs Rust: winget install Rustlang.Rustup).'); return; }
     if (start === running) return;
+    // stopping ends the agent sessions the daemon hosts: say so, and only then force it
+    const hosted = start ? 0 : [...this.daemon.wts.values()].filter((w) => w.hosted).length;
+    if (hosted && !this._confirmedStop) {
+      vscode.window.showWarningMessage('Stop the WorkTreeDev daemon?', { modal: true,
+        detail: hosted + ' agent session' + (hosted === 1 ? ' is' : 's are') + ' running in it and will end. Their conversations can be resumed by reopening the worktrees.' }, 'Stop and end sessions')
+        .then((ch) => { if (ch) { this._confirmedStop = true; this.toggleDaemon(false); this._confirmedStop = false; } });
+      return;
+    }
     this._daemonBusy = true; this._postDaemon();
-    cp.execFile(wtdExe(), ['daemon', start ? 'start' : 'stop'], { timeout: 15000, windowsHide: true }, (e, so, se) => {
+    cp.execFile(wtdExe(), start ? ['daemon', 'start'] : ['daemon', 'stop', '--force'], { timeout: 15000, windowsHide: true }, (e, so, se) => {
       this._daemonBusy = false;
       if (e) vscode.window.showErrorMessage('wtd daemon ' + (start ? 'start' : 'stop') + ' failed: ' + ((se || '').trim() || e.message));
       this._postDaemon();
@@ -1402,6 +1511,22 @@ class DevSummaryProvider {
   .row .git{flex:none;color:var(--vscode-descriptionForeground);font-size:12px;font-variant-numeric:tabular-nums;display:flex;gap:4px;}
   .ahead{color:var(--vscode-charts-blue,#4aa3ff);} .dirty{color:var(--vscode-charts-yellow,#d2a000);}
   .badge{flex:none;font-size:10px;padding:0 5px;border-radius:8px;line-height:15px;background:var(--vscode-badge-background);color:var(--vscode-badge-foreground);}
+  .rb{flex:none;font-size:11px;color:var(--vscode-descriptionForeground);opacity:.85;}
+  /* user-defined groups */
+  .ghdr{position:relative;display:flex;align-items:center;gap:4px;height:22px;margin-top:6px;padding:0 4px 0 2px;border-radius:3px;cursor:pointer;
+        font-size:11px;font-weight:600;letter-spacing:.3px;text-transform:uppercase;color:var(--vscode-descriptionForeground);user-select:none;}
+  .ghdr:hover{background:var(--vscode-list-hoverBackground);}
+  .ghdr .gn{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .ghdr .n{font-weight:400;padding:0 6px;border-radius:8px;background:var(--vscode-badge-background);color:var(--vscode-badge-foreground);font-size:10px;line-height:15px;letter-spacing:0;}
+  .ghdr .gacts{display:none;align-items:center;} .ghdr:hover .gacts{display:flex;}
+  .ghdr .gacts .codicon{padding:3px;border-radius:3px;color:var(--vscode-icon-foreground);} .ghdr .gacts .codicon:hover{background:var(--vscode-toolbar-hoverBackground);}
+  .ghdr .gacts .danger:hover{color:var(--vscode-errorForeground);}
+  .ghdr.drop,.gbody.drop{outline:1px dashed var(--vscode-focusBorder);outline-offset:-1px;background:var(--vscode-list-dropBackground,rgba(0,127,212,.12));}
+  .gbody{min-height:4px;border-radius:3px;}
+  .gempty{font-size:12px;color:var(--vscode-descriptionForeground);padding:2px 0 4px 24px;font-style:italic;}
+  .row.dragging{opacity:.4;}
+  .msgp{flex:none;color:var(--vscode-editorWarning-foreground,#d2a000);padding:2px;border-radius:3px;}
+  .msgp:hover{background:var(--vscode-toolbar-hoverBackground);}
   .row.wt:not(.live) .st{opacity:.55;} .row.wt:not(.live) .nm{color:var(--vscode-descriptionForeground);}
   .row.unread{box-shadow:inset 2px 0 0 var(--vscode-charts-yellow,#d2a000);background:rgba(255,216,61,.08);}
   .row.unread .nm{font-weight:600;color:var(--vscode-foreground);}
@@ -1431,6 +1556,7 @@ class DevSummaryProvider {
   <button class="tb" id="active" title="Show only worktrees with a live session"><i class="codicon codicon-zap"></i><span class="t" id="activeTxt">Active</span></button>
   <button class="tb" id="filter" title="Filter by status"><i class="codicon codicon-filter" id="filterIco"></i></button>
   <button class="tb" id="search" title="Search worktrees (name, branch, plan, account)"><i class="codicon codicon-search"></i></button>
+  <button class="tb" id="newGroup" title="New group"><i class="codicon codicon-new-folder"></i></button>
   <span class="spacer"></span>
   <button class="tb" id="settings" title="Settings — repos, accounts, GitHub, daemon"><i class="codicon codicon-settings-gear"></i></button>
   <button class="tb" id="more" title="More actions"><i class="codicon codicon-ellipsis"></i></button>
@@ -1450,9 +1576,11 @@ class DevSummaryProvider {
   const vsc = acquireVsCodeApi();
   window.addEventListener('error', e => { try{ vsc.postMessage({cmd:'jsError', msg: String(e.message||e)+' @'+(e.lineno||'?')}); }catch(_){} });
   let accts=[], ros=[], mon=null, asstState={}, termState={}, multiAcct=false, daemon={installed:false,running:false,busy:false};
+  let groupsData=null, canEditGroups=false;   // null = legacy repo grouping
   const saved = vsc.getState() || {};
   let activeOnly = !!saved.activeOnly, query = saved.query || '', searchOpen = !!saved.searchOpen, statuses = new Set(saved.statuses || []);
-  function save(){ vsc.setState({activeOnly, query, searchOpen, statuses:[...statuses]}); }
+  let ungroupedCollapsed = !!saved.ungroupedCollapsed;
+  function save(){ vsc.setState({activeOnly, query, searchOpen, statuses:[...statuses], ungroupedCollapsed}); }
 
   const GLYPH={working:'🔵',input:'🟡',reviewing:'🟣',pr:'🔹',done:'🟢',stopped:'🔴'};   // editor tab name prefix (host side)
   const STATUS=[
@@ -1509,6 +1637,8 @@ class DevSummaryProvider {
     document.getElementById('filter').classList.toggle('on', statuses.size>0);
     document.getElementById('filterIco').className = 'codicon codicon-'+(statuses.size?'filter-filled':'filter');
     document.getElementById('search').classList.toggle('on', searchOpen);
+    const ng=document.getElementById('newGroup'); ng.style.display = groupsData ? '' : 'none'; ng.disabled = !canEditGroups;
+    ng.title = canEditGroups ? 'New group' : 'Start the daemon to edit groups';
     document.getElementById('searchRow').classList.toggle('open', searchOpen);
     const off=document.getElementById('daemonOff');
     off.innerHTML = (daemon.installed && !daemon.running)
@@ -1541,14 +1671,19 @@ class DevSummaryProvider {
     const s=SMAP[w.status]||['','No status','circle-outline','var(--vscode-descriptionForeground)'];
     const g=GLYPH[w.status]||GLYPH.stopped;
     const git=(w.ahead?'<span class="ahead" title="'+w.ahead+' unpushed commit(s)">↑'+w.ahead+'</span>':'')+(w.dirty?'<span class="dirty" title="uncommitted changes">●</span>':'');
-    const acct = (multiAcct && w.active && w.account && w.account!=='default') ? '<span class="badge" title="Claude account">'+esc(w.account)+'</span>' : '';
+    const acctName = (w.account||'').replace(/^codex:/,'');
+    const acct = (w.active && w.program==='codex') ? '<span class="badge" title="Codex session'+(acctName&&acctName!=='default'?' · account '+esc(acctName):'')+'">codex'+(acctName&&acctName!=='default'?' · '+esc(acctName):'')+'</span>'
+      : (multiAcct && w.active && w.account && w.account!=='default') ? '<span class="badge" title="Claude account">'+esc(w.account)+'</span>' : '';
     const tip = w.slug+'/'+w.name+' — '+s[1]+(w.active?' · live session':'')+(w.branch?' · '+w.branch:'')+(w.plan?'\\n'+w.plan:'')+'\\nclick to open';
-    return '<div class="row wt'+(w.active?' live':'')+(w.unread?' unread':'')+(w.current?' current':'')+'" data-slug="'+esc(w.slug)+'" data-name="'+esc(w.name)+'" data-glyph="'+g+'" title="'+esc(tip)+'">'
+    const drag = groupsData && canEditGroups;
+    return '<div class="row wt'+(w.active?' live':'')+(w.unread?' unread':'')+(w.current?' current':'')+'" data-id="'+esc(w.id||'')+'" data-slug="'+esc(w.slug)+'" data-name="'+esc(w.name)+'" data-glyph="'+g+'" title="'+esc(tip)+'"'+(drag?' draggable="true"':'')+'>'
       +'<span class="st" style="color:'+s[3]+'">'+ico(s[2])+'</span>'
-      +'<span class="nm">'+esc(w.name)+'</span>'+acct
+      +'<span class="nm">'+esc(w.name)+'</span>'+(groupsData?'<span class="rb" title="repository">'+esc(w.slug)+'</span>':'')+acct
+      +(w.msgPending?'<i class="codicon codicon-comment-unresolved msgp" title="'+w.msgPending+' message'+(w.msgPending===1?'':'s')+' from this agent awaiting your approval — click to review"></i>':'')
       +'<span class="git">'+git+'</span>'
       +'<span class="acts">'
       +'<i class="codicon codicon-diff dif" title="Commits & diffs"></i>'
+      +(groupsData&&canEditGroups?'<i class="codicon codicon-folder mv" title="Move to group…"></i>':'')
       +(w.active&&!w.unread?'<i class="codicon codicon-mail unr" title="Mark unread"></i>':'')
       +(w.active&&multiAcct?'<i class="codicon codicon-arrow-swap acc" title="Switch account (reopens under the one with most capacity)"></i>':'')
       +(w.active?'<i class="codicon codicon-debug-stop term danger" title="End session (worktree stays)"></i>':'')
@@ -1571,15 +1706,79 @@ class DevSummaryProvider {
     const el=document.getElementById('roster');
     if(!ros.length){ el.innerHTML='<div class="none">No worktrees yet — click New to start a session.</div>'; return; }
     if(!shown.length){ el.innerHTML='<div class="none">No worktrees match the current filter.</div>'; return; }
-    // grouped by repo until user-defined groups land (Phase 2); actionable statuses first
-    const groups={}; shown.forEach(w=>{ (groups[w.slug]=groups[w.slug]||[]).push(w); });
-    el.innerHTML = Object.keys(groups).sort((a,b)=>a.localeCompare(b)).map(slug=>{
-      const rows=groups[slug].sort((a,b)=>(PRIO[a.status]??9)-(PRIO[b.status]??9) || a.name.localeCompare(b.name));
-      return '<div class="sect">'+esc(slug)+'<span class="n">'+rows.length+'</span></div>'+rows.map(wtRow).join('');
-    }).join('');
+    const byPrio=(rows)=>rows.sort((a,b)=>(PRIO[a.status]??9)-(PRIO[b.status]??9) || a.name.localeCompare(b.name));
+    if(groupsData){
+      // user-defined groups in their order, then Ungrouped; empty groups stay visible as drop targets
+      // unless a filter is narrowing the list
+      const filtering = activeOnly || statuses.size>0 || !!query;
+      const known = new Set(groupsData.map(g=>g.id));
+      const byG = {}; shown.forEach(w=>{ const g = w.group && known.has(w.group) ? w.group : ''; (byG[g]=byG[g]||[]).push(w); });
+      const sec=(id,name,collapsed,rows,editable)=>{
+        if(filtering && !rows.length) return '';
+        const hdr='<div class="ghdr" data-g="'+esc(id)+'"'+(editable&&canEditGroups?' draggable="true"':'')+' title="'+esc(name)+(collapsed?' — click to expand':' — click to collapse')+'">'
+          +ico(collapsed?'chevron-right':'chevron-down')+'<span class="gn">'+esc(name)+'</span><span class="n">'+rows.length+'</span>'
+          +(editable&&canEditGroups?'<span class="gacts"><i class="codicon codicon-edit gren" title="Rename"></i><i class="codicon codicon-trash gdel danger" title="Delete group"></i></span>':'')+'</div>';
+        if(collapsed) return hdr;
+        return hdr+'<div class="gbody" data-g="'+esc(id)+'">'+(rows.length?byPrio(rows).map(wtRow).join(''):'<div class="gempty">'+(canEditGroups?'Drag worktrees here':'Empty')+'</div>')+'</div>';
+      };
+      el.innerHTML = groupsData.map(g=>sec(g.id,g.name,g.collapsed,byG[g.id]||[],true)).join('')
+        + sec('', 'Ungrouped', ungroupedCollapsed, byG['']||[], false);
+      wireGroups(el);
+    } else {
+      // legacy (no daemon installed): grouped by repo
+      const groups={}; shown.forEach(w=>{ (groups[w.slug]=groups[w.slug]||[]).push(w); });
+      el.innerHTML = Object.keys(groups).sort((a,b)=>a.localeCompare(b)).map(slug=>{
+        const rows=byPrio(groups[slug]);
+        return '<div class="sect">'+esc(slug)+'<span class="n">'+rows.length+'</span></div>'+rows.map(wtRow).join('');
+      }).join('');
+    }
     const on=(sel,cmd)=>el.querySelectorAll(sel).forEach(x=>x.onclick=(ev)=>{ ev.stopPropagation(); const p=x.closest('.wt'); vsc.postMessage({cmd,slug:p.dataset.slug,name:p.dataset.name}); });
     el.querySelectorAll('.wt').forEach(x=>x.onclick=()=>vsc.postMessage({cmd:'open',slug:x.dataset.slug,name:x.dataset.name,glyph:x.dataset.glyph}));
     on('.arch','archive'); on('.del','delete'); on('.term','terminate'); on('.unr','markunread'); on('.acc','switchAccount'); on('.dif','openCommits');
+    el.querySelectorAll('.mv').forEach(x=>x.onclick=(ev)=>{ ev.stopPropagation(); vsc.postMessage({cmd:'groupMove', worktree:x.closest('.wt').dataset.id}); });
+    el.querySelectorAll('.msgp').forEach(x=>x.onclick=(ev)=>{ ev.stopPropagation(); vsc.postMessage({cmd:'reviewMessages', worktree:x.closest('.wt').dataset.id}); });
+  }
+
+  // group headers: collapse, rename, delete; drag rows onto a group, drag headers to reorder
+  const DT_WT='application/x-wtd-worktree', DT_GRP='application/x-wtd-group';
+  function wireGroups(el){
+    el.querySelectorAll('.ghdr').forEach(h=>{
+      const id=h.dataset.g;
+      h.onclick=(ev)=>{
+        if(ev.target.closest('.gren')){ ev.stopPropagation(); vsc.postMessage({cmd:'groupRename', id}); return; }
+        if(ev.target.closest('.gdel')){ ev.stopPropagation(); vsc.postMessage({cmd:'groupDelete', id}); return; }
+        if(!id){ ungroupedCollapsed=!ungroupedCollapsed; save(); renderRoster(); return; }
+        const g=groupsData.find(x=>x.id===id); if(!g) return;
+        g.collapsed=!g.collapsed; renderRoster();   // optimistic; the daemon's push confirms it
+        if(canEditGroups) vsc.postMessage({cmd:'groupCollapse', id, collapsed:g.collapsed});
+      };
+      h.addEventListener('dragstart', e=>{ e.dataTransfer.setData(DT_GRP, id); e.dataTransfer.effectAllowed='move'; });
+    });
+    el.querySelectorAll('.row.wt[draggable]').forEach(r=>{
+      r.addEventListener('dragstart', e=>{ e.dataTransfer.setData(DT_WT, r.dataset.id); e.dataTransfer.effectAllowed='move'; r.classList.add('dragging'); });
+      r.addEventListener('dragend', ()=>r.classList.remove('dragging'));
+    });
+    if(!canEditGroups) return;
+    el.querySelectorAll('.ghdr,.gbody').forEach(t=>{
+      const g=t.dataset.g;
+      t.addEventListener('dragover', e=>{
+        const types=[...e.dataTransfer.types];
+        const ok = types.includes(DT_WT) || (types.includes(DT_GRP) && t.classList.contains('ghdr') && g);
+        if(ok){ e.preventDefault(); e.dataTransfer.dropEffect='move'; t.classList.add('drop'); }
+      });
+      t.addEventListener('dragleave', ()=>t.classList.remove('drop'));
+      t.addEventListener('drop', e=>{
+        t.classList.remove('drop'); e.preventDefault();
+        const wt=e.dataTransfer.getData(DT_WT);
+        if(wt){ vsc.postMessage({cmd:'groupAssign', worktree:wt, group:g||null}); return; }
+        const moving=e.dataTransfer.getData(DT_GRP);
+        if(moving && g && moving!==g){
+          const ids=groupsData.map(x=>x.id).filter(x=>x!==moving);
+          ids.splice(ids.indexOf(g), 0, moving);   // drop onto a header → insert before it
+          vsc.postMessage({cmd:'groupReorder', ids});
+        }
+      });
+    });
   }
 
   function renderMonitor(){
@@ -1607,13 +1806,15 @@ class DevSummaryProvider {
   document.getElementById('filter').onclick=(ev)=>{ ev.stopPropagation(); const m=document.getElementById('filterMenu'); const open=!m.classList.contains('open'); if(open) renderFilterMenu(); m.classList.toggle('open', open); };
   document.addEventListener('click', ()=>document.getElementById('filterMenu').classList.remove('open'));
   document.getElementById('more').onclick=()=>vsc.postMessage({cmd:'more'});
+  document.getElementById('newGroup').onclick=()=>vsc.postMessage({cmd:'groupNew'});
   document.getElementById('settings').onclick=()=>vsc.postMessage({cmd:'settings'});
   document.getElementById('add').onclick=()=>vsc.postMessage({cmd:'newAgent'});
 
   window.addEventListener('message', e => {
     const m=e.data; if(!m) return;
     if(m.type==='limits'){ accts=m.accounts||[]; renderLim(); }
-    else if(m.type==='roster'){ ros=m.rows||[]; asstState=m.assistant||{}; termState=m.terminal||{}; multiAcct=!!m.multiAccount; renderRoster(); }
+    else if(m.type==='roster'){ ros=m.rows||[]; asstState=m.assistant||{}; termState=m.terminal||{}; multiAcct=!!m.multiAccount;
+      groupsData=m.groups||null; canEditGroups=!!m.canEditGroups; renderRoster(); }
     else if(m.type==='monitor'){ mon=m.m; renderMonitor(); }
     else if(m.type==='daemon'){ daemon={installed:!!m.installed, running:!!m.running, busy:!!m.busy}; renderRoster(); renderLim(); renderMonitor(); }
   });
@@ -1658,6 +1859,239 @@ function tmuxSessionForPid(pid) {
   });
 }
 
+// ---------------------------------------------------------------------------------------------------
+// New Session: account → repo → work item → branch name (→ group). A native multi-step Quick Pick.
+
+// `wtd <args>` → parsed JSON from its last stdout line (error text from stderr)
+function wtdJson(args) {
+  return new Promise((resolve, reject) => {
+    cp.execFile(wtdExe(), args, { windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (e, so, se) => {
+      if (e) return reject(new Error(((se || '').trim().split('\n').pop() || e.message).replace(/^wtd \S+: /, '')));
+      try { resolve(JSON.parse((so || '').trim().split('\n').pop() || 'null')); } catch (x) { reject(x); }
+    });
+  });
+}
+
+const BACK = Symbol('back');
+
+// One wizard step. `items` may be a promise (shown busy until it resolves). Resolves with the chosen
+// item, BACK, or undefined (dismissed).
+function wizardPick({ title, step, total, placeholder, items, active }) {
+  return new Promise((resolve) => {
+    const qp = vscode.window.createQuickPick();
+    let done = false; const finish = (v) => { if (!done) { done = true; resolve(v); qp.hide(); } };
+    Object.assign(qp, { title, step, totalSteps: total, placeholder, matchOnDescription: true, matchOnDetail: true, ignoreFocusOut: true });
+    if (step > 1) qp.buttons = [vscode.QuickInputButtons.Back];
+    const setItems = (list) => {
+      qp.items = list;
+      const a = active && list.find(active);
+      if (a) qp.activeItems = [a];
+    };
+    if (items && typeof items.then === 'function') {
+      qp.busy = true; qp.items = [{ label: '$(loading~spin) Loading…', alwaysShow: true, _loading: true }];
+      items.then((l) => { if (!done) { qp.busy = false; setItems(l); } },
+                 (e) => { if (!done) { qp.busy = false; qp.items = [{ label: '$(warning) ' + e.message, alwaysShow: true, _error: true }]; } });
+    } else setItems(items);
+    qp.onDidAccept(() => { const it = qp.selectedItems[0]; if (it && !it._loading && !it._error && it.kind !== vscode.QuickPickItemKind.Separator) finish(it); });
+    qp.onDidTriggerButton((b) => { if (b === vscode.QuickInputButtons.Back) finish(BACK); });
+    qp.onDidHide(() => { finish(undefined); qp.dispose(); });
+    qp.show();
+  });
+}
+
+function wizardInput({ title, step, total, value, prompt, validate, selection }) {
+  return new Promise((resolve) => {
+    const ib = vscode.window.createInputBox();
+    let done = false; const finish = (v) => { if (!done) { done = true; resolve(v); ib.hide(); } };
+    Object.assign(ib, { title, step, totalSteps: total, value, prompt, ignoreFocusOut: true, buttons: [vscode.QuickInputButtons.Back] });
+    if (selection) ib.valueSelection = selection;
+    ib.onDidChangeValue((v) => { ib.validationMessage = validate ? validate(v) : undefined; });
+    ib.validationMessage = validate ? validate(value) : undefined;
+    ib.onDidAccept(() => { if (!(validate && validate(ib.value) && validate(ib.value).severity !== vscode.InputBoxValidationSeverity.Warning)) finish(ib.value.trim()); });
+    ib.onDidTriggerButton(() => finish(BACK));
+    ib.onDidHide(() => { finish(undefined); ib.dispose(); });
+    ib.show();
+  });
+}
+
+function slugify(t, max) {
+  return String(t || '').toLowerCase().replace(/[`'"]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, max).replace(/-+$/, '');
+}
+
+// fix/… for bugs, docs/… for docs, feat/… otherwise; issue number first so branches sort by issue
+function branchFor(item) {
+  const labels = (item.labels || []).join(' ').toLowerCase();
+  const type = /bug|fix|regression|crash/.test(labels) ? 'fix' : /doc/.test(labels) ? 'docs' : 'feat';
+  const s = slugify(item.title, 40);
+  return type + '/' + (item.number ? item.number + (s ? '-' + s : '') : s);
+}
+
+function validBranch(v) {
+  v = (v || '').trim();
+  if (!v) return 'Enter a branch name';
+  if (!/^[A-Za-z0-9._\/-]+$/.test(v)) return 'Use letters, digits, . _ - and /';
+  if (/^[\/.]|\/$|\.\.|\/\/|\.lock$|@\{/.test(v)) return 'Not a valid git branch name';
+  return null;
+}
+
+function usageText(u) {
+  if (!u) return '';
+  const p = (l) => (l && typeof l.used === 'number' ? Math.round(l.used) + '%' : '--');
+  return '5h ' + p(u.five_hour) + ' · 7d ' + p(u.seven_day);
+}
+
+function issueMarkdown(item, detail) {
+  const ref = item.number ? '#' + item.number : '';
+  const title = (detail && detail.title) || item.title;
+  const head = item.url ? '[' + (ref ? ref + ' ' : '') + title + '](' + item.url + ')' : (ref ? ref + ' ' : '') + title;
+  const lines = ['**Work item:** ' + head + (item.repo ? ' — ' + item.repo : ''), ''];
+  if ((item.labels || []).length) lines.push('Labels: ' + item.labels.join(', '), '');
+  if (item.number) lines.push('When this work is ready for a PR, include `Closes ' + (item.repo ? item.repo : '') + '#' + item.number + '` in pr-notes.md.', '');
+  const body = ((detail && detail.body) || '').trim();
+  if (body) lines.push('### Issue description', '', body.length > 8000 ? body.slice(0, 8000) + '\n\n… (truncated — see the issue)' : body, '');
+  return lines.join('\n');
+}
+
+async function newSessionWizard(dev) {
+  const T = 'New Session';
+  const usage = new Map(((dev.daemon && dev.daemon.accounts) || []).map((a) => [a.name, a]));
+  const accountsP = wtdJson(['account', 'ls']);
+  const reposP = wtdJson(['repo', 'ls']);
+  const st = { step: 1 };
+  for (;;) {
+    if (st.step === 1) {
+      const accts = await accountsP.catch(() => []);
+      const items = [];
+      for (const prov of ['claude', 'codex']) {
+        const list = accts.filter((a) => a.provider === prov);
+        if (!list.length) continue;
+        items.push({ label: prov === 'claude' ? 'Claude' : 'Codex', kind: vscode.QuickPickItemKind.Separator });
+        for (const a of list) items.push({
+          label: (prov === 'claude' ? '$(sparkle) ' : '$(symbol-misc) ') + a.name + (a.logged_in ? '' : ' $(circle-slash)'),
+          description: [a.email, a.plan, prov === 'claude' && a.logged_in ? usageText(usage.get(a.name)) : ''].filter(Boolean).join(' · '),
+          detail: !a.logged_in ? 'Not logged in — log in from Settings → Accounts' : (a.roles || []).includes('dev') ? 'Default for new sessions' : undefined,
+          acct: a,
+        });
+      }
+      const it = await wizardPick({ title: T, step: 1, total: 4, placeholder: 'Run the session under which account?', items,
+        active: (i) => i.acct && (i.acct.roles || []).includes('dev') });
+      if (!it || it === BACK) return;
+      if (!it.acct.logged_in) { vscode.window.showWarningMessage(it.acct.provider + ' account "' + it.acct.name + '" is not logged in.', 'Open Settings').then((c) => { if (c) dev._openSettings && dev._openSettings(); }); continue; }
+      st.account = it.acct; st.step = 2; continue;
+    }
+    if (st.step === 2) {
+      const repos = await reposP.catch(() => []);
+      const items = repos.map((r) => ({ label: '$(repo) ' + r.slug, description: r.github_detected || (r.local_only ? 'local repo' : r.url),
+        detail: r.worktrees + ' worktree' + (r.worktrees === 1 ? '' : 's') + (r.default_branch ? ' · ' + r.default_branch : ''), repo: r }));
+      items.push({ label: '', kind: vscode.QuickPickItemKind.Separator },
+        { label: '$(lightbulb) Planning agent', description: 'no repo yet — scope a new app', plan: true },
+        { label: '$(add) Add a repository…', description: 'opens Settings', add: true });
+      const it = await wizardPick({ title: T, step: 2, total: 4, placeholder: 'Which repository?', items,
+        active: (i) => st.repo && i.repo && i.repo.slug === st.repo.slug });
+      if (!it) return; if (it === BACK) { st.step = 1; continue; }
+      if (it.add) { dev._openSettings && dev._openSettings(); return; }
+      st.plan = !!it.plan; st.repo = it.repo || null; st.item = null; st.step = st.plan ? 4 : 3; continue;
+    }
+    if (st.step === 3) {
+      const slug = st.repo.slug;
+      const base = [
+        { label: '$(add) Blank session', description: 'start from ' + (st.repo.default_branch || 'the default branch'), blank: true },
+        { label: '$(git-branch) Existing branch…', description: 'check out a branch that already exists', existing: true },
+      ];
+      const loaded = wtdJson(['issues', 'ls', slug]).then((r) => {
+        const src = r.source || {};
+        const where = src.kind === 'project' ? 'Project #' + src.number + (src.offer && src.offer.length ? ' · ' + src.offer.join(', ') : '') : 'Issues · ' + (src.repo || '');
+        const list = (r.items || []).map((i) => ({
+          label: (i.kind === 'draft' ? '$(note) ' : '$(issues) ') + (i.number ? '#' + i.number + ' ' : '') + i.title,
+          description: [i.status, (i.labels || []).join(', ')].filter(Boolean).join(' · '),
+          detail: (i.mine ? '$(account) assigned to you' : (i.assignees || []).length ? 'assigned to ' + i.assignees.join(', ') : undefined),
+          item: i,
+        }));
+        return [...base, { label: where + ' (' + list.length + ')', kind: vscode.QuickPickItemKind.Separator }, ...list];
+      }, (e) => [...base, { label: '', kind: vscode.QuickPickItemKind.Separator }, { label: '$(warning) Couldn’t load issues', detail: e.message, settings: true }]);
+      const it = await wizardPick({ title: T, step: 3, total: 4, placeholder: 'What will this session work on? (type to search issues)', items: loaded });
+      if (!it) return; if (it === BACK) { st.step = 2; continue; }
+      if (it.settings) { dev._openSettings && dev._openSettings(); return; }
+      if (it.existing) {
+        const br = await pickBranch(dev, slug); if (br === BACK) continue; if (!br) return;
+        st.item = null; st.branch = br; st.existing = true; st.step = 5; continue;
+      }
+      st.item = it.item || null; st.existing = false; st.branch = null; st.step = 4; continue;
+    }
+    if (st.step === 4) {
+      const proposed = st.plan ? 'new-app' : st.item ? branchFor(st.item) : 'feat/';
+      const v = await wizardInput({ title: T, step: 4, total: 4, value: st.branch || proposed,
+        prompt: st.plan ? 'Name for the planning agent' : 'Branch name (also the worktree name)',
+        selection: st.item || st.plan ? undefined : [proposed.length, proposed.length],
+        validate: (x) => {
+          const bad = validBranch(x); if (bad) return bad;
+          const id = (st.plan ? 'plan' : st.repo.slug) + '/' + x.trim();
+          if (dev.daemon && dev.daemon.wts.has(id)) return { message: 'A worktree with this name exists — Enter opens it', severity: vscode.InputBoxValidationSeverity.Warning };
+          return null;
+        } });
+      if (!v) return; if (v === BACK) { st.step = st.plan ? 2 : 3; continue; }
+      st.branch = v; st.step = 5; continue;
+    }
+    if (st.step === 5) {
+      const groups = (dev.daemon && dev.daemon.running && dev.daemon.groups) || [];
+      if (groups.length) {
+        const items = [{ label: '$(circle-outline) Ungrouped', g: null }, ...groups.map((g) => ({ label: '$(folder) ' + g.name, g: g.id }))];
+        const it = await wizardPick({ title: T, step: 5, total: 5, placeholder: 'Add it to a group?', items });
+        if (!it) return; if (it === BACK) { st.step = st.existing ? 3 : 4; continue; }
+        st.group = it.g;
+      }
+      return launchSession(dev, st);
+    }
+  }
+}
+
+// branches on origin, newest first (for "Existing branch…")
+async function pickBranch(dev, slug) {
+  const bare = path.join(DEV, 'repos', slug, '.bare');
+  const branches = new Promise((resolve, reject) => cp.execFile('git', ['-c', 'safe.bareRepository=all', '-C', bare, 'for-each-ref', '--sort=-committerdate',
+    '--format=%(refname:short)\t%(committerdate:relative)\t%(subject)', 'refs/remotes/origin', 'refs/heads'], { windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (e, so) => {
+    if (e) return reject(e);
+    const seen = new Set();
+    resolve((so || '').split('\n').filter(Boolean).map((l) => l.split('\t')).map(([ref, when, subj]) => ({ name: ref.replace(/^origin\//, ''), when, subj }))
+      .filter((b) => b.name !== 'HEAD' && b.name !== 'origin' && !seen.has(b.name) && seen.add(b.name))
+      .map((b) => ({ label: '$(git-branch) ' + b.name, description: b.when, detail: b.subj, branch: b.name })));
+  }));
+  const it = await wizardPick({ title: 'New Session', step: 3, total: 4, placeholder: 'Which branch?', items: branches });
+  if (!it) return undefined; if (it === BACK) return BACK;
+  return it.branch;
+}
+
+async function launchSession(dev, st) {
+  const slug = st.plan ? 'plan' : st.repo.slug, name = st.branch;
+  const id = slug + '/' + name;
+  if (dev.daemon && dev.daemon.wts.has(id)) { dev.openOrFocus(slug, name); return; }
+  const args = [];
+  if (st.account) args.push('--account', st.account.provider === 'codex' ? 'codex:' + st.account.name : st.account.name);
+  if (st.item) {
+    let detail = null;
+    if (st.item.number && st.item.repo) detail = await wtdJson(['issues', 'show', st.item.repo, String(st.item.number)]).catch(() => null);
+    const file = path.join(WTD, 'state', 'issues', id.replace(/\//g, '__') + '.md');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, issueMarkdown(st.item, detail));
+    args.push('--issue-file', file.replace(/\\/g, '/'));
+  }
+  const t = vscode.window.createTerminal({ name, location: vscode.TerminalLocation.Editor, env: wtdTermEnv(), shellPath: bashShell(),
+    shellArgs: ['-lc', ['agent', slug, name].concat(args).map(shq).join(' ')] });
+  dev._terms.set(dev._key(slug, name), t); dev._current = t;
+  t.show();
+  // after the worktree exists: join the chosen group, move the project card
+  const afterCreate = async () => {
+    for (let i = 0; i < 60 && !(dev.daemon && dev.daemon.wts.has(id)); i++) await new Promise((r) => setTimeout(r, 1000));
+    if (st.group && dev.daemon && dev.daemon.running) dev.daemon.request('group.assign', { worktree: id, group: st.group }).catch(() => {});
+    if (st.item && st.item.item_id) {
+      wtdJson(['issues', 'start', slug, st.item.item_id]).then((r) => { if (r && r.moved) vscode.window.setStatusBarMessage('$(project) Moved the card to ' + r.to, 5000); },
+        (e) => vscode.window.showWarningMessage('Couldn’t move the project card: ' + e.message));
+    }
+  };
+  afterCreate();
+  setTimeout(() => dev._postRoster(), 2500);
+}
+
 function activate(context) {
   refreshDevRoot();   // resolve the real dev base (the tree is relocatable) before anything scans it
 
@@ -1687,6 +2121,7 @@ function activate(context) {
     // folder colours: refresh just the worktree whose status changed
     if (kind === 'fleet' && wt && (!prev || prev.status !== wt.status)) provider.refresh(vscode.Uri.file(wt.path));
     if (settings && (kind === 'daemon' || kind === 'accounts')) settings.onDaemonChange();
+    if (kind === 'messages') { dev._onMessages(); kick('fleet'); }
     kick(kind);
   });
   settings = new SettingsPanel({

@@ -193,6 +193,7 @@ from=""
 account=""         # --account <name>: run this session under a different Claude login (its own
                    # CLAUDE_CONFIG_DIR) so ALL of the session's usage/cost bills to that account.
 refs=()            # reference tokens (cross-repo context)
+issue_file=""      # --issue-file <md>: the work item New Session picked; seeded into a NEW worktree's CLAUDE.md
 # Auto-launch claude in the session's main pane on creation; opt out with --no-claude or
 # AGENT_NO_CLAUDE=1 (e.g. when you just want a shell in the worktree).
 launch_claude=1; [ -n "${AGENT_NO_CLAUDE:-}" ] && launch_claude=0
@@ -208,6 +209,7 @@ while [ "$#" -gt 0 ]; do
     --no-auto)   pmode=default; shift;;          # start claude in normal (ask) permission mode
     --mode)   [ "$#" -ge 2 ] || { echo "error: --mode requires a value"; exit 1; }; pmode="$2"; shift 2;;
     --no-claude) launch_claude=0; shift;;
+    --issue-file) [ "$#" -ge 2 ] || { echo "error: --issue-file requires a path"; exit 1; }; issue_file="$2"; shift 2;;
     *)        refs+=("$1"); shift;;
   esac
 done
@@ -218,7 +220,27 @@ done
 bind_session="${repo}-${name}"; bind_session="${bind_session//[.:]/-}"
 bound_acct="$(wtd_session_account_get "$bind_session")"
 ccdir=""; account_label="$account"
-if [ -n "$account" ]; then
+# A Codex account (`codex:<name>`) — from --account, this session's binding, or the dev role — runs
+# `codex` with CODEX_HOME set to that login instead of claude. Claude routing below is skipped.
+provider=claude; codex_home=""
+cand="$account"; [ -z "$cand" ] && cand="$bound_acct"; [ -z "$cand" ] && cand="$(account_name_for_role dev)"
+case "$cand" in
+  codex:*)
+    provider=codex; cname="${cand#codex:}"
+    if [ "$cname" = default ]; then codex_home="$HOME/.codex"; else codex_home="$HOME/.codex-accounts/$cname"; fi
+    [ -d "$codex_home" ] || [ "$cname" = default ] || { echo "error: no Codex account '$cname' (add it in Settings → Accounts)"; exit 1; }
+    command -v codex >/dev/null 2>&1 || { echo "error: the Codex CLI isn't installed (npm i -g @openai/codex)"; exit 1; }
+    account="codex-skip"; account_label="codex:$cname" ;;
+esac
+if [ "$provider" = codex ]; then
+  : # CODEX_HOME is exported at launch
+elif [ "$account" = default ]; then
+  wtd_session_account_set "$bind_session" default    # explicitly the default login (~/.claude), over any role
+  bound_acct=default; account=""
+fi
+if [ "$provider" = codex ]; then
+  :
+elif [ -n "$account" ]; then
   ccdir="$(account_dir_for_name "$account")"
   [ -n "$ccdir" ] || { echo "error: no Claude account '$account'."; echo "       create it with:  account add $account"; exit 1; }
 elif [ -n "$bound_acct" ] && [ "$bound_acct" != default ]; then
@@ -340,6 +362,15 @@ if [ ! -d "$wt" ]; then
   # EVERY open (not just creation), so new skills reach existing worktrees too.
   mkdir -p "$wt/.claude/skills" "$wt/.claude/plans"
   [ -f "$wt/CLAUDE.md" ] || cp "$WTD/templates/CLAUDE.md" "$wt/CLAUDE.md"
+  # the issue / project card this worktree is for (from New Session) → the Context / scope section
+  if [ -n "$issue_file" ] && [ -f "$issue_file" ]; then
+    tmp=$(mktemp)
+    awk 'FNR==NR { buf = buf $0 "\n"; next }
+         /What this worktree is for\. Fill in per task\./ && !done { printf "%s", buf; done=1; next }
+         { print }' "$issue_file" "$wt/CLAUDE.md" > "$tmp" && mv "$tmp" "$wt/CLAUDE.md"
+    mkdir -p "$wt/.claude" && cp "$issue_file" "$wt/.claude/issue.md"
+    echo "seeded the work item into CLAUDE.md (Context / scope)"
+  fi
 
   # seed gitignored host-local env files from .wtd/env/<slug>/ (e.g. .env, .devcontainer/.env).
   # The stash mirrors the worktree layout: each file is copied to the same relative path, but
@@ -361,7 +392,7 @@ if [ ! -d "$wt" ]; then
   if [ "$is_plan" = 1 ]; then exclude="$wt/.git/info/exclude"; else exclude="$bare/info/exclude"; fi
   mkdir -p "$(dirname "$exclude")"; [ -f "$exclude" ] || : > "$exclude"
   if [ -f "$exclude" ]; then
-    for ign in CLAUDE.md pr-notes.md .claude-status .claude-status.resume; do
+    for ign in CLAUDE.md pr-notes.md .claude-status .claude-status.resume .claude/issue.md .claude/skills/; do
       grep -qxF "$ign" "$exclude" && continue
       [ -s "$exclude" ] && [ -n "$(tail -c1 "$exclude")" ] && printf '\n' >> "$exclude"
       printf '%s\n' "$ign" >> "$exclude"
@@ -455,6 +486,8 @@ if [ "$(wtd_session_backend)" != tmux ]; then
   # wtd_session_run_claude registers the session, exports WTD_SESSION, cd's to the worktree, and
   # exec's claude (replacing this shell). The trap it sets deregisters on exit so liveness is accurate.
   export WTD_ACCOUNT="${account_label:-}"   # shown on the roster row (wtd run reports it to the daemon)
+  export WTD_PROVIDER="$provider"
+  [ "$provider" = codex ] && export CODEX_HOME="$codex_home"
   wtd_session_run_claude "$session" "$repo" "$name" "$wt" "$ccdir" "$pmode" "$launch_claude"
   exit 0   # safety net: wtd_session_run_claude exec's, so we never get here
 fi

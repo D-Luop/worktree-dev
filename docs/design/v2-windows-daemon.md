@@ -314,6 +314,25 @@ user.
 `CLAUDE.md` says other worktrees exist and points to `fleet_list` / `fleet_get`, so agents look things
 up on demand.
 
+## Status (2026-10-04)
+
+Phases 1–3 are built and installed. What changed from the plan while building them:
+
+- **Store:** groups, membership and messages live in a JSON file (`.wtd/state/store.json`, atomic
+  writes), not SQLite. The data is tiny, and this keeps the build light.
+- **Codex sessions:** Codex has Claude-compatible hooks (`hooks.json` with the same events and stdin
+  JSON), so `wtd run` / `wtd host` write the status hooks into the account's `CODEX_HOME`. They also
+  register the MCP server and trust the worktree in `config.toml`. Codex asks the user to trust new
+  hooks once; that is deliberately not bypassed.
+- **Hosted sessions:** `wtd host` opens or attaches. Re-attaching clears the terminal and makes
+  conpty repaint the viewport; scrollback from before the re-attach isn't replayed.
+- **Message delivery** types an approved message into the target's hosted session as a bracketed
+  paste, one per turn, after its turn ends. Targets without a hosted session keep it queued until
+  their session starts.
+- **Smart App Control** (Windows 11, enforce mode) can block an unsigned `wtd.exe` build by
+  reputation, per file hash. One build was blocked; rebuilding with different codegen got through.
+  Shipping to other machines needs code signing (e.g. Azure Trusted Signing).
+
 ## 5. Migration plan
 
 | Phase | Delivers | Retires |

@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::model::{Account, Metrics, Snapshot, Worktree};
+use crate::model::{Account, Group, Message, Metrics, Snapshot, Worktree};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -45,6 +45,10 @@ pub enum Push {
     Remove { rev: u64, id: String },
     Accounts { rev: u64, accounts: Vec<Account> },
     Metrics { rev: u64, metrics: Metrics },
+    /// The full group list (order matters) after any group change.
+    Groups { rev: u64, groups: Vec<Group> },
+    /// Undelivered messages (pending approval or queued) after any message change.
+    Messages { rev: u64, messages: Vec<Message> },
     /// The daemon is shutting down (clients should show "stopped").
     Shutdown,
     /// Sent to a `wtd run` connection: end your session (terminate its job).
@@ -79,6 +83,34 @@ pub mod method {
     pub const REFRESH: &str = "refresh";
     /// `{}` → `{}`, then the daemon exits.
     pub const SHUTDOWN: &str = "shutdown";
+
+    // --- hosted sessions (Phase 3) ---
+    /// `{dir, kind, account, program, exe, args, env, cols, rows}` → `{session, worktree, created}`;
+    /// attaches to the worktree's hosted session if one is running, else starts it. The connection
+    /// then carries binary frames (see daemon/host.rs).
+    pub const SESSION_SPAWN: &str = "session.spawn";
+    /// `{worktree | dir, cols, rows}` → same, attach only.
+    pub const SESSION_ATTACH: &str = "session.attach";
+
+    // --- groups (Phase 2) ---
+    /// `{name}` → `{id}`
+    pub const GROUP_CREATE: &str = "group.create";
+    /// `{id, name?, collapsed?}` → `{}`
+    pub const GROUP_UPDATE: &str = "group.update";
+    /// `{id}` → `{}`: members return to Ungrouped
+    pub const GROUP_DELETE: &str = "group.delete";
+    /// `{ids: [..]}` → `{}`: new order
+    pub const GROUP_REORDER: &str = "group.reorder";
+    /// `{worktree, group: id|null}` → `{}`
+    pub const GROUP_ASSIGN: &str = "group.assign";
+
+    // --- agent messaging (Phase 2) ---
+    /// `{from_dir, to, body}` → `{id, state}`. Always created `pending`: only the user releases it.
+    pub const MESSAGE_SEND: &str = "message.send";
+    /// `{id, approve: bool, body?}` → `{}` (from the UI, on the user's decision)
+    pub const MESSAGE_DECIDE: &str = "message.decide";
+    /// `{worktree?}` → `[Message]` (sent and received, most recent first)
+    pub const MESSAGE_LIST: &str = "message.list";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,4 +137,7 @@ pub struct SessionParams {
     pub job: String,
     /// Pid of the launched program (claude).
     pub pid: u32,
+    /// Program name (`claude` | `codex`), for the roster.
+    #[serde(default)]
+    pub program: Option<String>,
 }

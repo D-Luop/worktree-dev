@@ -50,6 +50,17 @@ unsafe impl Sync for Handle {}
 /// Create a named job that kills every member when its last handle closes, and put the current
 /// process in it (children inherit membership). Keep the returned handle alive for the session.
 pub fn enter_new_job(name: &str) -> std::io::Result<Handle> {
+    let job = new_kill_on_close_job(name)?;
+    unsafe {
+        if AssignProcessToJobObject(job.0, GetCurrentProcess()) == FALSE {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(job)
+}
+
+/// A named job that kills every member when its last handle closes (members added by the caller).
+pub fn new_kill_on_close_job(name: &str) -> std::io::Result<Handle> {
     unsafe {
         let h = CreateJobObjectW(std::ptr::null(), wide(name).as_ptr());
         if h.is_null() {
@@ -65,9 +76,6 @@ pub fn enter_new_job(name: &str) -> std::io::Result<Handle> {
             std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
         ) == FALSE
         {
-            return Err(std::io::Error::last_os_error());
-        }
-        if AssignProcessToJobObject(job.0, GetCurrentProcess()) == FALSE {
             return Err(std::io::Error::last_os_error());
         }
         Ok(job)
