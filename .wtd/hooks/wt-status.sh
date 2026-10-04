@@ -17,6 +17,10 @@
 # process costs ~80-150ms on Windows (Git Bash), so the common case must spawn nothing: builtins only
 # (read, not cat), jq only when a field is actually needed, and no write when the state is unchanged
 # (an unchanged write still fires every file watcher → the roster rebuilds → git status everywhere).
+# Native Windows: the Rust `wtd hook` implements this same state machine (unit- and differential-
+# tested against this script) in ~50ms instead of ~500ms. Delegate when it is installed.
+W="${BASH_SOURCE[0]%/*}/../bin/wtd.exe"; [ -x "$W" ] && exec "$W" hook "$@"
+
 ev="${1:-}"
 input=""; IFS= read -r -d '' input || true   # the hook JSON (empty when invoked with </dev/null)
 d="${CLAUDE_PROJECT_DIR:-}"

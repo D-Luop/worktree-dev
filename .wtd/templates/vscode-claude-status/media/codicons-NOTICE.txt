@@ -1,0 +1,1 @@
+Codicons 0.0.46-24 — © Microsoft Corporation. Icon font licensed CC BY 4.0 (codicons-LICENSE-font.txt); CSS licensed MIT (codicons-LICENSE-code.txt). Source: https://github.com/microsoft/vscode-codicons

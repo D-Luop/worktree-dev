@@ -70,6 +70,19 @@ write a **self-contained** `.html` (inline CSS, `data:`-URI images, inline JS â€
 with no network), then run **`preview <file.html>`** from the worktree. A ðŸ–¼ appears on this worktree's
 roster row; the user clicks it to open the mockup editor-side. Re-run to refresh. (Or invoke `/preview`.)
 
+## Other worktrees (the fleet)
+
+This worktree is one of several running in parallel: other agents work on other branches and repos
+at the same time. The `wtd` MCP tools let you see them **read-only**:
+- `fleet_list`: every worktree, with its status, live session, git state and plan title.
+- `fleet_get`: one worktree's plan, recent commits, changes vs the default branch and PR notes.
+- `fleet_read_file`: read a file from another worktree.
+
+Use them when your work may overlap someone else's: shared files, an API another branch is changing,
+or a dependency on unmerged work. **Never edit another worktree.** Sending a prompt to another
+worktree's agent is a separate, user-approved step: always propose the message and the reason to the
+user first, and only send it if they agree.
+
 ## Referencing files for the user
 
 When you point the user at a file, write its **ABSOLUTE** path (e.g.

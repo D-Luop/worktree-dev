@@ -38,6 +38,7 @@ elif [ -n "${ASSISTANT_ACCOUNT:-}" ]; then
   ccdir="$(account_dir_for_name "$ASSISTANT_ACCOUNT" || true)"
 fi
 [ -n "$ccdir" ] && export CLAUDE_CONFIG_DIR="$ccdir"
+export WTD_ACCOUNT="${account:-${ASSISTANT_ACCOUNT:-}}"   # reported to the daemon by `wtd run`
 
 export WTD_SESSION="assistant"
 cd "$DEV" || exit 1
@@ -71,14 +72,14 @@ idf="$(wtd_session_idfile assistant)"; id=""
 if [ -f "$idf" ]; then id="$(cat "$idf" 2>/dev/null || true)"; fi
 if [ -n "$id" ]; then
   if [ -f "$(wtd_claude_transcript "$DEV" "$id")" ]; then
-    exec claude --permission-mode "$pmode" --append-system-prompt "$SYS" --resume "$id"
+    WTD_SESSION_KIND=assistant wtd_exec_claude --permission-mode "$pmode" --append-system-prompt "$SYS" --resume "$id"
   fi
-  exec claude --permission-mode "$pmode" --append-system-prompt "$SYS" --session-id "$id"
+  WTD_SESSION_KIND=assistant wtd_exec_claude --permission-mode "$pmode" --append-system-prompt "$SYS" --session-id "$id"
 fi
 id="$(wtd_uuid || true)"
 if [ -n "$id" ]; then
   mkdir -p "$(wtd_session_idsdir)"
   printf '%s\n' "$id" > "$idf"
-  exec claude --permission-mode "$pmode" --append-system-prompt "$SYS" --session-id "$id"
+  WTD_SESSION_KIND=assistant wtd_exec_claude --permission-mode "$pmode" --append-system-prompt "$SYS" --session-id "$id"
 fi
-exec claude --permission-mode "$pmode" --append-system-prompt "$SYS"   # no uuid tool → plain session
+WTD_SESSION_KIND=assistant wtd_exec_claude --permission-mode "$pmode" --append-system-prompt "$SYS"   # no uuid tool → plain session

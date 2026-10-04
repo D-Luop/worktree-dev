@@ -225,7 +225,17 @@ wtd_session_kill() {
   case "$(wtd_session_backend)" in
     tmux) tmux kill-session -t "=$session" 2>/dev/null ;;
     *)
-      local f pid rslug rname; f="$(wtd_session_keyfile "$session")"
+      local f pid rslug rname e out; f="$(wtd_session_keyfile "$session")"
+      # Sessions launched under `wtd run` live in a Job Object: one call kills the whole tree (claude,
+      # its children, and the launcher shells that exec'd into it), so the sweeps below aren't needed.
+      e="$(wtd_exe)"
+      if [ -n "$e" ] && [ -n "$wt" ]; then
+        local dev="${WTD%/.wtd}"
+        if out="$("$e" stop "${wt#"$dev/worktrees/"}" 2>/dev/null)" && [ "${out#stopped 0 }" = "$out" ]; then
+          wtd_session_deregister "$session"
+          return 0
+        fi
+      fi
       if [ -f "$f" ]; then
         IFS=$'\t' read -r rslug rname rwt pid _ < "$f"
         [ -z "$slug" ] && slug="$rslug"; [ -z "$name" ] && name="$rname"
@@ -280,15 +290,15 @@ wtd_session_run_claude() {
   [ -f "$idf" ] && id="$(cat "$idf" 2>/dev/null || true)"
   if [ -n "$id" ]; then
     if [ -f "$(wtd_claude_transcript "$wt" "$id" "$ccdir")" ]; then
-      exec claude --permission-mode "$pmode" --resume "$id"
+      wtd_exec_claude --permission-mode "$pmode" --resume "$id"
     fi
-    exec claude --permission-mode "$pmode" --session-id "$id"
+    wtd_exec_claude --permission-mode "$pmode" --session-id "$id"
   fi
   id="$(wtd_uuid || true)"
   if [ -n "$id" ]; then
     mkdir -p "$(wtd_session_idsdir)"
     printf '%s\n' "$id" > "$idf"
-    exec claude --permission-mode "$pmode" --session-id "$id"
+    wtd_exec_claude --permission-mode "$pmode" --session-id "$id"
   fi
-  exec claude --permission-mode "$pmode"   # no uuid tool available → plain session (unchanged behavior)
+  wtd_exec_claude --permission-mode "$pmode"   # no uuid tool available → plain session (unchanged behavior)
 }

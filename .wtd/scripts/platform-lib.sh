@@ -76,6 +76,20 @@ wtd_git_bash_path() {
   command -v bash 2>/dev/null
 }
 
+# wtd_exe → path of the installed wtd.exe (daemon / hook / session wrapper), or empty if not installed.
+wtd_exe() { local e="${WTD:?}/bin/wtd.exe"; [ -x "$e" ] && printf '%s' "$e"; }
+
+# wtd_exec_claude <claude args…>  → exec claude; inside a tracked job (`wtd run`) when wtd.exe is
+# installed, so the daemon sees the session live and `wtd stop` kills its whole process tree.
+# Session kind / account come from WTD_SESSION_KIND (agent|assistant) and WTD_ACCOUNT.
+wtd_exec_claude() {
+  local e; e="$(wtd_exe)"
+  if [ -n "$e" ]; then
+    exec "$e" run --kind "${WTD_SESSION_KIND:-agent}" --account "${WTD_ACCOUNT:-}" -- claude "$@"
+  fi
+  exec claude "$@"
+}
+
 # wtd_git_perf_config <bare>  → cheaper `git status` in every worktree of this bare (config is shared):
 # untrackedCache + manyFiles (index v4). Deliberately NOT core.fsmonitor: on a ~3k-file repo it measured
 # no gain (status is ~200ms either way — dominated by process startup), and it costs an idle daemon per

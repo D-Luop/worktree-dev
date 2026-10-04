@@ -52,8 +52,18 @@ if grep -q '>>> agent worktree launcher >>>' "$BASHRC" 2>/dev/null; then
   sed '/# >>> agent worktree launcher >>>/,/# <<< agent worktree launcher <<</d' "$BASHRC" > "$tmp" && mv "$tmp" "$BASHRC"
   echo "    removed obsolete ~/.bashrc agent() function"
 fi
-if ! printf '%s' "$PATH" | tr ':' '\n' | grep -qxF "$HOME/.local/bin"; then
-  echo "    NOTE: ~/.local/bin not on PATH in this shell; ~/.profile adds it for login shells."
+# Put ~/.local/bin on PATH for every bash: ~/.bashrc exports it, and ~/.bash_profile (what a login
+# shell reads — Git Bash and VSCode's bash terminals are login shells) sources ~/.bashrc. Without this
+# a fresh machine fails `agent` / `assistant` with "command not found".
+if ! grep -q 'wtd: ~/.local/bin on PATH' "$BASHRC" 2>/dev/null; then
+  { [ -s "$BASHRC" ] && [ -n "$(tail -c1 "$BASHRC")" ] && printf '\n'
+    printf '# wtd: ~/.local/bin on PATH (worktree-dev commands: agent, assistant, review, …)\n'
+    printf 'case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac\n'; } >> "$BASHRC"
+  echo "    added ~/.local/bin to PATH in ~/.bashrc"
+fi
+if ! grep -qs 'bashrc' "$HOME/.bash_profile"; then
+  printf '# load ~/.bashrc in login shells too\n[ -f ~/.bashrc ] && . ~/.bashrc\n' >> "$HOME/.bash_profile"
+  echo "    ~/.bash_profile now sources ~/.bashrc"
 fi
 # bash tab-completion for agent/archive/review (slugs + branch/worktree names). bash-completion
 # auto-sources ~/.local/share/bash-completion/completions/<cmd> on first <cmd><TAB> in a new shell.
@@ -86,9 +96,49 @@ if [ "${#missing[@]}" -gt 0 ]; then
   esac
 fi
 
+WTD_EXE="$WTD/bin/wtd.exe"
+if [ "$OS" = windows ]; then
+  echo "==> A2. build + install wtd.exe (daemon · hook · session wrapper · tray · MCP)"
+  built=""
+  if command -v cargo >/dev/null 2>&1; then
+    if (cd "$BASE/wtd" && cargo build --release -q); then built="$BASE/wtd/target/release/wtd.exe"; fi
+  else
+    echo "    SKIPPED: cargo not found — install Rust (winget install Rustlang.Rustup + VS C++ Build Tools)."
+    echo "    Until then the bash hooks are used."
+  fi
+  if [ -n "$built" ] && [ -f "$built" ]; then
+    mkdir -p "$WTD/bin"
+    was_running=0
+    if [ -x "$WTD_EXE" ]; then
+      "$WTD_EXE" daemon status >/dev/null 2>&1 && was_running=1
+      "$WTD_EXE" tray --quit >/dev/null 2>&1 || true   # section K starts the new one
+      [ "$was_running" = 1 ] && "$WTD_EXE" daemon stop >/dev/null 2>&1
+    fi
+    # wtd.exe (console CLI) + wtd-tray.exe (GUI subsystem: the tray never gets a console window).
+    # Live sessions (`wtd run`) and MCP servers keep running the old exe: Windows lets a running exe
+    # be renamed but not overwritten, so move it aside and clean up old copies that are free again.
+    stamp="$(date +%s)"
+    for exe in wtd.exe wtd-tray.exe; do
+      src="$(dirname "$built")/$exe"; dst="$WTD/bin/$exe"
+      [ -f "$src" ] || continue
+      [ -e "$dst" ] && { mv -f "$dst" "$dst.old-$stamp" 2>/dev/null || true; }
+      cp "$src" "$dst" && echo "    installed $dst"
+    done
+    for o in "$WTD/bin"/*.exe.old-*; do [ -e "$o" ] && rm -f "$o" 2>/dev/null; done; true
+    if [ "$was_running" = 1 ]; then "$WTD_EXE" daemon start >/dev/null && echo "    restarted the daemon"; fi
+  fi
+fi
+
 echo "==> C. merge Claude status hooks into ~/.claude/settings.json"
 mkdir -p "$(dirname "$SETTINGS")"
 HOOKS_RENDERED="$(mktemp)"; wtd_render "$HOOKS_TMPL" > "$HOOKS_RENDERED"   # __DEV__/__DISTRO__ -> real
+if [ -x "$WTD_EXE" ]; then
+  # call the Rust hook directly (skips the bash script that would just exec it)
+  tmp=$(mktemp)
+  jq --arg exe "$WTD_EXE" '(.. | objects | select(has("command")) | .command) |= sub("^.*/\\.wtd/hooks/wt-status\\.sh"; "\($exe) hook")' \
+     "$HOOKS_RENDERED" > "$tmp" && mv "$tmp" "$HOOKS_RENDERED"
+  echo "    status hooks → $WTD_EXE hook <event>"
+fi
 if [ -f "$SETTINGS" ]; then
   cp "$SETTINGS" "$SETTINGS.bak"
   echo "    backed up to $SETTINGS.bak"
@@ -153,7 +203,8 @@ echo "    set attribution.commit=\"\" and attribution.pr=\"\""
 echo "==> G. grant fleet-wide READ access to the reference checkouts (~/dev/refs)"
 # Reference checkouts (managed by `ref add` / `agent <slug> <name> <ref>...`) are GLOBAL context:
 # every worktree can read any of them, granted once here instead of per-worktree. Whole-tree
-# additionalDirectories covers refs added later; Edit/Write are denied to keep them read-only.
+# additionalDirectories covers refs added later; Edit is denied to keep them read-only (an Edit rule
+# covers every file-editing tool — Claude Code ignores Write(...) deny rules, so none is added).
 REFROOT="$BASE/refs"
 mkdir -p "$REFROOT"
 tmp=$(mktemp)
@@ -161,10 +212,10 @@ jq --arg root "$REFROOT" '
   .permissions = (.permissions // {})
   | .permissions.additionalDirectories = (((.permissions.additionalDirectories // []) + [$root]) | unique)
   | .permissions.deny =
-      (((.permissions.deny // []) + ["Edit(\($root)/**)", "Write(\($root)/**)"]) | unique)
+      (((.permissions.deny // []) - ["Write(\($root)/**)"] + ["Edit(\($root)/**)"]) | unique)
 ' "$SETTINGS" > "$tmp"
 mv "$tmp" "$SETTINGS"
-echo "    granted read on $REFROOT (Edit/Write denied) in $SETTINGS"
+echo "    granted read on $REFROOT (edits denied) in $SETTINGS"
 
 # Section H configures tmux (mouse, pane-lock, titles, bell, commit-click). Only the tmux backend
 # needs it — native Windows runs sessions in VSCode terminals, so skip the whole block there.
@@ -290,6 +341,33 @@ if jq empty "$WSET" 2>/dev/null; then
   echo "    git autodetect → open editors only; worktrees/repos/refs out of the file watcher; search trimmed"
 else
   echo "    SKIPPED: $WSET is not plain JSON (comments?) — add the settings by hand (see install.sh section J)"
+fi
+
+if [ -x "$WTD_EXE" ]; then
+  echo "==> K. wtd MCP server (fleet tools for agents) + tray icon"
+  WEXE_WIN="$(cygpath -w "$WTD_EXE" 2>/dev/null || printf '%s' "$WTD_EXE")"
+  # user-scope MCP server for the default login and every extra account (each has its own config dir)
+  reg_mcp() {
+    local label="$1"; shift
+    "$@" claude mcp remove --scope user wtd >/dev/null 2>&1 || true
+    if "$@" claude mcp add --scope user wtd -- "$WEXE_WIN" mcp >/dev/null 2>&1; then
+      echo "    [$label] MCP server 'wtd' registered (fleet_list / fleet_get / fleet_read_file)"
+    else
+      echo "    [$label] could not register the MCP server (is 'claude' on PATH?)"
+    fi
+  }
+  if command -v claude >/dev/null 2>&1; then
+    reg_mcp default env -u CLAUDE_CONFIG_DIR
+    for d in "$HOME/.claude-accounts"/*/; do
+      [ -d "$d" ] || continue
+      reg_mcp "$(basename "$d")" env CLAUDE_CONFIG_DIR="${d%/}"
+    done
+  else
+    echo "    SKIPPED MCP registration: 'claude' not on PATH"
+  fi
+  "$WTD_EXE" tray --logon on && echo "    tray starts at logon (toggle in its right-click menu)"
+  "$WTD_EXE" tray --spawn && echo "    tray icon started — find it in the taskbar's ^ overflow; drag it onto the taskbar to keep it visible"
+  echo "    the daemon does NOT auto-start: use the tray icon or the fleet panel's Start button"
 fi
 
 echo "==> done"

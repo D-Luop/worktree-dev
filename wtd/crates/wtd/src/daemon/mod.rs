@@ -1,0 +1,606 @@
+//! `wtd daemon start|stop|status|run`: the resident fleet service.
+//!
+//! Holds fleet state in memory and pushes changes to subscribers over the pipe. Spawns processes only
+//! for `git status` (debounced, per worktree, at most 2 at a time); everything else is in-process.
+
+pub mod git;
+pub mod scan;
+mod usage;
+
+use std::collections::{BTreeMap, HashMap};
+use std::fs::OpenOptions;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use anyhow::{bail, Context, Result};
+use serde_json::{json, Value};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+use tokio::sync::{broadcast, mpsc, Semaphore};
+use wtd_core::model::{Account, Metrics, Snapshot, Worktree, DEV_ID};
+use wtd_core::protocol::{method, HookParams, Push, Request, Response, ServerLine, SessionParams, PROTOCOL_VERSION};
+
+use crate::{client::Client, paths, win};
+
+const SCAN_EVERY: Duration = Duration::from_secs(10);
+const USAGE_EVERY: Duration = Duration::from_secs(60);
+const METRICS_EVERY: Duration = Duration::from_secs(5);
+/// After hook activity, wait this long for quiet before `git status`…
+const GIT_DEBOUNCE: Duration = Duration::from_secs(2);
+/// …but never longer than this after the first event of a burst.
+const GIT_MAX_DELAY: Duration = Duration::from_secs(10);
+const GIT_SWEEP_LIVE: Duration = Duration::from_secs(60);
+const GIT_SWEEP_IDLE: Duration = Duration::from_secs(300);
+const GIT_CONCURRENCY: usize = 2;
+
+pub fn main(args: &[String]) -> Result<i32> {
+    match args.first().map(String::as_str) {
+        Some("start") => start(),
+        Some("stop") => stop(),
+        Some("status") => status(),
+        Some("run") => run_foreground(),
+        _ => bail!("usage: wtd daemon start|stop|status|run"),
+    }
+}
+
+fn start() -> Result<i32> {
+    if Client::connect()?.is_some() {
+        println!("daemon already running");
+        return Ok(0);
+    }
+    let dev = paths::dev_root()?;
+    let state = paths::state_dir(&dev);
+    std::fs::create_dir_all(&state)?;
+    let log_path = state.join("daemon.log");
+    let log = OpenOptions::new().create(true).append(true).open(&log_path)?;
+    let mut cmd = Command::new(std::env::current_exe()?);
+    cmd.args(["daemon", "run"]).stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log);
+    win::spawn_detached(&mut cmd).context("starting the daemon")?;
+    for _ in 0..100 {
+        if Client::connect()?.is_some() {
+            println!("daemon started");
+            return Ok(0);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    bail!("daemon didn't come up; see {}", log_path.display())
+}
+
+fn stop() -> Result<i32> {
+    let Some(mut c) = Client::connect()? else {
+        println!("daemon not running");
+        return Ok(0);
+    };
+    c.request(method::SHUTDOWN, json!({}))?;
+    for _ in 0..100 {
+        if Client::connect()?.is_none() {
+            println!("daemon stopped");
+            return Ok(0);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    bail!("daemon didn't stop")
+}
+
+fn status() -> Result<i32> {
+    match Client::connect()? {
+        None => {
+            println!("stopped");
+            Ok(3)
+        }
+        Some(mut c) => {
+            let h = c.hello("cli")?;
+            println!("running  pid {}  v{}  dev {}", h["pid"], h["version"].as_str().unwrap_or("?"), h["dev_root"].as_str().unwrap_or("?"));
+            Ok(0)
+        }
+    }
+}
+
+fn run_foreground() -> Result<i32> {
+    let dev = paths::dev_root()?;
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
+    rt.block_on(serve(dev))?;
+    Ok(0)
+}
+
+pub fn now() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------------------------------
+
+struct Session {
+    wt: String,
+    kind: String,
+    account: Option<String>,
+    job: String,
+}
+
+#[derive(Clone, Copy)]
+struct GitDue {
+    due: Instant,
+    first: Instant,
+}
+
+#[derive(Default)]
+struct Inner {
+    rev: u64,
+    worktrees: BTreeMap<String, Worktree>,
+    /// Keyed by connection id: a session lives exactly as long as its `wtd run` connection.
+    sessions: HashMap<u64, Session>,
+    accounts: Vec<Account>,
+    metrics: Option<Metrics>,
+    metrics_subs: usize,
+    git_due: HashMap<String, GitDue>,
+    git_running: HashMap<String, ()>,
+    /// Last (job CPU 100ns, sample instant) per job for CPU% deltas.
+    cpu_prev: HashMap<String, (u64, Instant)>,
+}
+
+struct Daemon {
+    dev: PathBuf,
+    inner: Mutex<Inner>,
+    tx: broadcast::Sender<Push>,
+    next_conn: AtomicU64,
+}
+
+impl Daemon {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
+        self.inner.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Insert/replace a worktree and push it if anything changed. Call with the lock held.
+    fn upsert(&self, inner: &mut Inner, wt: Worktree) {
+        if inner.worktrees.get(&wt.id) == Some(&wt) {
+            return;
+        }
+        inner.rev += 1;
+        inner.worktrees.insert(wt.id.clone(), wt.clone());
+        let _ = self.tx.send(Push::Upsert { rev: inner.rev, worktree: wt });
+    }
+
+    fn remove(&self, inner: &mut Inner, id: &str) {
+        if inner.worktrees.remove(id).is_some() {
+            inner.rev += 1;
+            inner.git_due.remove(id);
+            let _ = self.tx.send(Push::Remove { rev: inner.rev, id: id.into() });
+        }
+    }
+
+    fn snapshot(&self, inner: &Inner) -> Snapshot {
+        Snapshot {
+            rev: inner.rev,
+            dev_root: self.dev.to_string_lossy().into(),
+            worktrees: inner.worktrees.values().cloned().collect(),
+            accounts: inner.accounts.clone(),
+            metrics: inner.metrics.clone(),
+        }
+    }
+
+    /// Recompute a worktree's `live`/`account` from the registered sessions.
+    fn refresh_liveness(&self, inner: &mut Inner, id: &str) {
+        let Some(mut wt) = inner.worktrees.get(id).cloned() else { return };
+        let s = inner.sessions.values().find(|s| s.wt == id && s.kind != "review" && s.kind != "ask");
+        wt.live = s.is_some();
+        wt.account = s.map(|s| s.account.clone().unwrap_or_else(|| "default".into()));
+        self.upsert(inner, wt);
+    }
+
+    fn schedule_git(inner: &mut Inner, id: &str, debounced: bool) {
+        let now = Instant::now();
+        let e = inner.git_due.entry(id.to_string()).or_insert(GitDue { due: now, first: now });
+        if debounced {
+            if e.due > now + GIT_DEBOUNCE || e.first + GIT_MAX_DELAY < now {
+                // fresh burst (or a far-future sweep entry): start the debounce window now
+                *e = GitDue { due: now + GIT_DEBOUNCE, first: now };
+            } else {
+                e.due = (now + GIT_DEBOUNCE).min(e.first + GIT_MAX_DELAY);
+            }
+        } else {
+            *e = GitDue { due: now, first: now };
+        }
+    }
+
+    fn worktree_id_for(&self, dir: &str) -> Option<String> {
+        paths::resolve_worktree(&self.dev, &paths::normalize(dir)).map(|r| r.id)
+    }
+}
+
+async fn serve(dev: PathBuf) -> Result<()> {
+    let name = paths::pipe_name();
+    let sa = win::owner_only_security_attributes() as usize;
+    let create = |first: bool| -> std::io::Result<NamedPipeServer> {
+        let mut o = ServerOptions::new();
+        o.first_pipe_instance(first).reject_remote_clients(true);
+        unsafe { o.create_with_security_attributes_raw(&name, sa as *mut std::ffi::c_void) }
+    };
+    let mut server = create(true).context("another wtd daemon is already running")?;
+
+    let (tx, _) = broadcast::channel(1024);
+    let d = Arc::new(Daemon { dev: dev.clone(), inner: Mutex::new(Inner::default()), tx, next_conn: AtomicU64::new(1) });
+    eprintln!("[{}] wtd daemon {} up: pid {}, dev {}", now(), env!("CARGO_PKG_VERSION"), std::process::id(), dev.display());
+
+    rescan(&d).await;
+    tokio::spawn(scan_loop(d.clone()));
+    tokio::spawn(git_loop(d.clone()));
+    tokio::spawn(usage_loop(d.clone()));
+    tokio::spawn(metrics_loop(d.clone()));
+
+    loop {
+        server.connect().await?;
+        let conn = server;
+        server = create(false)?;
+        let d = d.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle(d, conn).await {
+                eprintln!("[{}] connection error: {e:#}", now());
+            }
+        });
+    }
+}
+
+fn line(msg: &ServerLine) -> String {
+    let mut s = serde_json::to_string(msg).unwrap_or_default();
+    s.push('\n');
+    s
+}
+
+async fn handle(d: Arc<Daemon>, conn: NamedPipeServer) -> Result<()> {
+    let id = d.next_conn.fetch_add(1, Ordering::Relaxed);
+    let (r, mut w) = tokio::io::split(conn);
+    let (out, mut out_rx) = mpsc::unbounded_channel::<String>();
+    let writer = tokio::spawn(async move {
+        while let Some(l) = out_rx.recv().await {
+            if w.write_all(l.as_bytes()).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut forwarder: Option<tokio::task::JoinHandle<()>> = None;
+    let mut wants_metrics = false;
+    let mut lines = BufReader::new(r).lines();
+    while let Some(l) = lines.next_line().await? {
+        if l.trim().is_empty() {
+            continue;
+        }
+        let req: Request = match serde_json::from_str(&l) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[{}] bad request: {e}: {l}", now());
+                continue;
+            }
+        };
+        let rid = req.id;
+        let mut start_sub = false;
+        let result = match req.method.as_str() {
+            method::SUBSCRIBE => {
+                wants_metrics = req.params.get("metrics").and_then(Value::as_bool).unwrap_or(false);
+                start_sub = forwarder.is_none();
+                Ok(json!({}))
+            }
+            _ => dispatch(&d, id, &req, &out).await,
+        };
+        if let Some(rid) = rid {
+            let resp = match result {
+                Ok(v) => Response { id: rid, result: Some(v), error: None },
+                Err(e) => Response { id: rid, result: None, error: Some(format!("{e:#}")) },
+            };
+            let _ = out.send(line(&ServerLine::Response(resp)));
+        }
+        // after the response, so a client that waits for it never skips past the snapshot
+        if start_sub {
+            forwarder = Some(subscribe(&d, out.clone(), wants_metrics));
+        }
+    }
+
+    // disconnected
+    if let Some(f) = forwarder {
+        f.abort();
+    }
+    {
+        let mut inner = d.lock();
+        if wants_metrics {
+            inner.metrics_subs = inner.metrics_subs.saturating_sub(1);
+        }
+        if let Some(s) = inner.sessions.remove(&id) {
+            inner.cpu_prev.remove(&s.job);
+            d.refresh_liveness(&mut inner, &s.wt);
+            Daemon::schedule_git(&mut inner, &s.wt, true);
+        }
+    }
+    drop(out);
+    let _ = writer.await;
+    Ok(())
+}
+
+/// Send a snapshot, then forward every later push. Snapshot + subscribe happen under one lock so no
+/// change can slip between them.
+fn subscribe(d: &Arc<Daemon>, out: mpsc::UnboundedSender<String>, metrics: bool) -> tokio::task::JoinHandle<()> {
+    let (mut rx, snap) = {
+        let mut inner = d.lock();
+        if metrics {
+            inner.metrics_subs += 1;
+        }
+        (d.tx.subscribe(), d.snapshot(&inner))
+    };
+    let _ = out.send(line(&ServerLine::Push(Push::Snapshot { rev: snap.rev, snapshot: snap })));
+    let d = d.clone();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(Push::Metrics { .. }) if !metrics => continue,
+                Ok(p) => {
+                    if out.send(line(&ServerLine::Push(p))).is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let snap = d.snapshot(&d.lock());
+                    let _ = out.send(line(&ServerLine::Push(Push::Snapshot { rev: snap.rev, snapshot: snap })));
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
+async fn dispatch(d: &Arc<Daemon>, conn: u64, req: &Request, out: &mpsc::UnboundedSender<String>) -> Result<Value> {
+    let p = &req.params;
+    match req.method.as_str() {
+        method::HELLO => Ok(json!({
+            "protocol": PROTOCOL_VERSION,
+            "version": env!("CARGO_PKG_VERSION"),
+            "dev_root": d.dev.to_string_lossy(),
+            "pid": std::process::id(),
+        })),
+        method::HOOK => {
+            let h: HookParams = serde_json::from_value(p.clone())?;
+            let Some(id) = d.worktree_id_for(&h.dir) else { return Ok(Value::Null) };
+            let known = {
+                let mut inner = d.lock();
+                match inner.worktrees.get(&id).cloned() {
+                    Some(mut wt) => {
+                        wt.status = h.status;
+                        wt.last_activity = now();
+                        d.upsert(&mut inner, wt);
+                        Daemon::schedule_git(&mut inner, &id, true);
+                        true
+                    }
+                    None => false,
+                }
+            };
+            if !known {
+                rescan(d).await; // a worktree we haven't seen yet (just created)
+            }
+            Ok(Value::Null)
+        }
+        method::SESSION_REGISTER => {
+            let s: SessionParams = serde_json::from_value(p.clone())?;
+            let id = d.worktree_id_for(&s.dir).with_context(|| format!("{} is not a worktree-dev worktree", s.dir))?;
+            if !d.lock().worktrees.contains_key(&id) {
+                rescan(d).await;
+            }
+            let mut inner = d.lock();
+            inner.sessions.insert(conn, Session { wt: id.clone(), kind: s.kind, account: s.account, job: s.job });
+            let _ = out; // the session's own connection; `terminate` is pushed on it via session.stop
+            d.refresh_liveness(&mut inner, &id);
+            Ok(json!({}))
+        }
+        method::SESSION_STOP => {
+            let id = p.get("id").and_then(Value::as_str).context("missing id")?.to_string();
+            let jobs: Vec<String> = d.lock().sessions.values().filter(|s| s.wt == id).map(|s| s.job.clone()).collect();
+            let mut n = 0;
+            for j in &jobs {
+                if !j.is_empty() && win::terminate_job(j).unwrap_or(false) {
+                    n += 1;
+                }
+            }
+            Ok(json!({ "stopped": n }))
+        }
+        method::FLEET_LIST => Ok(serde_json::to_value(d.lock().worktrees.values().cloned().collect::<Vec<_>>())?),
+        method::FLEET_GET => {
+            let id = p.get("id").and_then(Value::as_str).context("missing id")?;
+            let wt = d.lock().worktrees.get(id).cloned().with_context(|| format!("no worktree '{id}'"))?;
+            Ok(serde_json::to_value(wt)?)
+        }
+        method::REFRESH => {
+            rescan(d).await;
+            let mut inner = d.lock();
+            match p.get("id").and_then(Value::as_str) {
+                Some(id) => Daemon::schedule_git(&mut inner, id, false),
+                None => {
+                    let ids: Vec<String> = inner.worktrees.keys().cloned().collect();
+                    for id in ids {
+                        Daemon::schedule_git(&mut inner, &id, false);
+                    }
+                }
+            }
+            Ok(json!({}))
+        }
+        method::SHUTDOWN => {
+            eprintln!("[{}] shutdown requested", now());
+            let _ = d.tx.send(Push::Shutdown);
+            tokio::spawn(async {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                std::process::exit(0);
+            });
+            Ok(json!({}))
+        }
+        m => bail!("unknown method '{m}'"),
+    }
+}
+
+// --- background loops ------------------------------------------------------------------------------
+
+/// Re-read the worktree list + cheap facts from disk and merge (keeping git/live/activity state).
+async fn rescan(d: &Arc<Daemon>) {
+    let dev = d.dev.clone();
+    let found = match tokio::task::spawn_blocking(move || scan::scan(&dev)).await {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    let mut inner = d.lock();
+    let mut seen = std::collections::HashSet::new();
+    for mut wt in found {
+        seen.insert(wt.id.clone());
+        match inner.worktrees.get(&wt.id) {
+            Some(old) => {
+                wt.git = old.git.clone();
+                wt.live = old.live;
+                wt.account = old.account.clone();
+                wt.last_activity = if wt.status != old.status { now() } else { old.last_activity };
+            }
+            None => {
+                if wt.id != DEV_ID {
+                    Daemon::schedule_git(&mut inner, &wt.id, false);
+                }
+            }
+        }
+        d.upsert(&mut inner, wt);
+    }
+    let gone: Vec<String> = inner.worktrees.keys().filter(|k| !seen.contains(*k)).cloned().collect();
+    for id in gone {
+        d.remove(&mut inner, &id);
+    }
+}
+
+async fn scan_loop(d: Arc<Daemon>) {
+    let mut t = tokio::time::interval(SCAN_EVERY);
+    t.tick().await;
+    loop {
+        t.tick().await;
+        rescan(&d).await;
+    }
+}
+
+async fn git_loop(d: Arc<Daemon>) {
+    let sem = Arc::new(Semaphore::new(GIT_CONCURRENCY));
+    let mut t = tokio::time::interval(Duration::from_millis(500));
+    loop {
+        t.tick().await;
+        let ready: Vec<(String, PathBuf)> = {
+            let mut inner = d.lock();
+            let now_i = Instant::now();
+            let ids: Vec<String> = inner
+                .git_due
+                .iter()
+                .filter(|(id, g)| g.due <= now_i && !inner.git_running.contains_key(*id))
+                .map(|(id, _)| id.clone())
+                .take(sem.available_permits())
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| {
+                    inner.git_due.remove(&id);
+                    let path = PathBuf::from(&inner.worktrees.get(&id)?.path);
+                    inner.git_running.insert(id.clone(), ());
+                    Some((id, path))
+                })
+                .collect()
+        };
+        for (id, path) in ready {
+            let Ok(permit) = sem.clone().acquire_owned().await else { return };
+            let d = d.clone();
+            tokio::spawn(async move {
+                let res = tokio::task::spawn_blocking(move || git::status(&path, now())).await.ok().flatten();
+                let mut inner = d.lock();
+                inner.git_running.remove(&id);
+                if let Some(mut wt) = inner.worktrees.get(&id).cloned() {
+                    if let Some(g) = res {
+                        wt.git = g;
+                    }
+                    let live = wt.live;
+                    d.upsert(&mut inner, wt);
+                    // background sweep: next check later unless activity schedules one sooner
+                    let next = Instant::now() + if live { GIT_SWEEP_LIVE } else { GIT_SWEEP_IDLE };
+                    inner.git_due.entry(id).or_insert(GitDue { due: next, first: next });
+                }
+                drop(permit);
+            });
+        }
+    }
+}
+
+async fn usage_loop(d: Arc<Daemon>) {
+    let home = match paths::home_dir() {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    let mut last: HashMap<String, Account> = HashMap::new();
+    let mut t = tokio::time::interval(USAGE_EVERY);
+    loop {
+        t.tick().await;
+        let h = home.clone();
+        let mut l = std::mem::take(&mut last);
+        let res = tokio::task::spawn_blocking(move || {
+            let a = usage::fetch_all(&h, &mut l, now());
+            (a, l)
+        })
+        .await;
+        let Ok((accounts, l)) = res else { continue };
+        last = l;
+        let mut inner = d.lock();
+        if inner.accounts != accounts {
+            inner.rev += 1;
+            inner.accounts = accounts.clone();
+            let _ = d.tx.send(Push::Accounts { rev: inner.rev, accounts });
+        }
+    }
+}
+
+async fn metrics_loop(d: Arc<Daemon>) {
+    let ncpu = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1);
+    let mut t = tokio::time::interval(METRICS_EVERY);
+    loop {
+        t.tick().await;
+        let (jobs, kinds, prev) = {
+            let inner = d.lock();
+            if inner.metrics_subs == 0 {
+                continue;
+            }
+            let jobs: Vec<String> = inner.sessions.values().map(|s| s.job.clone()).collect();
+            let kinds: Vec<String> = inner.sessions.values().map(|s| s.kind.clone()).collect();
+            (jobs, kinds, inner.cpu_prev.clone())
+        };
+        let res = tokio::task::spawn_blocking(move || {
+            let mut cpu_pct = 0.0;
+            let mut mem: u64 = 0;
+            let mut next = HashMap::new();
+            let now_i = Instant::now();
+            for j in jobs.iter().filter(|j| !j.is_empty()) {
+                let Some((cpu, pids)) = win::job_stats(j) else { continue };
+                if let Some((pc, pt)) = prev.get(j) {
+                    let wall = now_i.duration_since(*pt).as_nanos() as f64 / 100.0; // 100ns units
+                    if wall > 0.0 && cpu >= *pc {
+                        cpu_pct += (cpu - pc) as f64 / wall * 100.0;
+                    }
+                }
+                next.insert(j.clone(), (cpu, now_i));
+                mem += pids.iter().map(|p| win::working_set_bytes(*p)).sum::<u64>();
+            }
+            let (total, used) = win::system_memory_mb();
+            (cpu_pct, mem / (1024 * 1024), total, used, next)
+        })
+        .await;
+        let Ok((cpu_pct, mem_mb, total, used, next)) = res else { continue };
+        let agents = kinds.iter().filter(|k| *k == "agent" || *k == "assistant").count() as u32;
+        let m = Metrics {
+            sessions: kinds.len() as u32,
+            agents,
+            reviews: kinds.len() as u32 - agents,
+            cpu_pct: cpu_pct.round(),
+            mem_mb,
+            sys_total_mb: total,
+            sys_used_mb: used,
+            ncpu,
+        };
+        let mut inner = d.lock();
+        inner.cpu_prev = next;
+        inner.rev += 1;
+        inner.metrics = Some(m.clone());
+        let _ = d.tx.send(Push::Metrics { rev: inner.rev, metrics: m });
+    }
+}
