@@ -23,12 +23,12 @@ const ROLES: [&str; 3] = ["dev", "review", "assistant"];
 
 // --- shared helpers --------------------------------------------------------------------------------
 
-fn out(v: Value) -> Result<i32> {
+pub(crate) fn out(v: Value) -> Result<i32> {
     println!("{}", serde_json::to_string(&v)?);
     Ok(0)
 }
 
-fn valid_name(s: &str) -> bool {
+pub(crate) fn valid_name(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
@@ -87,7 +87,7 @@ fn remove_tree(p: &Path) -> std::io::Result<()> {
     std::fs::remove_dir_all(p)
 }
 
-fn which(prog: &str) -> Option<PathBuf> {
+pub(crate) fn which(prog: &str) -> Option<PathBuf> {
     let p = crate::run::resolve_program(prog);
     p.is_file().then_some(p)
 }
@@ -316,7 +316,7 @@ fn repo_add(dev: &Path, slug: &str, url: Option<&str>) -> Result<i32> {
     let excl = bare.join("info").join("exclude");
     std::fs::create_dir_all(excl.parent().unwrap())?;
     let mut text = std::fs::read_to_string(&excl).unwrap_or_default();
-    for ign in ["CLAUDE.md", "pr-notes.md", ".claude-status", ".claude-status.resume"] {
+    for ign in ["CLAUDE.md", "pr-notes.md", ".claude-status", ".claude-status.resume", ".claude/issue.md", ".claude/skills/"] {
         if !text.lines().any(|l| l.trim() == ign) {
             if !text.is_empty() && !text.ends_with('\n') {
                 text.push('\n');
@@ -366,7 +366,7 @@ fn gh() -> Result<PathBuf> {
     which("gh").context("GitHub CLI (gh) not found — install it: winget install GitHub.cli")
 }
 
-fn gh_json(args: &[&str]) -> Result<Value> {
+pub(crate) fn gh_json(args: &[&str]) -> Result<Value> {
     let mut c = Command::new(gh()?);
     c.args(args).stdin(Stdio::null());
     win::no_window(&mut c);

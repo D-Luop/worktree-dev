@@ -770,8 +770,14 @@ class DevSummaryProvider {
     for (const k of Object.keys(this._unread)) { const name = k.split('')[1]; if (this._unread[k] && termName(t) === name) { this.clearUnread(k); return; } }
   }
 
-  // "New session": the toolbar button and the `WorkTreeDev: New Session` palette command.
+  // "New session": the toolbar button and the `WorkTreeDev: New Session` palette command. With wtd.exe
+  // installed it's the guided picker; without it, the original free-text prompt.
   newAgent() {
+    if (daemonInstalled()) return newSessionWizard(this).catch((e) => vscode.window.showErrorMessage('New session: ' + e.message));
+    return this._legacyNewAgent();
+  }
+
+  _legacyNewAgent() {
     vscode.window.showInputBox({
       prompt: 'New agent — enter: <slug> <name> [ref-tokens…]   (slug "plan" = a repo-less planning agent)',
       placeHolder: 'plan my-new-app    ·    <slug> feat/my-thing',
@@ -1792,6 +1798,239 @@ function tmuxSessionForPid(pid) {
       });
     });
   });
+}
+
+// ---------------------------------------------------------------------------------------------------
+// New Session: account → repo → work item → branch name (→ group). A native multi-step Quick Pick.
+
+// `wtd <args>` → parsed JSON from its last stdout line (error text from stderr)
+function wtdJson(args) {
+  return new Promise((resolve, reject) => {
+    cp.execFile(wtdExe(), args, { windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (e, so, se) => {
+      if (e) return reject(new Error(((se || '').trim().split('\n').pop() || e.message).replace(/^wtd \S+: /, '')));
+      try { resolve(JSON.parse((so || '').trim().split('\n').pop() || 'null')); } catch (x) { reject(x); }
+    });
+  });
+}
+
+const BACK = Symbol('back');
+
+// One wizard step. `items` may be a promise (shown busy until it resolves). Resolves with the chosen
+// item, BACK, or undefined (dismissed).
+function wizardPick({ title, step, total, placeholder, items, active }) {
+  return new Promise((resolve) => {
+    const qp = vscode.window.createQuickPick();
+    let done = false; const finish = (v) => { if (!done) { done = true; resolve(v); qp.hide(); } };
+    Object.assign(qp, { title, step, totalSteps: total, placeholder, matchOnDescription: true, matchOnDetail: true, ignoreFocusOut: true });
+    if (step > 1) qp.buttons = [vscode.QuickInputButtons.Back];
+    const setItems = (list) => {
+      qp.items = list;
+      const a = active && list.find(active);
+      if (a) qp.activeItems = [a];
+    };
+    if (items && typeof items.then === 'function') {
+      qp.busy = true; qp.items = [{ label: '$(loading~spin) Loading…', alwaysShow: true, _loading: true }];
+      items.then((l) => { if (!done) { qp.busy = false; setItems(l); } },
+                 (e) => { if (!done) { qp.busy = false; qp.items = [{ label: '$(warning) ' + e.message, alwaysShow: true, _error: true }]; } });
+    } else setItems(items);
+    qp.onDidAccept(() => { const it = qp.selectedItems[0]; if (it && !it._loading && !it._error && it.kind !== vscode.QuickPickItemKind.Separator) finish(it); });
+    qp.onDidTriggerButton((b) => { if (b === vscode.QuickInputButtons.Back) finish(BACK); });
+    qp.onDidHide(() => { finish(undefined); qp.dispose(); });
+    qp.show();
+  });
+}
+
+function wizardInput({ title, step, total, value, prompt, validate, selection }) {
+  return new Promise((resolve) => {
+    const ib = vscode.window.createInputBox();
+    let done = false; const finish = (v) => { if (!done) { done = true; resolve(v); ib.hide(); } };
+    Object.assign(ib, { title, step, totalSteps: total, value, prompt, ignoreFocusOut: true, buttons: [vscode.QuickInputButtons.Back] });
+    if (selection) ib.valueSelection = selection;
+    ib.onDidChangeValue((v) => { ib.validationMessage = validate ? validate(v) : undefined; });
+    ib.validationMessage = validate ? validate(value) : undefined;
+    ib.onDidAccept(() => { if (!(validate && validate(ib.value) && validate(ib.value).severity !== vscode.InputBoxValidationSeverity.Warning)) finish(ib.value.trim()); });
+    ib.onDidTriggerButton(() => finish(BACK));
+    ib.onDidHide(() => { finish(undefined); ib.dispose(); });
+    ib.show();
+  });
+}
+
+function slugify(t, max) {
+  return String(t || '').toLowerCase().replace(/[`'"]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, max).replace(/-+$/, '');
+}
+
+// fix/… for bugs, docs/… for docs, feat/… otherwise; issue number first so branches sort by issue
+function branchFor(item) {
+  const labels = (item.labels || []).join(' ').toLowerCase();
+  const type = /bug|fix|regression|crash/.test(labels) ? 'fix' : /doc/.test(labels) ? 'docs' : 'feat';
+  const s = slugify(item.title, 40);
+  return type + '/' + (item.number ? item.number + (s ? '-' + s : '') : s);
+}
+
+function validBranch(v) {
+  v = (v || '').trim();
+  if (!v) return 'Enter a branch name';
+  if (!/^[A-Za-z0-9._\/-]+$/.test(v)) return 'Use letters, digits, . _ - and /';
+  if (/^[\/.]|\/$|\.\.|\/\/|\.lock$|@\{/.test(v)) return 'Not a valid git branch name';
+  return null;
+}
+
+function usageText(u) {
+  if (!u) return '';
+  const p = (l) => (l && typeof l.used === 'number' ? Math.round(l.used) + '%' : '--');
+  return '5h ' + p(u.five_hour) + ' · 7d ' + p(u.seven_day);
+}
+
+function issueMarkdown(item, detail) {
+  const ref = item.number ? '#' + item.number : '';
+  const title = (detail && detail.title) || item.title;
+  const head = item.url ? '[' + (ref ? ref + ' ' : '') + title + '](' + item.url + ')' : (ref ? ref + ' ' : '') + title;
+  const lines = ['**Work item:** ' + head + (item.repo ? ' — ' + item.repo : ''), ''];
+  if ((item.labels || []).length) lines.push('Labels: ' + item.labels.join(', '), '');
+  if (item.number) lines.push('When this work is ready for a PR, include `Closes ' + (item.repo ? item.repo : '') + '#' + item.number + '` in pr-notes.md.', '');
+  const body = ((detail && detail.body) || '').trim();
+  if (body) lines.push('### Issue description', '', body.length > 8000 ? body.slice(0, 8000) + '\n\n… (truncated — see the issue)' : body, '');
+  return lines.join('\n');
+}
+
+async function newSessionWizard(dev) {
+  const T = 'New Session';
+  const usage = new Map(((dev.daemon && dev.daemon.accounts) || []).map((a) => [a.name, a]));
+  const accountsP = wtdJson(['account', 'ls']);
+  const reposP = wtdJson(['repo', 'ls']);
+  const st = { step: 1 };
+  for (;;) {
+    if (st.step === 1) {
+      const accts = await accountsP.catch(() => []);
+      const items = [];
+      for (const prov of ['claude', 'codex']) {
+        const list = accts.filter((a) => a.provider === prov);
+        if (!list.length) continue;
+        items.push({ label: prov === 'claude' ? 'Claude' : 'Codex', kind: vscode.QuickPickItemKind.Separator });
+        for (const a of list) items.push({
+          label: (prov === 'claude' ? '$(sparkle) ' : '$(symbol-misc) ') + a.name + (a.logged_in ? '' : ' $(circle-slash)'),
+          description: [a.email, a.plan, prov === 'claude' && a.logged_in ? usageText(usage.get(a.name)) : ''].filter(Boolean).join(' · '),
+          detail: !a.logged_in ? 'Not logged in — log in from Settings → Accounts' : (a.roles || []).includes('dev') ? 'Default for new sessions' : undefined,
+          acct: a,
+        });
+      }
+      const it = await wizardPick({ title: T, step: 1, total: 4, placeholder: 'Run the session under which account?', items,
+        active: (i) => i.acct && (i.acct.roles || []).includes('dev') });
+      if (!it || it === BACK) return;
+      if (!it.acct.logged_in) { vscode.window.showWarningMessage(it.acct.provider + ' account "' + it.acct.name + '" is not logged in.', 'Open Settings').then((c) => { if (c) dev._openSettings && dev._openSettings(); }); continue; }
+      st.account = it.acct; st.step = 2; continue;
+    }
+    if (st.step === 2) {
+      const repos = await reposP.catch(() => []);
+      const items = repos.map((r) => ({ label: '$(repo) ' + r.slug, description: r.github_detected || (r.local_only ? 'local repo' : r.url),
+        detail: r.worktrees + ' worktree' + (r.worktrees === 1 ? '' : 's') + (r.default_branch ? ' · ' + r.default_branch : ''), repo: r }));
+      items.push({ label: '', kind: vscode.QuickPickItemKind.Separator },
+        { label: '$(lightbulb) Planning agent', description: 'no repo yet — scope a new app', plan: true },
+        { label: '$(add) Add a repository…', description: 'opens Settings', add: true });
+      const it = await wizardPick({ title: T, step: 2, total: 4, placeholder: 'Which repository?', items,
+        active: (i) => st.repo && i.repo && i.repo.slug === st.repo.slug });
+      if (!it) return; if (it === BACK) { st.step = 1; continue; }
+      if (it.add) { dev._openSettings && dev._openSettings(); return; }
+      st.plan = !!it.plan; st.repo = it.repo || null; st.item = null; st.step = st.plan ? 4 : 3; continue;
+    }
+    if (st.step === 3) {
+      const slug = st.repo.slug;
+      const base = [
+        { label: '$(add) Blank session', description: 'start from ' + (st.repo.default_branch || 'the default branch'), blank: true },
+        { label: '$(git-branch) Existing branch…', description: 'check out a branch that already exists', existing: true },
+      ];
+      const loaded = wtdJson(['issues', 'ls', slug]).then((r) => {
+        const src = r.source || {};
+        const where = src.kind === 'project' ? 'Project #' + src.number + (src.offer && src.offer.length ? ' · ' + src.offer.join(', ') : '') : 'Issues · ' + (src.repo || '');
+        const list = (r.items || []).map((i) => ({
+          label: (i.kind === 'draft' ? '$(note) ' : '$(issues) ') + (i.number ? '#' + i.number + ' ' : '') + i.title,
+          description: [i.status, (i.labels || []).join(', ')].filter(Boolean).join(' · '),
+          detail: (i.mine ? '$(account) assigned to you' : (i.assignees || []).length ? 'assigned to ' + i.assignees.join(', ') : undefined),
+          item: i,
+        }));
+        return [...base, { label: where + ' (' + list.length + ')', kind: vscode.QuickPickItemKind.Separator }, ...list];
+      }, (e) => [...base, { label: '', kind: vscode.QuickPickItemKind.Separator }, { label: '$(warning) Couldn’t load issues', detail: e.message, settings: true }]);
+      const it = await wizardPick({ title: T, step: 3, total: 4, placeholder: 'What will this session work on? (type to search issues)', items: loaded });
+      if (!it) return; if (it === BACK) { st.step = 2; continue; }
+      if (it.settings) { dev._openSettings && dev._openSettings(); return; }
+      if (it.existing) {
+        const br = await pickBranch(dev, slug); if (br === BACK) continue; if (!br) return;
+        st.item = null; st.branch = br; st.existing = true; st.step = 5; continue;
+      }
+      st.item = it.item || null; st.existing = false; st.branch = null; st.step = 4; continue;
+    }
+    if (st.step === 4) {
+      const proposed = st.plan ? 'new-app' : st.item ? branchFor(st.item) : 'feat/';
+      const v = await wizardInput({ title: T, step: 4, total: 4, value: st.branch || proposed,
+        prompt: st.plan ? 'Name for the planning agent' : 'Branch name (also the worktree name)',
+        selection: st.item || st.plan ? undefined : [proposed.length, proposed.length],
+        validate: (x) => {
+          const bad = validBranch(x); if (bad) return bad;
+          const id = (st.plan ? 'plan' : st.repo.slug) + '/' + x.trim();
+          if (dev.daemon && dev.daemon.wts.has(id)) return { message: 'A worktree with this name exists — Enter opens it', severity: vscode.InputBoxValidationSeverity.Warning };
+          return null;
+        } });
+      if (!v) return; if (v === BACK) { st.step = st.plan ? 2 : 3; continue; }
+      st.branch = v; st.step = 5; continue;
+    }
+    if (st.step === 5) {
+      const groups = (dev.daemon && dev.daemon.running && dev.daemon.groups) || [];
+      if (groups.length) {
+        const items = [{ label: '$(circle-outline) Ungrouped', g: null }, ...groups.map((g) => ({ label: '$(folder) ' + g.name, g: g.id }))];
+        const it = await wizardPick({ title: T, step: 5, total: 5, placeholder: 'Add it to a group?', items });
+        if (!it) return; if (it === BACK) { st.step = st.existing ? 3 : 4; continue; }
+        st.group = it.g;
+      }
+      return launchSession(dev, st);
+    }
+  }
+}
+
+// branches on origin, newest first (for "Existing branch…")
+async function pickBranch(dev, slug) {
+  const bare = path.join(DEV, 'repos', slug, '.bare');
+  const branches = new Promise((resolve, reject) => cp.execFile('git', ['-c', 'safe.bareRepository=all', '-C', bare, 'for-each-ref', '--sort=-committerdate',
+    '--format=%(refname:short)\t%(committerdate:relative)\t%(subject)', 'refs/remotes/origin', 'refs/heads'], { windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (e, so) => {
+    if (e) return reject(e);
+    const seen = new Set();
+    resolve((so || '').split('\n').filter(Boolean).map((l) => l.split('\t')).map(([ref, when, subj]) => ({ name: ref.replace(/^origin\//, ''), when, subj }))
+      .filter((b) => b.name !== 'HEAD' && b.name !== 'origin' && !seen.has(b.name) && seen.add(b.name))
+      .map((b) => ({ label: '$(git-branch) ' + b.name, description: b.when, detail: b.subj, branch: b.name })));
+  }));
+  const it = await wizardPick({ title: 'New Session', step: 3, total: 4, placeholder: 'Which branch?', items: branches });
+  if (!it) return undefined; if (it === BACK) return BACK;
+  return it.branch;
+}
+
+async function launchSession(dev, st) {
+  const slug = st.plan ? 'plan' : st.repo.slug, name = st.branch;
+  const id = slug + '/' + name;
+  if (dev.daemon && dev.daemon.wts.has(id)) { dev.openOrFocus(slug, name); return; }
+  const args = [];
+  if (st.account) args.push('--account', st.account.provider === 'codex' ? 'codex:' + st.account.name : st.account.name);
+  if (st.item) {
+    let detail = null;
+    if (st.item.number && st.item.repo) detail = await wtdJson(['issues', 'show', st.item.repo, String(st.item.number)]).catch(() => null);
+    const file = path.join(WTD, 'state', 'issues', id.replace(/\//g, '__') + '.md');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, issueMarkdown(st.item, detail));
+    args.push('--issue-file', file.replace(/\\/g, '/'));
+  }
+  const t = vscode.window.createTerminal({ name, location: vscode.TerminalLocation.Editor, env: wtdTermEnv(), shellPath: bashShell(),
+    shellArgs: ['-lc', ['agent', slug, name].concat(args).map(shq).join(' ')] });
+  dev._terms.set(dev._key(slug, name), t); dev._current = t;
+  t.show();
+  // after the worktree exists: join the chosen group, move the project card
+  const afterCreate = async () => {
+    for (let i = 0; i < 60 && !(dev.daemon && dev.daemon.wts.has(id)); i++) await new Promise((r) => setTimeout(r, 1000));
+    if (st.group && dev.daemon && dev.daemon.running) dev.daemon.request('group.assign', { worktree: id, group: st.group }).catch(() => {});
+    if (st.item && st.item.item_id) {
+      wtdJson(['issues', 'start', slug, st.item.item_id]).then((r) => { if (r && r.moved) vscode.window.setStatusBarMessage('$(project) Moved the card to ' + r.to, 5000); },
+        (e) => vscode.window.showWarningMessage('Couldn’t move the project card: ' + e.message));
+    }
+  };
+  afterCreate();
+  setTimeout(() => dev._postRoster(), 2500);
 }
 
 function activate(context) {

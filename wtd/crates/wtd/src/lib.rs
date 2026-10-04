@@ -4,6 +4,7 @@
 pub mod client;
 pub mod daemon;
 pub mod hook;
+pub mod issues;
 pub mod mcp;
 pub mod paths;
 pub mod run;
@@ -76,6 +77,7 @@ fn dispatch(cmd: &str, rest: &[String]) -> Result<i32> {
             Ok(0)
         }
         "group" => group(rest),
+        "issues" => issues::main(rest),
         "help" | "--help" | "-h" => {
             println!("{USAGE}");
             Ok(0)
