@@ -35,6 +35,18 @@ pub fn dev_root() -> Result<PathBuf> {
     bail!("can't find the worktree-dev root (set WTD_DEV, or run install.sh)")
 }
 
+/// A sibling program next to the running one (`wtd.exe` / `wtd-tray.exe` live side by side).
+pub fn sibling_exe(name: &str) -> PathBuf {
+    std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(name))).unwrap_or_else(|| PathBuf::from(name))
+}
+pub fn wtd_exe() -> PathBuf {
+    sibling_exe("wtd.exe")
+}
+/// The windowless tray program, if it's installed.
+pub fn tray_exe() -> Option<PathBuf> {
+    Some(sibling_exe("wtd-tray.exe")).filter(|p| p.is_file())
+}
+
 pub fn home_dir() -> Result<PathBuf> {
     std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from).context("no USERPROFILE/HOME")
 }

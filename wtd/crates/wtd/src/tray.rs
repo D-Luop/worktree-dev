@@ -53,8 +53,8 @@ pub fn main(args: &[String]) -> Result<i32> {
     match args.first().map(String::as_str) {
         // start detached (from install / a terminal) so it doesn't die with the caller
         Some("--spawn") => {
-            let mut cmd = Command::new(std::env::current_exe()?);
-            cmd.arg("tray").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+            let mut cmd = tray_command();
+            cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
             win::spawn_detached(&mut cmd)?;
             return Ok(0);
         }
@@ -259,15 +259,26 @@ fn spawn_hidden(cmd: &mut Command) {
 
 fn toggle_daemon() {
     let running = TRAY.lock().unwrap().as_ref().map(|t| t.view.running).unwrap_or(false);
-    if let Ok(exe) = std::env::current_exe() {
-        spawn_hidden(Command::new(exe).args(["daemon", if running { "stop" } else { "start" }]));
-    }
+    // we may be wtd-tray.exe: daemon control lives in the console CLI next to us
+    spawn_hidden(Command::new(paths::wtd_exe()).args(["daemon", if running { "stop" } else { "start" }]));
 }
 
 fn open_vscode() {
     if let Ok(dev) = paths::dev_root() {
         // `code <folder>` focuses the window already showing that folder rather than opening another
         spawn_hidden(Command::new("cmd").args(["/c", "code"]).arg(&dev));
+    }
+}
+
+/// How to launch the tray: the windowless `wtd-tray.exe` when installed, else `wtd.exe tray`.
+fn tray_command() -> Command {
+    match paths::tray_exe() {
+        Some(t) => Command::new(t),
+        None => {
+            let mut c = Command::new(paths::wtd_exe());
+            c.arg("tray");
+            c
+        }
     }
 }
 
@@ -281,8 +292,12 @@ pub fn start_at_logon() -> bool {
 pub fn set_start_at_logon(on: bool) {
     unsafe {
         if on {
-            let Ok(exe) = std::env::current_exe() else { return };
-            let cmdline = win::wide(&format!("\"{}\" tray", exe.display()));
+            // the windowless wtd-tray.exe, so signing in never opens a console window for the tray
+            let cmdline = match paths::tray_exe() {
+                Some(t) => format!("\"{}\"", t.display()),
+                None => format!("\"{}\" tray", paths::wtd_exe().display()),
+            };
+            let cmdline = win::wide(&cmdline);
             RegSetKeyValueW(HKEY_CURRENT_USER, win::wide(RUN_KEY).as_ptr(), win::wide(RUN_VALUE).as_ptr(), REG_SZ,
                 cmdline.as_ptr() as *const _, (cmdline.len() * 2) as u32);
         } else {

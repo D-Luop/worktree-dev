@@ -103,12 +103,18 @@ if [ "$OS" = windows ]; then
       "$WTD_EXE" daemon status >/dev/null 2>&1 && was_running=1
       "$WTD_EXE" tray --quit >/dev/null 2>&1 || true   # section K starts the new one
       [ "$was_running" = 1 ] && "$WTD_EXE" daemon stop >/dev/null 2>&1
-      # live sessions (`wtd run`) and MCP servers keep running the old exe: Windows lets a running exe
-      # be renamed but not overwritten, so move it aside and clean up old copies that are free again.
-      mv -f "$WTD_EXE" "$WTD_EXE.old-$(date +%s)" 2>/dev/null || true
     fi
-    cp "$built" "$WTD_EXE" && echo "    installed $WTD_EXE"
-    for o in "$WTD/bin"/wtd.exe.old-*; do [ -e "$o" ] && rm -f "$o" 2>/dev/null; done; true
+    # wtd.exe (console CLI) + wtd-tray.exe (GUI subsystem: the tray never gets a console window).
+    # Live sessions (`wtd run`) and MCP servers keep running the old exe: Windows lets a running exe
+    # be renamed but not overwritten, so move it aside and clean up old copies that are free again.
+    stamp="$(date +%s)"
+    for exe in wtd.exe wtd-tray.exe; do
+      src="$(dirname "$built")/$exe"; dst="$WTD/bin/$exe"
+      [ -f "$src" ] || continue
+      [ -e "$dst" ] && { mv -f "$dst" "$dst.old-$stamp" 2>/dev/null || true; }
+      cp "$src" "$dst" && echo "    installed $dst"
+    done
+    for o in "$WTD/bin"/*.exe.old-*; do [ -e "$o" ] && rm -f "$o" 2>/dev/null; done; true
     if [ "$was_running" = 1 ]; then "$WTD_EXE" daemon start >/dev/null && echo "    restarted the daemon"; fi
   fi
 fi
