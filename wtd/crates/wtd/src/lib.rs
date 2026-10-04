@@ -75,6 +75,7 @@ fn dispatch(cmd: &str, rest: &[String]) -> Result<i32> {
             c.request(method::REFRESH, json!({ "id": rest.first() }))?;
             Ok(0)
         }
+        "group" => group(rest),
         "help" | "--help" | "-h" => {
             println!("{USAGE}");
             Ok(0)
@@ -100,5 +101,35 @@ fn ls(as_json: bool) -> Result<i32> {
         };
         println!("{:<34} {:<10} {:<5} {:<6} {}", w.id, w.status.as_str(), if w.live { "yes" } else { "" }, git, w.plan_title.unwrap_or_default());
     }
+    Ok(0)
+}
+
+/// `wtd group ls | add <name> | rename <id> <name> | rm <id> | assign <worktree> <id|none> | order <id>…`
+fn group(rest: &[String]) -> Result<i32> {
+    let mut c = client::Client::connect_required()?;
+    let a: Vec<&str> = rest.iter().map(String::as_str).collect();
+    let r = match a.as_slice() {
+        [] | ["ls"] => {
+            let snap = c.request(method::FLEET_LIST, json!({}))?;
+            let wts: Vec<Worktree> = serde_json::from_value(snap)?;
+            // groups come with the subscription snapshot; ask for one and read it
+            c.request(method::SUBSCRIBE, json!({}))?;
+            if let Some(wtd_core::protocol::ServerLine::Push(wtd_core::protocol::Push::Snapshot { snapshot, .. })) = c.read()? {
+                for g in &snapshot.groups {
+                    let n = wts.iter().filter(|w| w.group.as_deref() == Some(g.id.as_str())).count();
+                    println!("{:<6} {:<30} {n} worktree(s){}", g.id, g.name, if g.collapsed { " (collapsed)" } else { "" });
+                }
+                println!("{:<6} {:<30} {} worktree(s)", "-", "Ungrouped", wts.iter().filter(|w| w.group.is_none() && w.id != "_dev").count());
+            }
+            return Ok(0);
+        }
+        ["add", name] => c.request(method::GROUP_CREATE, json!({ "name": name }))?,
+        ["rename", id, name] => c.request(method::GROUP_UPDATE, json!({ "id": id, "name": name }))?,
+        ["rm", id] => c.request(method::GROUP_DELETE, json!({ "id": id }))?,
+        ["assign", wt, g] => c.request(method::GROUP_ASSIGN, json!({ "worktree": wt, "group": if *g == "none" { None } else { Some(*g) } }))?,
+        ["order", ids @ ..] => c.request(method::GROUP_REORDER, json!({ "ids": ids }))?,
+        _ => anyhow::bail!("usage: wtd group ls | add <name> | rename <id> <name> | rm <id> | assign <worktree> <id|none> | order <id>…"),
+    };
+    println!("{r}");
     Ok(0)
 }

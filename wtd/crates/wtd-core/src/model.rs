@@ -50,6 +50,53 @@ pub struct Worktree {
     pub plan_title: Option<String>,
     /// Unix seconds of the last hook event or status change.
     pub last_activity: i64,
+    /// User-defined group id (None = Ungrouped).
+    #[serde(default)]
+    pub group: Option<String>,
+    /// The live session is hosted by the daemon (a pseudo console that survives VSCode reloads),
+    /// as opposed to running inside a terminal under `wtd run`.
+    #[serde(default)]
+    pub hosted: bool,
+    /// Agent program of the live session: `claude` | `codex`.
+    #[serde(default)]
+    pub program: Option<String>,
+}
+
+/// A user-defined roster group (replaces grouping by repo). Order = position in the list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct Group {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub collapsed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageState {
+    /// Waiting for the user to approve / edit / deny.
+    #[default]
+    Pending,
+    /// Approved; waiting for the target to be idle (its turn to end) or to start.
+    Queued,
+    Delivered,
+    Denied,
+}
+
+/// A prompt one agent asked to send to another worktree's agent. Never delivered without approval.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct Message {
+    pub id: u64,
+    /// Sender worktree id.
+    pub from: String,
+    /// Target worktree id.
+    pub to: String,
+    pub body: String,
+    pub state: MessageState,
+    /// Unix seconds.
+    pub created: i64,
+    #[serde(default)]
+    pub delivered_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -96,6 +143,11 @@ pub struct Snapshot {
     pub worktrees: Vec<Worktree>,
     pub accounts: Vec<Account>,
     pub metrics: Option<Metrics>,
+    #[serde(default)]
+    pub groups: Vec<Group>,
+    /// Messages not yet delivered or denied (pending approval or queued).
+    #[serde(default)]
+    pub messages: Vec<Message>,
 }
 
 /// Encode a worktree id as a single path segment (`luop/feat/x` → `luop__feat__x`).

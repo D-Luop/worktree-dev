@@ -160,6 +160,8 @@ class DaemonClient {
     this.wts = new Map();       // id → Worktree (see wtd-core model.rs)
     this.accounts = [];
     this.metrics = null;
+    this.groups = [];     // user-defined roster groups, in display order
+    this.messages = [];   // agent messages still in flight (pending approval / queued)
     this._sock = null; this._buf = ''; this._pending = new Map(); this._next = 1; this._retry = null; this._stopped = false;
   }
   start() { this._stopped = false; this._connect(); }
@@ -224,7 +226,9 @@ class DaemonClient {
         this.wts = new Map((m.snapshot.worktrees || []).map((w) => [w.id, w]));
         this.accounts = m.snapshot.accounts || [];
         this.metrics = m.snapshot.metrics || null;
-        this.onChange('fleet'); this.onChange('accounts'); this.onChange('metrics');
+        this.groups = m.snapshot.groups || [];
+        this.messages = m.snapshot.messages || [];
+        this.onChange('fleet'); this.onChange('accounts'); this.onChange('metrics'); this.onChange('messages');
         break;
       case 'upsert': {
         const prev = this.wts.get(m.worktree.id);
@@ -235,6 +239,8 @@ class DaemonClient {
       case 'remove': this.wts.delete(m.id); this.onChange('fleet'); break;
       case 'accounts': this.accounts = m.accounts || []; this.onChange('accounts'); break;
       case 'metrics': this.metrics = m.metrics; this.onChange('metrics'); break;
+      case 'groups': this.groups = m.groups || []; this.onChange('fleet'); break;
+      case 'messages': this.messages = m.messages || []; this.onChange('messages'); break;
       case 'shutdown': break;   // the pipe closes next → 'daemon' change
     }
   }
@@ -810,6 +816,45 @@ class DevSummaryProvider {
     });
   }
 
+  // user-defined roster groups (stored by the daemon). Names come from native input boxes.
+  async _groupOp(m) {
+    const d = this.daemon;
+    if (!d || !d.running) { vscode.window.showWarningMessage('Start the daemon to edit groups.'); return; }
+    const groups = d.groups || [];
+    const nameOf = (id) => (groups.find((g) => g.id === id) || {}).name || '';
+    const ask = (value, title) => vscode.window.showInputBox({ title, value, prompt: 'Group name', validateInput: (v) => (v.trim() && v.trim().length <= 60) ? null : '1–60 characters' });
+    switch (m.cmd) {
+      case 'groupNew': {
+        const name = await ask('', 'New group'); if (!name) return;
+        const r = await d.request('group.create', { name: name.trim() });
+        if (m.worktree) await d.request('group.assign', { worktree: m.worktree, group: r.id });
+        return;
+      }
+      case 'groupRename': {
+        const name = await ask(nameOf(m.id), 'Rename group'); if (!name) return;
+        return d.request('group.update', { id: m.id, name: name.trim() });
+      }
+      case 'groupDelete': {
+        const ch = await vscode.window.showWarningMessage('Delete the group "' + nameOf(m.id) + '"?', { modal: true, detail: 'Its worktrees move to Ungrouped. Nothing else changes.' }, 'Delete group');
+        if (ch === 'Delete group') return d.request('group.delete', { id: m.id });
+        return;
+      }
+      case 'groupCollapse': return d.request('group.update', { id: m.id, collapsed: !!m.collapsed });
+      case 'groupAssign': return d.request('group.assign', { worktree: m.worktree, group: m.group || null });
+      case 'groupReorder': return d.request('group.reorder', { ids: m.ids || [] });
+      case 'groupMove': {
+        const wt = d.wts.get(m.worktree);
+        const items = groups.map((g) => ({ label: '$(folder) ' + g.name, id: g.id, description: wt && wt.group === g.id ? 'current' : '' }));
+        items.push({ label: '$(circle-outline) Ungrouped', id: null, description: wt && !wt.group ? 'current' : '' });
+        items.push({ label: '$(new-folder) New group…', id: '__new__' });
+        const it = await vscode.window.showQuickPick(items, { placeHolder: 'Move ' + m.worktree + ' to…' });
+        if (!it) return;
+        if (it.id === '__new__') return this._groupOp({ cmd: 'groupNew', worktree: m.worktree });
+        return d.request('group.assign', { worktree: m.worktree, group: it.id });
+      }
+    }
+  }
+
   // the toolbar's ⋯ menu: occasional actions, kept out of the main row
   moreMenu() {
     let testsExcluded = false; try { testsExcluded = fs.existsSync(TESTS_FLAG); } catch {}
@@ -915,6 +960,8 @@ class DevSummaryProvider {
         this.toggleDaemon();
       } else if (m.cmd === 'more') {
         this.moreMenu();
+      } else if (m.cmd && m.cmd.startsWith('group')) {
+        this._groupOp(m).catch((e) => vscode.window.showErrorMessage('Group: ' + e.message));
       } else if (m.cmd === 'settings') {
         if (this._openSettings) this._openSettings();
       } else if (m.cmd === 'newAssistant') {
@@ -1134,7 +1181,7 @@ class DevSummaryProvider {
     for (const w of this.daemon.wts.values()) {
       if (w.kind === 'dev') continue;   // the assistant has its own pinned row
       const slug = w.slug, name = w.name;
-      rows.push({ slug, name, status: w.status === 'none' ? '' : w.status, dirty: !!(w.git && w.git.dirty), ahead: (w.git && w.git.ahead) || 0,
+      rows.push({ id: w.id, group: w.group || null, slug, name, status: w.status === 'none' ? '' : w.status, dirty: !!(w.git && w.git.dirty), ahead: (w.git && w.git.ahead) || 0,
                   branch: (w.git && w.git.branch) || '', plan: w.plan_title || '', account: w.account || '', live: !!w.live });
       if (w.live) live.add(slug + '-' + name);
     }
@@ -1185,7 +1232,10 @@ class DevSummaryProvider {
     const plainTerm = vscode.window.terminals.find((x) => termName(x) === TERM_NAME);
     const terminal = { active: !!plainTerm, current: !!cur && termName(cur) === TERM_NAME };
     let multiAccount = false; try { multiAccount = this._accounts().length > 1; } catch {}
-    if (this.view && this.view.visible) this.view.webview.postMessage({ type: 'roster', rows, assistant, terminal, multiAccount });
+    // groups: null = legacy grouping by repo (no daemon installed); edits need the daemon running
+    const groups = this._daemonMode() ? (this.daemon.groups || []) : null;
+    const canEditGroups = this._daemonMode() && this.daemon.running;
+    if (this.view && this.view.visible) this.view.webview.postMessage({ type: 'roster', rows, assistant, terminal, multiAccount, groups, canEditGroups });
   }
 
   // daemon mode = wtd.exe is installed (whether or not the daemon is running right now)
@@ -1402,6 +1452,20 @@ class DevSummaryProvider {
   .row .git{flex:none;color:var(--vscode-descriptionForeground);font-size:12px;font-variant-numeric:tabular-nums;display:flex;gap:4px;}
   .ahead{color:var(--vscode-charts-blue,#4aa3ff);} .dirty{color:var(--vscode-charts-yellow,#d2a000);}
   .badge{flex:none;font-size:10px;padding:0 5px;border-radius:8px;line-height:15px;background:var(--vscode-badge-background);color:var(--vscode-badge-foreground);}
+  .rb{flex:none;font-size:11px;color:var(--vscode-descriptionForeground);opacity:.85;}
+  /* user-defined groups */
+  .ghdr{position:relative;display:flex;align-items:center;gap:4px;height:22px;margin-top:6px;padding:0 4px 0 2px;border-radius:3px;cursor:pointer;
+        font-size:11px;font-weight:600;letter-spacing:.3px;text-transform:uppercase;color:var(--vscode-descriptionForeground);user-select:none;}
+  .ghdr:hover{background:var(--vscode-list-hoverBackground);}
+  .ghdr .gn{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .ghdr .n{font-weight:400;padding:0 6px;border-radius:8px;background:var(--vscode-badge-background);color:var(--vscode-badge-foreground);font-size:10px;line-height:15px;letter-spacing:0;}
+  .ghdr .gacts{display:none;align-items:center;} .ghdr:hover .gacts{display:flex;}
+  .ghdr .gacts .codicon{padding:3px;border-radius:3px;color:var(--vscode-icon-foreground);} .ghdr .gacts .codicon:hover{background:var(--vscode-toolbar-hoverBackground);}
+  .ghdr .gacts .danger:hover{color:var(--vscode-errorForeground);}
+  .ghdr.drop,.gbody.drop{outline:1px dashed var(--vscode-focusBorder);outline-offset:-1px;background:var(--vscode-list-dropBackground,rgba(0,127,212,.12));}
+  .gbody{min-height:4px;border-radius:3px;}
+  .gempty{font-size:12px;color:var(--vscode-descriptionForeground);padding:2px 0 4px 24px;font-style:italic;}
+  .row.dragging{opacity:.4;}
   .row.wt:not(.live) .st{opacity:.55;} .row.wt:not(.live) .nm{color:var(--vscode-descriptionForeground);}
   .row.unread{box-shadow:inset 2px 0 0 var(--vscode-charts-yellow,#d2a000);background:rgba(255,216,61,.08);}
   .row.unread .nm{font-weight:600;color:var(--vscode-foreground);}
@@ -1431,6 +1495,7 @@ class DevSummaryProvider {
   <button class="tb" id="active" title="Show only worktrees with a live session"><i class="codicon codicon-zap"></i><span class="t" id="activeTxt">Active</span></button>
   <button class="tb" id="filter" title="Filter by status"><i class="codicon codicon-filter" id="filterIco"></i></button>
   <button class="tb" id="search" title="Search worktrees (name, branch, plan, account)"><i class="codicon codicon-search"></i></button>
+  <button class="tb" id="newGroup" title="New group"><i class="codicon codicon-new-folder"></i></button>
   <span class="spacer"></span>
   <button class="tb" id="settings" title="Settings — repos, accounts, GitHub, daemon"><i class="codicon codicon-settings-gear"></i></button>
   <button class="tb" id="more" title="More actions"><i class="codicon codicon-ellipsis"></i></button>
@@ -1450,9 +1515,11 @@ class DevSummaryProvider {
   const vsc = acquireVsCodeApi();
   window.addEventListener('error', e => { try{ vsc.postMessage({cmd:'jsError', msg: String(e.message||e)+' @'+(e.lineno||'?')}); }catch(_){} });
   let accts=[], ros=[], mon=null, asstState={}, termState={}, multiAcct=false, daemon={installed:false,running:false,busy:false};
+  let groupsData=null, canEditGroups=false;   // null = legacy repo grouping
   const saved = vsc.getState() || {};
   let activeOnly = !!saved.activeOnly, query = saved.query || '', searchOpen = !!saved.searchOpen, statuses = new Set(saved.statuses || []);
-  function save(){ vsc.setState({activeOnly, query, searchOpen, statuses:[...statuses]}); }
+  let ungroupedCollapsed = !!saved.ungroupedCollapsed;
+  function save(){ vsc.setState({activeOnly, query, searchOpen, statuses:[...statuses], ungroupedCollapsed}); }
 
   const GLYPH={working:'🔵',input:'🟡',reviewing:'🟣',pr:'🔹',done:'🟢',stopped:'🔴'};   // editor tab name prefix (host side)
   const STATUS=[
@@ -1509,6 +1576,8 @@ class DevSummaryProvider {
     document.getElementById('filter').classList.toggle('on', statuses.size>0);
     document.getElementById('filterIco').className = 'codicon codicon-'+(statuses.size?'filter-filled':'filter');
     document.getElementById('search').classList.toggle('on', searchOpen);
+    const ng=document.getElementById('newGroup'); ng.style.display = groupsData ? '' : 'none'; ng.disabled = !canEditGroups;
+    ng.title = canEditGroups ? 'New group' : 'Start the daemon to edit groups';
     document.getElementById('searchRow').classList.toggle('open', searchOpen);
     const off=document.getElementById('daemonOff');
     off.innerHTML = (daemon.installed && !daemon.running)
@@ -1543,12 +1612,14 @@ class DevSummaryProvider {
     const git=(w.ahead?'<span class="ahead" title="'+w.ahead+' unpushed commit(s)">↑'+w.ahead+'</span>':'')+(w.dirty?'<span class="dirty" title="uncommitted changes">●</span>':'');
     const acct = (multiAcct && w.active && w.account && w.account!=='default') ? '<span class="badge" title="Claude account">'+esc(w.account)+'</span>' : '';
     const tip = w.slug+'/'+w.name+' — '+s[1]+(w.active?' · live session':'')+(w.branch?' · '+w.branch:'')+(w.plan?'\\n'+w.plan:'')+'\\nclick to open';
-    return '<div class="row wt'+(w.active?' live':'')+(w.unread?' unread':'')+(w.current?' current':'')+'" data-slug="'+esc(w.slug)+'" data-name="'+esc(w.name)+'" data-glyph="'+g+'" title="'+esc(tip)+'">'
+    const drag = groupsData && canEditGroups;
+    return '<div class="row wt'+(w.active?' live':'')+(w.unread?' unread':'')+(w.current?' current':'')+'" data-id="'+esc(w.id||'')+'" data-slug="'+esc(w.slug)+'" data-name="'+esc(w.name)+'" data-glyph="'+g+'" title="'+esc(tip)+'"'+(drag?' draggable="true"':'')+'>'
       +'<span class="st" style="color:'+s[3]+'">'+ico(s[2])+'</span>'
-      +'<span class="nm">'+esc(w.name)+'</span>'+acct
+      +'<span class="nm">'+esc(w.name)+'</span>'+(groupsData?'<span class="rb" title="repository">'+esc(w.slug)+'</span>':'')+acct
       +'<span class="git">'+git+'</span>'
       +'<span class="acts">'
       +'<i class="codicon codicon-diff dif" title="Commits & diffs"></i>'
+      +(groupsData&&canEditGroups?'<i class="codicon codicon-folder mv" title="Move to group…"></i>':'')
       +(w.active&&!w.unread?'<i class="codicon codicon-mail unr" title="Mark unread"></i>':'')
       +(w.active&&multiAcct?'<i class="codicon codicon-arrow-swap acc" title="Switch account (reopens under the one with most capacity)"></i>':'')
       +(w.active?'<i class="codicon codicon-debug-stop term danger" title="End session (worktree stays)"></i>':'')
@@ -1571,15 +1642,78 @@ class DevSummaryProvider {
     const el=document.getElementById('roster');
     if(!ros.length){ el.innerHTML='<div class="none">No worktrees yet — click New to start a session.</div>'; return; }
     if(!shown.length){ el.innerHTML='<div class="none">No worktrees match the current filter.</div>'; return; }
-    // grouped by repo until user-defined groups land (Phase 2); actionable statuses first
-    const groups={}; shown.forEach(w=>{ (groups[w.slug]=groups[w.slug]||[]).push(w); });
-    el.innerHTML = Object.keys(groups).sort((a,b)=>a.localeCompare(b)).map(slug=>{
-      const rows=groups[slug].sort((a,b)=>(PRIO[a.status]??9)-(PRIO[b.status]??9) || a.name.localeCompare(b.name));
-      return '<div class="sect">'+esc(slug)+'<span class="n">'+rows.length+'</span></div>'+rows.map(wtRow).join('');
-    }).join('');
+    const byPrio=(rows)=>rows.sort((a,b)=>(PRIO[a.status]??9)-(PRIO[b.status]??9) || a.name.localeCompare(b.name));
+    if(groupsData){
+      // user-defined groups in their order, then Ungrouped; empty groups stay visible as drop targets
+      // unless a filter is narrowing the list
+      const filtering = activeOnly || statuses.size>0 || !!query;
+      const known = new Set(groupsData.map(g=>g.id));
+      const byG = {}; shown.forEach(w=>{ const g = w.group && known.has(w.group) ? w.group : ''; (byG[g]=byG[g]||[]).push(w); });
+      const sec=(id,name,collapsed,rows,editable)=>{
+        if(filtering && !rows.length) return '';
+        const hdr='<div class="ghdr" data-g="'+esc(id)+'"'+(editable&&canEditGroups?' draggable="true"':'')+' title="'+esc(name)+(collapsed?' — click to expand':' — click to collapse')+'">'
+          +ico(collapsed?'chevron-right':'chevron-down')+'<span class="gn">'+esc(name)+'</span><span class="n">'+rows.length+'</span>'
+          +(editable&&canEditGroups?'<span class="gacts"><i class="codicon codicon-edit gren" title="Rename"></i><i class="codicon codicon-trash gdel danger" title="Delete group"></i></span>':'')+'</div>';
+        if(collapsed) return hdr;
+        return hdr+'<div class="gbody" data-g="'+esc(id)+'">'+(rows.length?byPrio(rows).map(wtRow).join(''):'<div class="gempty">'+(canEditGroups?'Drag worktrees here':'Empty')+'</div>')+'</div>';
+      };
+      el.innerHTML = groupsData.map(g=>sec(g.id,g.name,g.collapsed,byG[g.id]||[],true)).join('')
+        + sec('', 'Ungrouped', ungroupedCollapsed, byG['']||[], false);
+      wireGroups(el);
+    } else {
+      // legacy (no daemon installed): grouped by repo
+      const groups={}; shown.forEach(w=>{ (groups[w.slug]=groups[w.slug]||[]).push(w); });
+      el.innerHTML = Object.keys(groups).sort((a,b)=>a.localeCompare(b)).map(slug=>{
+        const rows=byPrio(groups[slug]);
+        return '<div class="sect">'+esc(slug)+'<span class="n">'+rows.length+'</span></div>'+rows.map(wtRow).join('');
+      }).join('');
+    }
     const on=(sel,cmd)=>el.querySelectorAll(sel).forEach(x=>x.onclick=(ev)=>{ ev.stopPropagation(); const p=x.closest('.wt'); vsc.postMessage({cmd,slug:p.dataset.slug,name:p.dataset.name}); });
     el.querySelectorAll('.wt').forEach(x=>x.onclick=()=>vsc.postMessage({cmd:'open',slug:x.dataset.slug,name:x.dataset.name,glyph:x.dataset.glyph}));
     on('.arch','archive'); on('.del','delete'); on('.term','terminate'); on('.unr','markunread'); on('.acc','switchAccount'); on('.dif','openCommits');
+    el.querySelectorAll('.mv').forEach(x=>x.onclick=(ev)=>{ ev.stopPropagation(); vsc.postMessage({cmd:'groupMove', worktree:x.closest('.wt').dataset.id}); });
+  }
+
+  // group headers: collapse, rename, delete; drag rows onto a group, drag headers to reorder
+  const DT_WT='application/x-wtd-worktree', DT_GRP='application/x-wtd-group';
+  function wireGroups(el){
+    el.querySelectorAll('.ghdr').forEach(h=>{
+      const id=h.dataset.g;
+      h.onclick=(ev)=>{
+        if(ev.target.closest('.gren')){ ev.stopPropagation(); vsc.postMessage({cmd:'groupRename', id}); return; }
+        if(ev.target.closest('.gdel')){ ev.stopPropagation(); vsc.postMessage({cmd:'groupDelete', id}); return; }
+        if(!id){ ungroupedCollapsed=!ungroupedCollapsed; save(); renderRoster(); return; }
+        const g=groupsData.find(x=>x.id===id); if(!g) return;
+        g.collapsed=!g.collapsed; renderRoster();   // optimistic; the daemon's push confirms it
+        if(canEditGroups) vsc.postMessage({cmd:'groupCollapse', id, collapsed:g.collapsed});
+      };
+      h.addEventListener('dragstart', e=>{ e.dataTransfer.setData(DT_GRP, id); e.dataTransfer.effectAllowed='move'; });
+    });
+    el.querySelectorAll('.row.wt[draggable]').forEach(r=>{
+      r.addEventListener('dragstart', e=>{ e.dataTransfer.setData(DT_WT, r.dataset.id); e.dataTransfer.effectAllowed='move'; r.classList.add('dragging'); });
+      r.addEventListener('dragend', ()=>r.classList.remove('dragging'));
+    });
+    if(!canEditGroups) return;
+    el.querySelectorAll('.ghdr,.gbody').forEach(t=>{
+      const g=t.dataset.g;
+      t.addEventListener('dragover', e=>{
+        const types=[...e.dataTransfer.types];
+        const ok = types.includes(DT_WT) || (types.includes(DT_GRP) && t.classList.contains('ghdr') && g);
+        if(ok){ e.preventDefault(); e.dataTransfer.dropEffect='move'; t.classList.add('drop'); }
+      });
+      t.addEventListener('dragleave', ()=>t.classList.remove('drop'));
+      t.addEventListener('drop', e=>{
+        t.classList.remove('drop'); e.preventDefault();
+        const wt=e.dataTransfer.getData(DT_WT);
+        if(wt){ vsc.postMessage({cmd:'groupAssign', worktree:wt, group:g||null}); return; }
+        const moving=e.dataTransfer.getData(DT_GRP);
+        if(moving && g && moving!==g){
+          const ids=groupsData.map(x=>x.id).filter(x=>x!==moving);
+          ids.splice(ids.indexOf(g), 0, moving);   // drop onto a header → insert before it
+          vsc.postMessage({cmd:'groupReorder', ids});
+        }
+      });
+    });
   }
 
   function renderMonitor(){
@@ -1607,13 +1741,15 @@ class DevSummaryProvider {
   document.getElementById('filter').onclick=(ev)=>{ ev.stopPropagation(); const m=document.getElementById('filterMenu'); const open=!m.classList.contains('open'); if(open) renderFilterMenu(); m.classList.toggle('open', open); };
   document.addEventListener('click', ()=>document.getElementById('filterMenu').classList.remove('open'));
   document.getElementById('more').onclick=()=>vsc.postMessage({cmd:'more'});
+  document.getElementById('newGroup').onclick=()=>vsc.postMessage({cmd:'groupNew'});
   document.getElementById('settings').onclick=()=>vsc.postMessage({cmd:'settings'});
   document.getElementById('add').onclick=()=>vsc.postMessage({cmd:'newAgent'});
 
   window.addEventListener('message', e => {
     const m=e.data; if(!m) return;
     if(m.type==='limits'){ accts=m.accounts||[]; renderLim(); }
-    else if(m.type==='roster'){ ros=m.rows||[]; asstState=m.assistant||{}; termState=m.terminal||{}; multiAcct=!!m.multiAccount; renderRoster(); }
+    else if(m.type==='roster'){ ros=m.rows||[]; asstState=m.assistant||{}; termState=m.terminal||{}; multiAcct=!!m.multiAccount;
+      groupsData=m.groups||null; canEditGroups=!!m.canEditGroups; renderRoster(); }
     else if(m.type==='monitor'){ mon=m.m; renderMonitor(); }
     else if(m.type==='daemon'){ daemon={installed:!!m.installed, running:!!m.running, busy:!!m.busy}; renderRoster(); renderLim(); renderMonitor(); }
   });

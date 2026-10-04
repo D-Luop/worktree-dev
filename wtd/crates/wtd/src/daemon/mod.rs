@@ -5,6 +5,7 @@
 
 pub mod git;
 pub mod scan;
+mod store;
 mod usage;
 
 use std::collections::{BTreeMap, HashMap};
@@ -20,7 +21,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::sync::{broadcast, mpsc, Semaphore};
-use wtd_core::model::{Account, Metrics, Snapshot, Worktree, DEV_ID};
+use wtd_core::model::{Account, Group, Metrics, Snapshot, Worktree, DEV_ID};
 use wtd_core::protocol::{method, HookParams, Push, Request, Response, ServerLine, SessionParams, PROTOCOL_VERSION};
 
 use crate::{client::Client, paths, win};
@@ -117,6 +118,7 @@ struct Session {
     kind: String,
     account: Option<String>,
     job: String,
+    program: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -138,6 +140,8 @@ struct Inner {
     git_running: HashMap<String, ()>,
     /// Last (job CPU 100ns, sample instant) per job for CPU% deltas.
     cpu_prev: HashMap<String, (u64, Instant)>,
+    /// Groups, membership, messages (persisted).
+    store: store::Store,
 }
 
 struct Daemon {
@@ -177,6 +181,26 @@ impl Daemon {
             worktrees: inner.worktrees.values().cloned().collect(),
             accounts: inner.accounts.clone(),
             metrics: inner.metrics.clone(),
+            groups: inner.store.groups.clone(),
+            messages: inner.store.open_messages(),
+        }
+    }
+
+    /// Write the store and push the group list. Call with the lock held after a group change.
+    fn groups_changed(&self, inner: &mut Inner) {
+        if let Err(e) = inner.store.save(&self.dev) {
+            eprintln!("[{}] saving store: {e}", now());
+        }
+        inner.rev += 1;
+        let _ = self.tx.send(Push::Groups { rev: inner.rev, groups: inner.store.groups.clone() });
+    }
+
+    /// Set a worktree's group field from the membership table and push it.
+    fn apply_membership(&self, inner: &mut Inner, id: &str) {
+        let g = inner.store.membership.get(id).cloned();
+        if let Some(mut wt) = inner.worktrees.get(id).cloned() {
+            wt.group = g;
+            self.upsert(inner, wt);
         }
     }
 
@@ -186,6 +210,7 @@ impl Daemon {
         let s = inner.sessions.values().find(|s| s.wt == id && s.kind != "review" && s.kind != "ask");
         wt.live = s.is_some();
         wt.account = s.map(|s| s.account.clone().unwrap_or_else(|| "default".into()));
+        wt.program = s.and_then(|s| s.program.clone());
         self.upsert(inner, wt);
     }
 
@@ -220,7 +245,8 @@ async fn serve(dev: PathBuf) -> Result<()> {
     let mut server = create(true).context("another wtd daemon is already running")?;
 
     let (tx, _) = broadcast::channel(1024);
-    let d = Arc::new(Daemon { dev: dev.clone(), inner: Mutex::new(Inner::default()), tx, next_conn: AtomicU64::new(1) });
+    let inner = Inner { store: store::Store::load(&dev), ..Default::default() };
+    let d = Arc::new(Daemon { dev: dev.clone(), inner: Mutex::new(inner), tx, next_conn: AtomicU64::new(1) });
     eprintln!("[{}] wtd daemon {} up: pid {}, dev {}", now(), env!("CARGO_PKG_VERSION"), std::process::id(), dev.display());
 
     rescan(&d).await;
@@ -385,7 +411,7 @@ async fn dispatch(d: &Arc<Daemon>, conn: u64, req: &Request, out: &mpsc::Unbound
                 rescan(d).await;
             }
             let mut inner = d.lock();
-            inner.sessions.insert(conn, Session { wt: id.clone(), kind: s.kind, account: s.account, job: s.job });
+            inner.sessions.insert(conn, Session { wt: id.clone(), kind: s.kind, account: s.account, job: s.job, program: s.program });
             let _ = out; // the session's own connection; `terminate` is pushed on it via session.stop
             d.refresh_liveness(&mut inner, &id);
             Ok(json!({}))
@@ -430,6 +456,68 @@ async fn dispatch(d: &Arc<Daemon>, conn: u64, req: &Request, out: &mpsc::Unbound
             });
             Ok(json!({}))
         }
+        method::GROUP_CREATE => {
+            let name = group_name(p)?;
+            let mut inner = d.lock();
+            let id = format!("g{}", inner.store.next());
+            inner.store.groups.push(Group { id: id.clone(), name, collapsed: false });
+            d.groups_changed(&mut inner);
+            Ok(json!({ "id": id }))
+        }
+        method::GROUP_UPDATE => {
+            let id = p.get("id").and_then(Value::as_str).context("missing id")?;
+            let name = p.get("name").map(|_| group_name(p)).transpose()?;
+            let mut inner = d.lock();
+            let g = inner.store.groups.iter_mut().find(|g| g.id == id).with_context(|| format!("no group '{id}'"))?;
+            if let Some(n) = name {
+                g.name = n;
+            }
+            if let Some(c) = p.get("collapsed").and_then(Value::as_bool) {
+                g.collapsed = c;
+            }
+            d.groups_changed(&mut inner);
+            Ok(json!({}))
+        }
+        method::GROUP_DELETE => {
+            let id = p.get("id").and_then(Value::as_str).context("missing id")?.to_string();
+            let mut inner = d.lock();
+            inner.store.groups.retain(|g| g.id != id);
+            let members: Vec<String> = inner.store.membership.iter().filter(|(_, g)| **g == id).map(|(w, _)| w.clone()).collect();
+            for w in &members {
+                inner.store.membership.remove(w);
+                d.apply_membership(&mut inner, w);
+            }
+            d.groups_changed(&mut inner);
+            Ok(json!({ "ungrouped": members.len() }))
+        }
+        method::GROUP_REORDER => {
+            let ids: Vec<String> = serde_json::from_value(p.get("ids").cloned().unwrap_or_default())?;
+            let mut inner = d.lock();
+            let mut rest = std::mem::take(&mut inner.store.groups);
+            let mut ordered: Vec<Group> = ids.iter().filter_map(|id| rest.iter().position(|g| &g.id == id).map(|i| rest.remove(i))).collect();
+            ordered.extend(rest); // anything not named keeps its relative order at the end
+            inner.store.groups = ordered;
+            d.groups_changed(&mut inner);
+            Ok(json!({}))
+        }
+        method::GROUP_ASSIGN => {
+            let wt = p.get("worktree").and_then(Value::as_str).context("missing worktree")?.to_string();
+            let group = p.get("group").and_then(Value::as_str).map(String::from);
+            let mut inner = d.lock();
+            if !inner.worktrees.contains_key(&wt) {
+                bail!("no worktree '{wt}'");
+            }
+            match &group {
+                Some(g) if !inner.store.groups.iter().any(|x| &x.id == g) => bail!("no group '{g}'"),
+                Some(g) => { inner.store.membership.insert(wt.clone(), g.clone()); }
+                None => { inner.store.membership.remove(&wt); }
+            }
+            if let Err(e) = inner.store.save(&d.dev) {
+                eprintln!("[{}] saving store: {e}", now());
+            }
+            d.apply_membership(&mut inner, &wt);
+            Ok(json!({}))
+        }
         m => bail!("unknown method '{m}'"),
     }
 }
@@ -447,11 +535,14 @@ async fn rescan(d: &Arc<Daemon>) {
     let mut seen = std::collections::HashSet::new();
     for mut wt in found {
         seen.insert(wt.id.clone());
+        wt.group = inner.store.membership.get(&wt.id).cloned();
         match inner.worktrees.get(&wt.id) {
             Some(old) => {
                 wt.git = old.git.clone();
                 wt.live = old.live;
                 wt.account = old.account.clone();
+                wt.hosted = old.hosted;
+                wt.program = old.program.clone();
                 wt.last_activity = if wt.status != old.status { now() } else { old.last_activity };
             }
             None => {
@@ -603,4 +694,12 @@ async fn metrics_loop(d: Arc<Daemon>) {
         inner.metrics = Some(m.clone());
         let _ = d.tx.send(Push::Metrics { rev: inner.rev, metrics: m });
     }
+}
+
+fn group_name(p: &Value) -> Result<String> {
+    let n = p.get("name").and_then(Value::as_str).unwrap_or("").trim().to_string();
+    if n.is_empty() || n.chars().count() > 60 {
+        bail!("group name must be 1-60 characters");
+    }
+    Ok(n)
 }

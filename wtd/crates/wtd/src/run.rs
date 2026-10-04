@@ -46,6 +46,7 @@ pub fn main(args: &[String]) -> Result<i32> {
         account,
         job: if job.is_some() { job_name } else { String::new() },
         pid: child.id(),
+        program: exe.file_stem().map(|s| s.to_string_lossy().to_lowercase()),
     };
     let job_for_thread = job.clone();
     std::thread::spawn(move || hold_registration(params, job_for_thread));
