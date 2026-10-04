@@ -1,6 +1,7 @@
 //! WorkTreeDev v2 for Windows: daemon, hook client, session wrapper, tray, MCP server, CLI.
 //! Two binaries share this library: `wtd.exe` (console CLI) and `wtd-tray.exe` (windowless tray).
 
+pub mod attach;
 pub mod client;
 pub mod codex;
 pub mod daemon;
@@ -22,7 +23,8 @@ use wtd_core::protocol::method;
 const USAGE: &str = "\
 wtd — WorkTreeDev fleet tool
 
-  wtd daemon start|stop|status|run   control the background daemon
+  wtd daemon start|stop [--force]|status|run
+                                     control the background daemon (--force: also end hosted sessions)
   wtd ls [--json]                    list worktrees (status, git, live session)
   wtd stop <slug/name>               end a worktree's live session (kills its process tree)
   wtd refresh [slug/name]            rescan worktrees and re-check git now
@@ -34,7 +36,11 @@ wtd — WorkTreeDev fleet tool
   wtd account ls|add|rm|use …        Claude / Codex logins and role defaults (JSON output)
   wtd env                            installed CLIs, GitHub login + scopes, tray-at-logon
   wtd run [--kind k] [--account a] -- <program> [args…]
-                                     run a session inside a tracked job";
+                                     run a session inside a tracked job, in this terminal
+  wtd host [--kind k] [--account a] -- <program> [args…]
+                                     open-or-attach the worktree's daemon-hosted session
+                                     (survives VSCode reloads; falls back to `run` without the daemon)
+  wtd attach [<worktree>]            attach this terminal to a running hosted session";
 
 pub fn cli_main() -> ! {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -60,6 +66,8 @@ fn dispatch(cmd: &str, rest: &[String]) -> Result<i32> {
     match cmd {
         "daemon" => daemon::main(rest),
         "run" => run::main(rest),
+        "host" => attach::host_main(rest),
+        "attach" => attach::attach_main(rest),
         "mcp" => mcp::main(),
         "tray" => tray::main(rest),
         "repo" => settings::repo_main(rest),

@@ -5,6 +5,8 @@
 
 pub mod git;
 pub mod scan;
+mod host;
+mod pty;
 mod store;
 mod usage;
 
@@ -40,7 +42,7 @@ const GIT_CONCURRENCY: usize = 2;
 pub fn main(args: &[String]) -> Result<i32> {
     match args.first().map(String::as_str) {
         Some("start") => start(),
-        Some("stop") => stop(),
+        Some("stop") => stop(args.iter().any(|a| a == "--force" || a == "-f")),
         Some("status") => status(),
         Some("run") => run_foreground(),
         _ => bail!("usage: wtd daemon start|stop|status|run"),
@@ -70,12 +72,12 @@ fn start() -> Result<i32> {
     bail!("daemon didn't come up; see {}", log_path.display())
 }
 
-fn stop() -> Result<i32> {
+fn stop(force: bool) -> Result<i32> {
     let Some(mut c) = Client::connect()? else {
         println!("daemon not running");
         return Ok(0);
     };
-    c.request(method::SHUTDOWN, json!({}))?;
+    c.request(method::SHUTDOWN, json!({ "force": force }))?;
     for _ in 0..100 {
         if Client::connect()?.is_none() {
             println!("daemon stopped");
@@ -119,6 +121,8 @@ struct Session {
     account: Option<String>,
     job: String,
     program: Option<String>,
+    /// Set for daemon-hosted sessions (Phase 3); None for terminal sessions under `wtd run`.
+    hosted: Option<Arc<host::Hosted>>,
 }
 
 #[derive(Clone, Copy)]
@@ -211,6 +215,7 @@ impl Daemon {
         wt.live = s.is_some();
         wt.account = s.map(|s| s.account.clone().unwrap_or_else(|| "default".into()));
         wt.program = s.and_then(|s| s.program.clone());
+        wt.hosted = s.is_some_and(|s| s.hosted.is_some());
         self.upsert(inner, wt);
     }
 
@@ -268,19 +273,19 @@ async fn serve(dev: PathBuf) -> Result<()> {
     }
 }
 
-fn line(msg: &ServerLine) -> String {
-    let mut s = serde_json::to_string(msg).unwrap_or_default();
-    s.push('\n');
+fn line(msg: &ServerLine) -> Vec<u8> {
+    let mut s = serde_json::to_vec(msg).unwrap_or_default();
+    s.push(b'\n');
     s
 }
 
 async fn handle(d: Arc<Daemon>, conn: NamedPipeServer) -> Result<()> {
     let id = d.next_conn.fetch_add(1, Ordering::Relaxed);
     let (r, mut w) = tokio::io::split(conn);
-    let (out, mut out_rx) = mpsc::unbounded_channel::<String>();
+    let (out, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer = tokio::spawn(async move {
         while let Some(l) = out_rx.recv().await {
-            if w.write_all(l.as_bytes()).await.is_err() {
+            if w.write_all(&l).await.is_err() {
                 break;
             }
         }
@@ -288,6 +293,7 @@ async fn handle(d: Arc<Daemon>, conn: NamedPipeServer) -> Result<()> {
 
     let mut forwarder: Option<tokio::task::JoinHandle<()>> = None;
     let mut wants_metrics = false;
+    let mut attach_to: Option<(Arc<host::Hosted>, bool, u16, u16)> = None;
     let mut lines = BufReader::new(r).lines();
     while let Some(l) = lines.next_line().await? {
         if l.trim().is_empty() {
@@ -308,6 +314,21 @@ async fn handle(d: Arc<Daemon>, conn: NamedPipeServer) -> Result<()> {
                 start_sub = forwarder.is_none();
                 Ok(json!({}))
             }
+            method::SESSION_SPAWN | method::SESSION_ATTACH => {
+                let known = d.worktree_id_for(req.params.get("dir").and_then(Value::as_str).unwrap_or(""));
+                if known.is_some_and(|w| !d.lock().worktrees.contains_key(&w)) {
+                    rescan(&d).await; // a worktree created moments ago
+                }
+                match host::open(&d, &req.method, &req.params) {
+                    Ok((h, info, created)) => {
+                        let c = req.params.get("cols").and_then(Value::as_u64).unwrap_or(120) as u16;
+                        let r = req.params.get("rows").and_then(Value::as_u64).unwrap_or(30) as u16;
+                        attach_to = Some((h, created, c, r));
+                        Ok(info)
+                    }
+                    Err(e) => Err(e),
+                }
+            }
             _ => dispatch(&d, id, &req, &out).await,
         };
         if let Some(rid) = rid {
@@ -321,6 +342,12 @@ async fn handle(d: Arc<Daemon>, conn: NamedPipeServer) -> Result<()> {
         if start_sub {
             forwarder = Some(subscribe(&d, out.clone(), wants_metrics));
         }
+        if attach_to.is_some() {
+            break; // the rest of this connection is the binary attach stream
+        }
+    }
+    if let Some((h, created, c, r)) = attach_to {
+        host::attach(h, created, c, r, lines.into_inner(), out.clone()).await;
     }
 
     // disconnected
@@ -345,7 +372,7 @@ async fn handle(d: Arc<Daemon>, conn: NamedPipeServer) -> Result<()> {
 
 /// Send a snapshot, then forward every later push. Snapshot + subscribe happen under one lock so no
 /// change can slip between them.
-fn subscribe(d: &Arc<Daemon>, out: mpsc::UnboundedSender<String>, metrics: bool) -> tokio::task::JoinHandle<()> {
+fn subscribe(d: &Arc<Daemon>, out: mpsc::UnboundedSender<Vec<u8>>, metrics: bool) -> tokio::task::JoinHandle<()> {
     let (mut rx, snap) = {
         let mut inner = d.lock();
         if metrics {
@@ -374,7 +401,7 @@ fn subscribe(d: &Arc<Daemon>, out: mpsc::UnboundedSender<String>, metrics: bool)
     })
 }
 
-async fn dispatch(d: &Arc<Daemon>, conn: u64, req: &Request, out: &mpsc::UnboundedSender<String>) -> Result<Value> {
+async fn dispatch(d: &Arc<Daemon>, conn: u64, req: &Request, out: &mpsc::UnboundedSender<Vec<u8>>) -> Result<Value> {
     let p = &req.params;
     match req.method.as_str() {
         method::HELLO => Ok(json!({
@@ -411,15 +438,24 @@ async fn dispatch(d: &Arc<Daemon>, conn: u64, req: &Request, out: &mpsc::Unbound
                 rescan(d).await;
             }
             let mut inner = d.lock();
-            inner.sessions.insert(conn, Session { wt: id.clone(), kind: s.kind, account: s.account, job: s.job, program: s.program });
+            inner.sessions.insert(conn, Session { wt: id.clone(), kind: s.kind, account: s.account, job: s.job, program: s.program, hosted: None });
             let _ = out; // the session's own connection; `terminate` is pushed on it via session.stop
             d.refresh_liveness(&mut inner, &id);
             Ok(json!({}))
         }
         method::SESSION_STOP => {
             let id = p.get("id").and_then(Value::as_str).context("missing id")?.to_string();
-            let jobs: Vec<String> = d.lock().sessions.values().filter(|s| s.wt == id).map(|s| s.job.clone()).collect();
+            let (jobs, hosted): (Vec<String>, Vec<Arc<host::Hosted>>) = {
+                let inner = d.lock();
+                let mine: Vec<&Session> = inner.sessions.values().filter(|s| s.wt == id).collect();
+                (mine.iter().filter(|s| s.hosted.is_none()).map(|s| s.job.clone()).collect(),
+                 mine.iter().filter_map(|s| s.hosted.clone()).collect())
+            };
             let mut n = 0;
+            for h in &hosted {
+                h.pty.kill();
+                n += 1;
+            }
             for j in &jobs {
                 if !j.is_empty() && win::terminate_job(j).unwrap_or(false) {
                     n += 1;
@@ -448,7 +484,11 @@ async fn dispatch(d: &Arc<Daemon>, conn: u64, req: &Request, out: &mpsc::Unbound
             Ok(json!({}))
         }
         method::SHUTDOWN => {
-            eprintln!("[{}] shutdown requested", now());
+            let hosted = d.lock().sessions.values().filter(|s| s.hosted.is_some()).count();
+            if hosted > 0 && !p.get("force").and_then(Value::as_bool).unwrap_or(false) {
+                bail!("{hosted} hosted session(s) are running and would end — stop with force to confirm");
+            }
+            eprintln!("[{}] shutdown requested ({hosted} hosted session(s) end)", now());
             let _ = d.tx.send(Push::Shutdown);
             tokio::spawn(async {
                 tokio::time::sleep(Duration::from_millis(200)).await;
@@ -551,7 +591,12 @@ async fn rescan(d: &Arc<Daemon>) {
                 }
             }
         }
+        let id = wt.id.clone();
+        let fresh = !inner.worktrees.contains_key(&id);
         d.upsert(&mut inner, wt);
+        if fresh {
+            d.refresh_liveness(&mut inner, &id);
+        }
     }
     let gone: Vec<String> = inner.worktrees.keys().filter(|k| !seen.contains(*k)).cloned().collect();
     for id in gone {

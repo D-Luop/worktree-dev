@@ -84,6 +84,14 @@ pub mod method {
     /// `{}` → `{}`, then the daemon exits.
     pub const SHUTDOWN: &str = "shutdown";
 
+    // --- hosted sessions (Phase 3) ---
+    /// `{dir, kind, account, program, exe, args, env, cols, rows}` → `{session, worktree, created}`;
+    /// attaches to the worktree's hosted session if one is running, else starts it. The connection
+    /// then carries binary frames (see daemon/host.rs).
+    pub const SESSION_SPAWN: &str = "session.spawn";
+    /// `{worktree | dir, cols, rows}` → same, attach only.
+    pub const SESSION_ATTACH: &str = "session.attach";
+
     // --- groups (Phase 2) ---
     /// `{name}` → `{id}`
     pub const GROUP_CREATE: &str = "group.create";

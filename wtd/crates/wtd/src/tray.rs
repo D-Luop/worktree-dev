@@ -36,6 +36,8 @@ struct View {
     running: bool,
     sessions: u32,
     need_you: u32,
+    /// sessions the daemon hosts (stopping it ends them)
+    hosted: u32,
 }
 
 struct Tray {
@@ -117,7 +119,7 @@ pub fn main(args: &[String]) -> Result<i32> {
 fn watch_daemon(hwnd: isize) {
     let post = |v: View| unsafe {
         let packed = ((v.sessions.min(0xFFFF) as isize) << 16) | v.need_you.min(0xFFFF) as isize;
-        PostMessageW(hwnd as HWND, WM_STATE, v.running as usize, packed);
+        PostMessageW(hwnd as HWND, WM_STATE, (v.running as usize) | ((v.hosted.min(0xFFFF) as usize) << 1), packed);
     };
     loop {
         if let Ok(Some(mut c)) = Client::connect() {
@@ -127,6 +129,7 @@ fn watch_daemon(hwnd: isize) {
                     running: true,
                     sessions: wts.values().filter(|w| w.live).count() as u32,
                     need_you: wts.values().filter(|w| w.status == Status::Input).count() as u32,
+                    hosted: wts.values().filter(|w| w.hosted).count() as u32,
                 };
                 loop {
                     match c.read() {
@@ -162,7 +165,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             0
         }
         WM_STATE => {
-            let v = View { running: wp != 0, sessions: ((lp >> 16) & 0xFFFF) as u32, need_you: (lp & 0xFFFF) as u32 };
+            let v = View { running: wp & 1 != 0, hosted: ((wp >> 1) & 0xFFFF) as u32, sessions: ((lp >> 16) & 0xFFFF) as u32, need_you: (lp & 0xFFFF) as u32 };
             let changed = {
                 let mut t = TRAY.lock().unwrap();
                 let t = t.as_mut().unwrap();
@@ -258,9 +261,19 @@ fn spawn_hidden(cmd: &mut Command) {
 }
 
 fn toggle_daemon() {
-    let running = TRAY.lock().unwrap().as_ref().map(|t| t.view.running).unwrap_or(false);
+    let (running, hosted, hwnd) = TRAY.lock().unwrap().as_ref().map(|t| (t.view.running, t.view.hosted, t.hwnd)).unwrap_or((false, 0, std::ptr::null_mut()));
+    if running && hosted > 0 {
+        let text = win::wide(&format!(
+            "{hosted} agent session{} running in the daemon and will end.\n\nTheir conversations can be resumed by reopening the worktrees.\n\nStop the daemon?",
+            if hosted == 1 { " is" } else { "s are" }));
+        let title = win::wide("WorkTreeDev");
+        if unsafe { MessageBoxW(hwnd, text.as_ptr(), title.as_ptr(), MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) } != IDYES {
+            return;
+        }
+    }
     // we may be wtd-tray.exe: daemon control lives in the console CLI next to us
-    spawn_hidden(Command::new(paths::wtd_exe()).args(["daemon", if running { "stop" } else { "start" }]));
+    let args: &[&str] = if running { &["daemon", "stop", "--force"] } else { &["daemon", "start"] };
+    spawn_hidden(Command::new(paths::wtd_exe()).args(args));
 }
 
 fn open_vscode() {

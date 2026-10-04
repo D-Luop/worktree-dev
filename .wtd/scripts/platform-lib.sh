@@ -84,12 +84,14 @@ wtd_exe() { local e="${WTD:?}/bin/wtd.exe"; [ -x "$e" ] && printf '%s' "$e"; }
 # Session kind / account come from WTD_SESSION_KIND (agent|assistant) and WTD_ACCOUNT.
 wtd_exec_claude() { wtd_exec_agent claude "$@"; }
 
-# wtd_exec_agent <program> <args…>  → the same for any agent CLI (claude | codex).
+# wtd_exec_agent <program> <args…>  → the same for any agent CLI (claude | codex). `wtd host` runs it
+# in the daemon (it survives VSCode reloads; this terminal just attaches, and re-opening the worktree
+# re-attaches) — or, with the daemon stopped, in this terminal under `wtd run`.
 wtd_exec_agent() {
   local prog="$1" e; shift
   e="$(wtd_exe)"
   if [ -n "$e" ]; then
-    exec "$e" run --kind "${WTD_SESSION_KIND:-agent}" --account "${WTD_ACCOUNT:-}" -- "$prog" "$@"
+    exec "$e" host --kind "${WTD_SESSION_KIND:-agent}" --account "${WTD_ACCOUNT:-}" -- "$prog" "$@"
   fi
   exec "$prog" "$@"
 }

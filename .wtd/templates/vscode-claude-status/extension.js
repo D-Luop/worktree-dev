@@ -1258,8 +1258,16 @@ class DevSummaryProvider {
     const start = want === undefined ? !running : want;
     if (!daemonInstalled()) { vscode.window.showWarningMessage('wtd.exe is not installed — run install.sh (needs Rust: winget install Rustlang.Rustup).'); return; }
     if (start === running) return;
+    // stopping ends the agent sessions the daemon hosts: say so, and only then force it
+    const hosted = start ? 0 : [...this.daemon.wts.values()].filter((w) => w.hosted).length;
+    if (hosted && !this._confirmedStop) {
+      vscode.window.showWarningMessage('Stop the WorkTreeDev daemon?', { modal: true,
+        detail: hosted + ' agent session' + (hosted === 1 ? ' is' : 's are') + ' running in it and will end. Their conversations can be resumed by reopening the worktrees.' }, 'Stop and end sessions')
+        .then((ch) => { if (ch) { this._confirmedStop = true; this.toggleDaemon(false); this._confirmedStop = false; } });
+      return;
+    }
     this._daemonBusy = true; this._postDaemon();
-    cp.execFile(wtdExe(), ['daemon', start ? 'start' : 'stop'], { timeout: 15000, windowsHide: true }, (e, so, se) => {
+    cp.execFile(wtdExe(), start ? ['daemon', 'start'] : ['daemon', 'stop', '--force'], { timeout: 15000, windowsHide: true }, (e, so, se) => {
       this._daemonBusy = false;
       if (e) vscode.window.showErrorMessage('wtd daemon ' + (start ? 'start' : 'stop') + ' failed: ' + ((se || '').trim() || e.message));
       this._postDaemon();

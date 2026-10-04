@@ -112,7 +112,7 @@ if [ "$OS" = windows ]; then
     if [ -x "$WTD_EXE" ]; then
       "$WTD_EXE" daemon status >/dev/null 2>&1 && was_running=1
       "$WTD_EXE" tray --quit >/dev/null 2>&1 || true   # section K starts the new one
-      [ "$was_running" = 1 ] && "$WTD_EXE" daemon stop >/dev/null 2>&1
+      # the daemon is NOT stopped: it hosts the agent sessions, and stopping it would end them
     fi
     # wtd.exe (console CLI) + wtd-tray.exe (GUI subsystem: the tray never gets a console window).
     # Live sessions (`wtd run`) and MCP servers keep running the old exe: Windows lets a running exe
@@ -125,7 +125,7 @@ if [ "$OS" = windows ]; then
       cp "$src" "$dst" && echo "    installed $dst"
     done
     for o in "$WTD/bin"/*.exe.old-*; do [ -e "$o" ] && rm -f "$o" 2>/dev/null; done; true
-    if [ "$was_running" = 1 ]; then "$WTD_EXE" daemon start >/dev/null && echo "    restarted the daemon"; fi
+    [ "$was_running" = 1 ] && echo "    the running daemon keeps the previous version (it hosts your sessions) — restart it from the tray when convenient to update" 
   fi
 fi
 
