@@ -2,7 +2,7 @@
   "name": "claude-status",
   "displayName": "Claude Status",
   "description": "WorkTreeDev: a fleet roster for parallel Claude/Codex worktrees driven by the wtd.exe daemon — session list with groups and search, New Session picker, usage limits, native commit/diff browser, and status-coloured worktree folders.",
-  "version": "0.0.88",
+  "version": "0.0.89",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -108,6 +108,12 @@
         "command": "claudeStatus.changes.copySha",
         "title": "Copy Commit SHA",
         "category": "WorkTreeDev"
+      },
+      {
+        "command": "claudeStatus.showChanges",
+        "title": "Show Changes Panel",
+        "category": "WorkTreeDev",
+        "icon": "$(git-compare)"
       }
     ],
     "keybindings": [
@@ -189,7 +195,7 @@
           "contextualTitle": "Worktree Changes",
           "icon": "$(git-compare)",
           "order": 2,
-          "visibility": "visible"
+          "visibility": "collapsed"
         }
       ]
     },
@@ -266,6 +272,16 @@
           "when": "false"
         }
       ]
+    },
+    "configuration": {
+      "title": "WorkTreeDev",
+      "properties": {
+        "claudeStatus.changesPanel": {
+          "type": "boolean",
+          "default": true,
+          "description": "Dock a Changes panel (branch commits + live diff of the focused session) in the right half of the editor area, with the session on the left."
+        }
+      }
     }
   }
 }

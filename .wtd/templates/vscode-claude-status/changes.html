@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src __CSP__ 'unsafe-inline'; font-src __CSP__; script-src 'nonce-__NONCE__';">
+<link rel="stylesheet" href="__CODICON_HREF__">
+<style>
+  :root {
+    --bg: var(--vscode-editor-background);
+    --fg: var(--vscode-editor-foreground);
+    --dim: var(--vscode-descriptionForeground);
+    --border: var(--vscode-panel-border, var(--vscode-editorGroup-border, rgba(128,128,128,.25)));
+    --hover: var(--vscode-list-hoverBackground);
+    --sel: var(--vscode-list-activeSelectionBackground);
+    --selfg: var(--vscode-list-activeSelectionForeground);
+    --inactsel: var(--vscode-list-inactiveSelectionBackground);
+    --mono: var(--vscode-editor-font-family, Consolas, monospace);
+    --monosize: var(--vscode-editor-font-size, 13px);
+    --add-line: var(--vscode-diffEditor-insertedLineBackground, rgba(155,185,85,.15));
+    --del-line: var(--vscode-diffEditor-removedLineBackground, rgba(255,0,0,.12));
+    --add-text: var(--vscode-diffEditor-insertedTextBackground, rgba(155,185,85,.35));
+    --del-text: var(--vscode-diffEditor-removedTextBackground, rgba(255,0,0,.3));
+    --add-fg: var(--vscode-gitDecoration-addedResourceForeground, #81b88b);
+    --del-fg: var(--vscode-gitDecoration-deletedResourceForeground, #c74e39);
+    --mod-fg: var(--vscode-gitDecoration-modifiedResourceForeground, #e2c08d);
+    --ren-fg: var(--vscode-gitDecoration-renamedResourceForeground, #73c991);
+    --unt-fg: var(--vscode-gitDecoration-untrackedResourceForeground, #73c991);
+    --gutter: var(--vscode-editorLineNumber-foreground, #858585);
+    --hunk-bg: var(--vscode-editorGutter-background, transparent);
+    --hdr-bg: var(--vscode-sideBarSectionHeader-background, var(--vscode-editorGroupHeader-tabsBackground, rgba(128,128,128,.08)));
+    --badge-bg: var(--vscode-badge-background);
+    --badge-fg: var(--vscode-badge-foreground);
+    --focus: var(--vscode-focusBorder);
+    --link: var(--vscode-textLink-foreground);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--fg); font-family: var(--vscode-font-family); font-size: var(--vscode-font-size, 13px);
+         display: flex; flex-direction: column; overflow: hidden; }
+  button.icon { background: none; border: 0; color: var(--fg); cursor: pointer; padding: 3px; border-radius: 4px; line-height: 0; opacity: .85; }
+  button.icon:hover { background: var(--vscode-toolbar-hoverBackground, var(--hover)); opacity: 1; }
+  button.icon.on { background: var(--vscode-inputOption-activeBackground, var(--inactsel)); color: var(--vscode-inputOption-activeForeground, var(--fg)); opacity: 1; }
+  button.icon:focus-visible, .row:focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; }
+
+  /* ---------- header ---------- */
+  #head { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 12px; border-bottom: 1px solid var(--border); min-height: 35px; flex-wrap: wrap; }
+  #head .wt { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+  #head .wt:hover { text-decoration: underline; }
+  #head .br { display: inline-flex; align-items: center; gap: 4px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .sync { display: inline-flex; gap: 6px; color: var(--dim); font-size: 12px; white-space: nowrap; }
+  .sync .up { color: var(--link); }
+  #head .grow { flex: 1; }
+  #filter { background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent);
+            border-radius: 2px; padding: 2px 6px; width: 140px; font: inherit; font-size: 12px; }
+  #filter:focus { outline: 1px solid var(--focus); outline-offset: -1px; }
+
+  /* ---------- commit list ---------- */
+  #list { overflow-y: auto; flex: 0 0 auto; height: 34%; min-height: 60px; }
+  .row { display: flex; align-items: center; gap: 6px; padding: 0 10px 0 12px; height: 24px; cursor: pointer; white-space: nowrap; user-select: none; }
+  .row:hover { background: var(--hover); }
+  .row.sel { background: var(--inactsel); }
+  body.listfocus .row.sel { background: var(--sel); color: var(--selfg); }
+  body.listfocus .row.sel .meta, body.listfocus .row.sel .sha { color: inherit; opacity: .85; }
+  .row .codicon { flex: none; }
+  .row .subj { overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+  .row .meta { color: var(--dim); font-size: 12px; flex: none; }
+  .row .sha { font-family: var(--mono); font-size: 12px; color: var(--dim); flex: none; }
+  .row .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--link); flex: none; }
+  .row .dot.pushed { background: transparent; border: 1px solid var(--dim); opacity: .5; }
+  .row.working .codicon { color: var(--mod-fg); }
+  .row.note { color: var(--dim); cursor: default; font-size: 12px; height: 22px; }
+  .row.note:hover { background: none; }
+  .row .count { background: var(--badge-bg); color: var(--badge-fg); border-radius: 10px; padding: 0 6px; font-size: 11px; line-height: 16px; }
+
+  #sash { flex: none; height: 4px; cursor: row-resize; border-top: 1px solid var(--border); background: transparent; }
+  #sash:hover, #sash.drag { background: var(--focus); }
+
+  /* ---------- diff ---------- */
+  #diff { flex: 1; overflow: auto; position: relative; }
+  .cmeta { padding: 10px 12px 8px; border-bottom: 1px solid var(--border); }
+  .cmeta .s { font-weight: 600; font-size: 14px; margin-bottom: 4px; white-space: pre-wrap; word-break: break-word; }
+  .cmeta .b { white-space: pre-wrap; color: var(--fg); opacity: .85; margin: 6px 0; font-size: 12px; word-break: break-word; }
+  .cmeta .a { color: var(--dim); font-size: 12px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .cmeta .a .sha { font-family: var(--mono); cursor: pointer; }
+  .cmeta .a .sha:hover { color: var(--link); }
+  .summary { display: flex; align-items: center; gap: 10px; padding: 6px 12px; color: var(--dim); font-size: 12px; border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 3; background: var(--bg); }
+  .summary .grow { flex: 1; }
+  .plus { color: var(--add-fg); } .minus { color: var(--del-fg); }
+
+  .file { border-bottom: 1px solid var(--border); }
+  .fh { position: sticky; top: 29px; z-index: 2; display: flex; align-items: center; gap: 6px; padding: 0 8px 0 6px; height: 28px; background: var(--hdr-bg);
+        backdrop-filter: blur(6px); cursor: pointer; user-select: none; border-bottom: 1px solid var(--border); }
+  .fh:hover { filter: brightness(1.08); }
+  .fh .st { font-family: var(--mono); font-size: 11px; font-weight: 700; width: 14px; text-align: center; flex: none; }
+  .st-M { color: var(--mod-fg); } .st-A, .st-U { color: var(--add-fg); } .st-D { color: var(--del-fg); } .st-R { color: var(--ren-fg); }
+  .fh .name { font-weight: 600; white-space: nowrap; }
+  .fh .dir { color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; direction: rtl; text-align: left; }
+  .fh .stat { font-size: 11px; font-family: var(--mono); white-space: nowrap; display: inline-flex; gap: 6px; align-items: center; }
+  .bar { display: inline-flex; gap: 1px; }
+  .bar i { width: 7px; height: 7px; border-radius: 1px; background: var(--dim); opacity: .3; display: inline-block; }
+  .bar i.a { background: var(--add-fg); opacity: 1; } .bar i.d { background: var(--del-fg); opacity: 1; }
+  .fh .acts { display: none; gap: 2px; }
+  .fh:hover .acts, .fh:focus-within .acts { display: inline-flex; }
+  .file.collapsed .fb { display: none; }
+  .file.collapsed .chev { transform: rotate(-90deg); }
+  .chev { transition: transform .1s; }
+
+  .fb { overflow-x: auto; font-family: var(--mono); font-size: var(--monosize); line-height: 1.5; }
+  table.d { border-collapse: collapse; width: 100%; table-layout: auto; }
+  table.d td { padding: 0; vertical-align: top; }
+  td.ln { width: 1%; min-width: 44px; padding: 0 8px !important; text-align: right; color: var(--gutter); user-select: none; font-size: .92em; opacity: .9; }
+  td.mk { width: 14px; user-select: none; color: var(--dim); text-align: center; }
+  td.c { white-space: pre; padding-right: 16px !important; }
+  tr.add td.c, tr.add td.mk { background: var(--add-line); } tr.add td.ln { background: var(--add-line); }
+  tr.del td.c, tr.del td.mk { background: var(--del-line); } tr.del td.ln { background: var(--del-line); }
+  tr.add td.mk { color: var(--add-fg); } tr.del td.mk { color: var(--del-fg); }
+  ins { background: var(--add-text); text-decoration: none; border-radius: 2px; }
+  del { background: var(--del-text); text-decoration: none; border-radius: 2px; }
+  tr.hunk td { background: var(--vscode-editorInfo-background, rgba(80,140,220,.08)); color: var(--dim); font-size: .92em; padding: 2px 0 !important; }
+  tr.hunk td.c { padding-left: 4px !important; }
+  tr.eof td.c { color: var(--dim); font-style: italic; }
+  /* split view */
+  table.split td.c { width: 50%; }
+  table.split td.ln.r { border-left: 1px solid var(--border); }
+  table.split td.c.add, table.split td.ln.add { background: var(--add-line); }
+  table.split td.c.del, table.split td.ln.del { background: var(--del-line); }
+  table.split td.c.empty, table.split td.ln.empty { background: repeating-linear-gradient(-45deg, transparent 0 4px, rgba(128,128,128,.07) 4px 8px); }
+
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--vscode-scrollbarSlider-background, rgba(121,121,121,.4)); }
+  ::-webkit-scrollbar-thumb:hover { background: var(--vscode-scrollbarSlider-hoverBackground, rgba(100,100,100,.7)); }
+  ::-webkit-scrollbar-thumb:active { background: var(--vscode-scrollbarSlider-activeBackground, rgba(191,191,191,.4)); }
+  .msg { color: var(--dim); padding: 14px 16px; font-size: 12px; display: flex; gap: 8px; align-items: center; }
+  .msg button { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: 0; padding: 3px 10px; border-radius: 2px; cursor: pointer; font: inherit; }
+  .msg button:hover { background: var(--vscode-button-secondaryHoverBackground); }
+  #empty { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; gap: 10px; color: var(--dim); text-align: center; padding: 20px; }
+  #empty .codicon { font-size: 32px !important; opacity: .5; }
+  .busy { position: absolute; top: 0; left: 0; right: 0; height: 2px; overflow: hidden; z-index: 5; }
+  .busy::after { content: ''; position: absolute; left: -30%; width: 30%; height: 100%; background: var(--vscode-progressBar-background, var(--focus)); animation: slide 1s linear infinite; }
+  @keyframes slide { to { left: 100%; } }
+</style>
+</head>
+<body>
+  <div id="head">
+    <span class="codicon codicon-git-compare" style="opacity:.8"></span>
+    <span class="wt" id="wt" title="Show changes for another worktree" tabindex="0">No session</span>
+    <span class="br" id="br"></span>
+    <span class="sync" id="sync"></span>
+    <span class="grow"></span>
+    <input id="filter" placeholder="Filter files" spellcheck="false">
+    <button class="icon" id="bTests" title="Hide test files"><span class="codicon codicon-beaker"></span></button>
+    <button class="icon" id="bMode" title="Side-by-side"><span class="codicon codicon-split-horizontal"></span></button>
+    <button class="icon" id="bFold" title="Collapse all files"><span class="codicon codicon-collapse-all"></span></button>
+    <button class="icon" id="bRefresh" title="Refresh"><span class="codicon codicon-refresh"></span></button>
+  </div>
+  <div id="list" tabindex="0"></div>
+  <div id="sash"></div>
+  <div id="diff"><div id="empty"><span class="codicon codicon-git-compare"></span><div>Open a session to see its commits and changes here.</div></div></div>
+
+<script nonce="__NONCE__">
+(function () {
+  const vs = acquireVsCodeApi();
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const WORKING = '~working';
+  const BIG = 600;                     // diff lines above which a file starts collapsed
+  const st = Object.assign({ listH: 0, mode: 'unified' }, vs.getState() || {});
+  let list = null, diff = null, sel = WORKING, hideTests = false, collapsed = {}, filterText = '';
+
+  // ---------- layout: draggable split between commit list and diff ----------
+  const listEl = $('list'), sash = $('sash'), diffEl = $('diff');
+  if (st.listH) listEl.style.height = st.listH + 'px';
+  sash.addEventListener('mousedown', (e) => {
+    e.preventDefault(); sash.classList.add('drag');
+    const y0 = e.clientY, h0 = listEl.offsetHeight;
+    const mv = (ev) => { const h = Math.max(60, Math.min(window.innerHeight - 120, h0 + ev.clientY - y0)); listEl.style.height = h + 'px'; };
+    const up = () => { sash.classList.remove('drag'); document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up);
+      st.listH = listEl.offsetHeight; vs.setState(st); };
+    document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
+  });
+  listEl.addEventListener('focus', () => document.body.classList.add('listfocus'));
+  listEl.addEventListener('blur', () => document.body.classList.remove('listfocus'));
+
+  // ---------- header ----------
+  $('wt').addEventListener('click', () => vs.postMessage({ cmd: 'pick' }));
+  $('bRefresh').addEventListener('click', () => vs.postMessage({ cmd: 'refresh' }));
+  $('bTests').addEventListener('click', () => vs.postMessage({ cmd: 'toggleTests' }));
+  $('bMode').addEventListener('click', () => { st.mode = st.mode === 'split' ? 'unified' : 'split'; vs.setState(st); syncButtons(); renderDiff(true); });
+  $('bFold').addEventListener('click', () => {
+    if (!diff) return;
+    const anyOpen = visibleFiles().some((f) => !isCollapsed(f));
+    for (const f of visibleFiles()) collapsed[key(f)] = anyOpen;
+    renderDiff(true);
+  });
+  $('filter').addEventListener('input', (e) => { filterText = e.target.value.trim().toLowerCase(); renderDiff(true); });
+  function syncButtons() {
+    $('bTests').classList.toggle('on', hideTests);
+    $('bTests').title = hideTests ? 'Show test files' : 'Hide test files';
+    $('bMode').classList.toggle('on', st.mode === 'split');
+    $('bMode').title = st.mode === 'split' ? 'Inline view' : 'Side-by-side view';
+  }
+
+  // ---------- commit list ----------
+  function renderList() {
+    if (!list) { listEl.innerHTML = ''; return; }
+    $('wt').textContent = list.target.slug + '/' + list.target.name;
+    $('br').innerHTML = '<span class="codicon codicon-git-branch"></span>' + esc(list.branch);
+    const up = list.upstream;
+    $('sync').innerHTML = up ? ('<span class="' + (up.ahead ? 'up' : '') + '" title="' + up.ahead + ' to push">↑' + up.ahead + '</span>'
+      + '<span title="' + up.behind + ' to pull">↓' + up.behind + '</span>') : '<span title="No upstream branch">unpublished</span>';
+    let h = '';
+    if (list.changes) h += '<div class="row working' + (sel === WORKING ? ' sel' : '') + '" data-sel="' + WORKING + '">'
+      + '<span class="codicon codicon-circle-filled" style="font-size:10px"></span><span class="subj">Uncommitted changes</span>'
+      + '<span class="count">' + list.changes + '</span></div>';
+    if (list.fallback) h += '<div class="row note"><span class="codicon codicon-info"></span>'
+      + esc(list.base ? 'No commits ahead of ' + list.base + ' · recent history' : 'Recent history') + '</div>';
+    list.commits.forEach((c, i) => {
+      const pushed = !up || i >= up.ahead;
+      h += '<div class="row' + (sel === c.sha ? ' sel' : '') + '" data-sel="' + c.sha + '" title="' + esc(c.subject + '\n' + c.author + ' · ' + c.date) + '">'
+        + '<span class="dot' + (pushed ? ' pushed' : '') + '" title="' + (pushed ? 'pushed' : 'not pushed') + '"></span>'
+        + '<span class="subj">' + esc(c.subject) + '</span><span class="meta">' + esc(c.when) + '</span><span class="sha">' + esc(c.short) + '</span></div>';
+    });
+    if (!list.changes && !list.commits.length) h += '<div class="row note">No changes</div>';
+    listEl.innerHTML = h;
+    // fit the list to its rows (up to a third of the panel) until the user drags the divider
+    if (!st.listH) listEl.style.height = 'auto';
+    if (!st.listH) listEl.style.height = Math.max(60, Math.min(listEl.scrollHeight + 4, Math.round(window.innerHeight * 0.34))) + 'px';
+  }
+  listEl.addEventListener('click', (e) => { const r = e.target.closest('.row[data-sel]'); if (r) select(r.dataset.sel); });
+  listEl.addEventListener('keydown', (e) => {
+    const rows = [...listEl.querySelectorAll('.row[data-sel]')]; if (!rows.length) return;
+    const i = rows.findIndex((r) => r.dataset.sel === sel);
+    if (e.key === 'ArrowDown' || e.key === 'j') { e.preventDefault(); select(rows[Math.min(rows.length - 1, i + 1)].dataset.sel); }
+    else if (e.key === 'ArrowUp' || e.key === 'k') { e.preventDefault(); select(rows[Math.max(0, i - 1)].dataset.sel); }
+  });
+  function select(s) {
+    if (s === sel && diff && diff.sel === s) return;
+    sel = s; renderList();
+    const r = listEl.querySelector('.row.sel'); if (r && r.scrollIntoView) r.scrollIntoView({ block: 'nearest' });
+    busy(true); vs.postMessage({ cmd: 'select', sel: s });
+  }
+  function busy(on) { const b = diffEl.querySelector('.busy'); if (on && !b) diffEl.insertAdjacentHTML('afterbegin', '<div class="busy"></div>'); else if (!on && b) b.remove(); }
+
+  // ---------- diff ----------
+  const key = (f) => f.path;
+  const isCollapsed = (f) => (key(f) in collapsed ? collapsed[key(f)] : (f.adds + f.dels > BIG));
+  function visibleFiles() {
+    if (!diff) return [];
+    return diff.files.filter((f) => (!hideTests || !f.test) && (!filterText || f.path.toLowerCase().includes(filterText)));
+  }
+  function letter(f) { return f.untracked ? 'U' : ({ added: 'A', deleted: 'D', renamed: 'R' })[f.status] || 'M'; }
+  function bar(a, d) {
+    const n = a + d; if (!n) return '';
+    let ga = Math.round(5 * a / n), gd = Math.min(5 - ga, Math.round(5 * d / n)); if (a && !ga) { ga = 1; } if (d && !gd && ga < 5) gd = 1;
+    let s = '<span class="bar">'; for (let i = 0; i < 5; i++) s += '<i class="' + (i < ga ? 'a' : i < ga + gd ? 'd' : '') + '"></i>'; return s + '</span>';
+  }
+
+  // word-level highlight of a changed line pair: LCS over tokens (bounded), else common prefix/suffix
+  const tok = (s) => s.match(/\w+|\s+|[^\w\s]/g) || [];
+  function wordDiff(a, b) {
+    const A = tok(a), B = tok(b);
+    if (A.length * B.length > 40000) {
+      let p = 0; while (p < a.length && p < b.length && a[p] === b[p]) p++;
+      let q = 0; while (q < a.length - p && q < b.length - p && a[a.length - 1 - q] === b[b.length - 1 - q]) q++;
+      const mid = (s, t) => esc(s.slice(0, p)) + (s.length - p - q > 0 ? '<' + t + '>' + esc(s.slice(p, s.length - q)) + '</' + t + '>' : '') + esc(s.slice(s.length - q));
+      return [mid(a, 'del'), mid(b, 'ins')];
+    }
+    const L = Array.from({ length: A.length + 1 }, () => new Uint16Array(B.length + 1));
+    for (let i = A.length - 1; i >= 0; i--) for (let j = B.length - 1; j >= 0; j--) L[i][j] = A[i] === B[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+    // too little in common → whole-line change reads better than confetti
+    const common = L[0][0], ratio = (2 * common) / ((A.length + B.length) || 1);
+    if (ratio < 0.35) return [esc(a), esc(b)];
+    let i = 0, j = 0, ra = '', rb = '', da = '', db = '';
+    const flush = () => { if (da) { ra += '<del>' + esc(da) + '</del>'; da = ''; } if (db) { rb += '<ins>' + esc(db) + '</ins>'; db = ''; } };
+    while (i < A.length || j < B.length) {
+      if (i < A.length && j < B.length && A[i] === B[j]) { flush(); ra += esc(A[i]); rb += esc(B[j]); i++; j++; }
+      else if (j < B.length && (i >= A.length || L[i][j + 1] >= L[i + 1][j])) db += B[j++];
+      else da += A[i++];
+    }
+    flush();
+    return [ra, rb];
+  }
+
+  // patch text → rows: {t:'hunk'|'ctx'|'add'|'del'|'eof', o, n, html}
+  function parseRows(patch) {
+    const lines = patch.split('\n'); const rows = [];
+    let o = 0, n = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i];
+      if (l.startsWith('@@')) { const m = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/.exec(l); if (m) { o = +m[1]; n = +m[2]; } rows.push({ t: 'hunk', html: esc(l) }); continue; }
+      if (l.startsWith('\\')) { rows.push({ t: 'eof', html: esc(l.slice(2)) }); continue; }
+      if (l[0] === '-' || l[0] === '+') {
+        // gather the -block then the +block and pair them for word highlights
+        const dels = [], adds = [];
+        while (i < lines.length && lines[i][0] === '-') dels.push(lines[i++].slice(1));
+        while (i < lines.length && lines[i][0] === '+') adds.push(lines[i++].slice(1));
+        i--;
+        const dh = dels.map(esc), ah = adds.map(esc);
+        const pairs = Math.min(dels.length, adds.length);
+        if (pairs && dels.length + adds.length <= 400) for (let k = 0; k < pairs; k++) [dh[k], ah[k]] = wordDiff(dels[k], adds[k]);
+        dels.forEach((_, k) => rows.push({ t: 'del', o: o++, html: dh[k], pair: k < adds.length ? k : -1 }));
+        adds.forEach((_, k) => rows.push({ t: 'add', n: n++, html: ah[k], pair: k < dels.length ? k : -1 }));
+        continue;
+      }
+      if (l === '' && i === lines.length - 1) continue;
+      rows.push({ t: 'ctx', o: o++, n: n++, html: esc(l.slice(1)) });
+    }
+    return rows;
+  }
+  function unifiedTable(rows) {
+    let h = '<table class="d"><tbody>';
+    for (const r of rows) {
+      if (r.t === 'hunk') h += '<tr class="hunk"><td class="ln"></td><td class="ln"></td><td class="c" colspan="2">' + r.html + '</td></tr>';
+      else if (r.t === 'eof') h += '<tr class="eof"><td class="ln"></td><td class="ln"></td><td class="mk"></td><td class="c">' + r.html + '</td></tr>';
+      else h += '<tr class="' + r.t + '"><td class="ln">' + (r.t === 'add' ? '' : r.o) + '</td><td class="ln">' + (r.t === 'del' ? '' : r.n)
+        + '</td><td class="mk">' + (r.t === 'add' ? '+' : r.t === 'del' ? '−' : '') + '</td><td class="c">' + r.html + '</td></tr>';
+    }
+    return h + '</tbody></table>';
+  }
+  function splitTable(rows) {
+    let h = '<table class="d split"><tbody>';
+    const cell = (side, r) => r ? '<td class="ln ' + side + ' ' + r.t + '">' + (side === 'l' ? r.o : r.n) + '</td><td class="c ' + r.t + '">' + r.html + '</td>'
+      : '<td class="ln ' + side + ' empty"></td><td class="c empty"></td>';
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      if (r.t === 'hunk') { h += '<tr class="hunk"><td class="ln"></td><td class="c" colspan="3">' + r.html + '</td></tr>'; continue; }
+      if (r.t === 'eof') { h += '<tr class="eof"><td class="ln"></td><td class="c" colspan="3">' + r.html + '</td></tr>'; continue; }
+      if (r.t === 'ctx') { h += '<tr>' + cell('l', { t: '', o: r.o, html: r.html }) + cell('r', { t: '', n: r.n, html: r.html }) + '</tr>'; continue; }
+      const dels = [], adds = [];
+      while (i < rows.length && rows[i].t === 'del') dels.push(rows[i++]);
+      while (i < rows.length && rows[i].t === 'add') adds.push(rows[i++]);
+      i--;
+      for (let k = 0; k < Math.max(dels.length, adds.length); k++) h += '<tr>' + cell('l', dels[k]) + cell('r', adds[k]) + '</tr>';
+    }
+    return h + '</tbody></table>';
+  }
+  function fileBody(f) {
+    if (f.binary) return '<div class="msg"><span class="codicon codicon-file-binary"></span>Binary file not shown</div>';
+    if (f.tooBig) return '<div class="msg"><span class="codicon codicon-warning"></span>Too large to show inline<button data-act="native">Open diff</button></div>';
+    if (f.unreadable) return '<div class="msg">Could not read file</div>';
+    if (!f.patch) return '<div class="msg">' + (f.status === 'renamed' ? 'Renamed without changes' : 'No content changes (mode only)') + '</div>';
+    const rows = parseRows(f.patch);
+    return (st.mode === 'split' ? splitTable(rows) : unifiedTable(rows))
+      + (f.truncated ? '<div class="msg">' + f.truncated + ' more lines not shown<button data-act="native">Open full diff</button></div>' : '');
+  }
+  function renderDiff(keepScroll) {
+    busy(false);
+    const y = diffEl.scrollTop;
+    if (!list) { diffEl.innerHTML = '<div id="empty"><span class="codicon codicon-git-compare"></span><div>Open a session to see its commits and changes here.</div></div>'; return; }
+    if (!diff || diff.sel !== sel) return;
+    let h = '';
+    if (diff.meta) {
+      const m = diff.meta;
+      h += '<div class="cmeta"><div class="s">' + esc(m.subject) + '</div>' + (m.body ? '<div class="b">' + esc(m.body) + '</div>' : '')
+        + '<div class="a"><span><span class="codicon codicon-account"></span> ' + esc(m.author) + '</span><span>' + esc(m.date) + ' (' + esc(m.when) + ')</span>'
+        + '<span class="sha" data-copy="' + esc(m.sha) + '" title="Copy full SHA"><span class="codicon codicon-copy"></span> ' + esc(m.short) + '</span></div></div>';
+    }
+    const files = visibleFiles();
+    const A = files.reduce((s, f) => s + f.adds, 0), D = files.reduce((s, f) => s + f.dels, 0);
+    const hidden = diff.files.length - files.length;
+    h += '<div class="summary"><span>' + files.length + ' file' + (files.length === 1 ? '' : 's') + ' changed</span><span class="plus">+' + A + '</span><span class="minus">−' + D + '</span>'
+      + (hidden ? '<span>' + hidden + ' hidden' + (hideTests ? ' (tests' + (filterText ? ', filter' : '') + ')' : ' (filter)') + '</span>' : '')
+      + (diff.omitted ? '<span>' + diff.omitted + ' more files not listed</span>' : '') + '<span class="grow"></span>'
+      + (diff.files.length ? '<button class="icon" data-act="all" title="Open all in the diff editor"><span class="codicon codicon-diff-multiple"></span></button>' : '') + '</div>';
+    if (!files.length) h += '<div class="msg">' + (diff.files.length ? 'All files are hidden by the current filter.' : sel === WORKING ? 'Working tree clean.' : 'This commit has no file changes.') + '</div>';
+    files.forEach((f, idx) => {
+      const L = letter(f), i = f.path.lastIndexOf('/');
+      const name = f.path.slice(i + 1), dir = i >= 0 ? f.path.slice(0, i) : '';
+      h += '<div class="file' + (isCollapsed(f) ? ' collapsed' : '') + '" data-i="' + idx + '">'
+        + '<div class="fh" tabindex="0" title="' + esc(f.path + (f.from ? '\nrenamed from ' + f.from : '')) + '">'
+        + '<span class="codicon codicon-chevron-down chev"></span><span class="st st-' + L + '">' + L + '</span>'
+        + '<span class="name">' + esc(name) + '</span><span class="dir">‎' + esc(dir) + (f.from ? ' ← ' + esc(f.from) : '') + '‎</span>'
+        + '<span class="stat"><span class="plus">+' + f.adds + '</span><span class="minus">−' + f.dels + '</span>' + bar(f.adds, f.dels) + '</span>'
+        + '<span class="acts"><button class="icon" data-act="native" title="Open in diff editor"><span class="codicon codicon-diff"></span></button>'
+        + (f.status !== 'deleted' ? '<button class="icon" data-act="open" title="Open file"><span class="codicon codicon-go-to-file"></span></button>' : '') + '</span></div>'
+        + '<div class="fb">' + (isCollapsed(f) ? '' : fileBody(f)) + '</div></div>';
+    });
+    diffEl.innerHTML = h;
+    diffEl._files = files;
+    if (keepScroll) diffEl.scrollTop = y; else diffEl.scrollTop = 0;
+  }
+  diffEl.addEventListener('click', (e) => {
+    const cp = e.target.closest('[data-copy]'); if (cp) { vs.postMessage({ cmd: 'copy', text: cp.dataset.copy }); return; }
+    const act = e.target.closest('[data-act]');
+    if (act && act.dataset.act === 'all') { vs.postMessage({ cmd: 'openAll', sel }); return; }
+    const fe = e.target.closest('.file'); if (!fe) return;
+    const f = diffEl._files[+fe.dataset.i]; if (!f) return;
+    if (act) { e.stopPropagation(); vs.postMessage({ cmd: act.dataset.act === 'open' ? 'openFile' : 'openNative', sel, file: { path: f.path, from: f.from, status: f.status, untracked: !!f.untracked } }); return; }
+    if (e.target.closest('.fh')) toggleFile(fe, f);
+  });
+  diffEl.addEventListener('keydown', (e) => {
+    const fh = e.target.closest('.fh'); if (!fh || (e.key !== 'Enter' && e.key !== ' ')) return;
+    e.preventDefault(); const fe = fh.parentElement; toggleFile(fe, diffEl._files[+fe.dataset.i]);
+  });
+  function toggleFile(fe, f) {
+    const c = !fe.classList.contains('collapsed');
+    collapsed[key(f)] = c; fe.classList.toggle('collapsed', c);
+    const fb = fe.querySelector('.fb'); if (!c && !fb.innerHTML) fb.innerHTML = fileBody(f);
+  }
+  // n / p jump between files (when focus isn't in the filter box)
+  document.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT' || !diffEl._files) return;
+    if (e.key !== 'n' && e.key !== 'p') return;
+    const hs = [...diffEl.querySelectorAll('.file')]; if (!hs.length) return;
+    const top = diffEl.scrollTop + 40;
+    let i = hs.findIndex((x) => x.offsetTop > top);
+    if (e.key === 'n') { if (i < 0) return; } else { i = (i < 0 ? hs.length : i) - 2; if (i < 0) i = 0; }
+    diffEl.scrollTop = hs[i].offsetTop - 30;
+  });
+
+  // ---------- host messages ----------
+  window.addEventListener('message', (ev) => {
+    const m = ev.data || {};
+    if (m.type === 'tests') { hideTests = !!m.hide; syncButtons(); renderDiff(true); }
+    else if (m.type === 'clear') { list = null; diff = null; $('wt').textContent = 'No session'; $('br').innerHTML = ''; $('sync').innerHTML = ''; renderList(); renderDiff(); }
+    else if (m.type === 'list') {
+      const newTarget = !list || list.target.slug !== m.target.slug || list.target.name !== m.target.name;
+      list = m;
+      if (newTarget) { collapsed = {}; diff = null; sel = m.sel || (m.changes ? WORKING : (m.commits[0] && m.commits[0].sha) || WORKING); }
+      else if (m.sel) sel = m.sel;
+      // selection vanished (commit amended away, working tree cleaned) → nearest sensible row
+      const valid = (s) => (s === WORKING ? m.changes > 0 : m.commits.some((c) => c.sha === s));
+      if (!valid(sel)) { sel = m.changes ? WORKING : (m.commits[0] && m.commits[0].sha) || WORKING; }
+      renderList();
+      if (!diff || diff.sel !== sel || newTarget) { busy(true); vs.postMessage({ cmd: 'select', sel }); }
+    }
+    else if (m.type === 'diff') {
+      if (m.sel !== sel) return;   // a stale answer for a row we've moved off
+      const same = diff && diff.sel === m.sel;
+      diff = m; renderDiff(same);
+    }
+  });
+  syncButtons();
+  vs.postMessage({ cmd: 'ready' });
+})();
+</script>
+</body>
+</html>

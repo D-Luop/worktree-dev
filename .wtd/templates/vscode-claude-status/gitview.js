@@ -150,7 +150,10 @@ class GitView {
         }
         return links;
       },
-      handleTerminalLink: (link) => this.showCommit(this._wtForTerminal(link.terminal), link.sha),
+      handleTerminalLink: (link) => {
+        const t = this._wtForTerminal(link.terminal);
+        return this.onShowCommit ? this.onShowCommit(t, link.sha) : this.showCommit(t, link.sha);
+      },
     }));
   }
 
@@ -357,4 +360,4 @@ class GitView {
   _syncTestsContext() { vscode.commands.executeCommand('setContext', 'claudeStatus.testsHidden', this._hideTests()); }
 }
 
-module.exports = { GitView, parsePorcelain, parseNameStatus, TEST_RE };
+module.exports = { GitView, parsePorcelain, parseNameStatus, TEST_RE, baseRef, revUri };
