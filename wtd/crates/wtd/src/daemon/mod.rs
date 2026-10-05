@@ -464,8 +464,12 @@ async fn dispatch(d: &Arc<Daemon>, conn: u64, req: &Request, out: &mpsc::Unbound
         method::WORKTREE_REMOVE | method::WORKTREE_ARCHIVE => {
             let id = p.get("id").and_then(Value::as_str).context("missing id")?.to_string();
             let (slug, name) = id.split_once('/').map(|(a, b)| (a.to_string(), b.to_string())).context("id must be <slug>/<name>")?;
-            if stop_sessions(d, &id) > 0 {
-                tokio::time::sleep(Duration::from_millis(700)).await; // let the killed tree release the folder
+            // editors close their terminals / tabs / watches in the folder (on Windows any of those
+            // blocks the move or delete), then the session's process tree goes
+            let editors = d.tx.send(Push::Release { id: id.clone() }).unwrap_or(0) > 0;
+            let stopped = stop_sessions(d, &id) > 0;
+            if editors || stopped {
+                tokio::time::sleep(Duration::from_millis(900)).await; // let them release the folder
             }
             d.unwatch(&id);
             let dev = d.dev.clone();

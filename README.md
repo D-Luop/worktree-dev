@@ -65,6 +65,15 @@ left, and its commits and diff are on the right:
 If you close it, it comes back the next time you focus a session. To turn it off, set
 `claudeStatus.changesPanel` to `false`.
 
+**Each session also gets a shell.** A plain terminal opened in the worktree sits in the bottom 20% of
+the left column, under the Claude chat. Switching sessions brings that session's shell along with
+it. To turn it off, set `claudeStatus.sessionShell` to `false`.
+
+**Archiving or deleting a worktree releases it first.** Its session and shell terminals close, along
+with any editors or diffs open on its files, so nothing holds the folder (on Windows, an open handle
+blocks the move or delete). This also happens when the archive or delete comes from a terminal or
+the assistant: the daemon tells VS Code to let go before it touches the folder.
+
 **Worktree Changes** (Explorer, collapsed by default) is a native tree of the same uncommitted
 changes and commits:
 

@@ -49,6 +49,9 @@ pub enum Push {
     Groups { rev: u64, groups: Vec<Group> },
     /// Undelivered messages (pending approval or queued) after any message change.
     Messages { rev: u64, messages: Vec<Message> },
+    /// A worktree is about to be archived or removed: clients close anything holding it open
+    /// (terminals cwd'd in it, editors, file watches) before the daemon moves/deletes the folder.
+    Release { id: String },
     /// The daemon is shutting down (clients should show "stopped").
     Shutdown,
     /// Sent to a `wtd run` connection: end your session (terminate its job).

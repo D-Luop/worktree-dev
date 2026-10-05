@@ -27,14 +27,14 @@ function isDevRoot(d) { try { return !!d && fs.existsSync(path.join(d, '.wtd'));
 
 // Resolve the dev base. The tree is relocatable and the shipped .vsix can't be render-substituted,
 // so we find it at runtime, most-authoritative first:
-//   1. the install-written pin file (location-independent — works even with no relevant folder open);
-//   2. a WTD_DEV env override;
+//   1. a WTD_DEV env override (as in wtd.exe — e.g. a test fleet);
+//   2. the install-written pin file (location-independent — works even with no relevant folder open);
 //   3. discovery from the open folders — each folder, its ANCESTORS (opened on a worktree) and its
 //      immediate CHILDREN (opened on the base's parent, e.g. D:\Projects\Dev);
 //   4. the canonical ~/dev.
 function resolveDevRoot() {
-  try { const p = fs.readFileSync(DEV_ROOT_PIN, 'utf8').trim(); if (isDevRoot(p)) return p; } catch {}
   if (isDevRoot(process.env.WTD_DEV)) return process.env.WTD_DEV;
+  try { const p = fs.readFileSync(DEV_ROOT_PIN, 'utf8').trim(); if (isDevRoot(p)) return p; } catch {}
   for (const start of (vscode.workspace.workspaceFolders || []).map((f) => f.uri.fsPath)) {
     let d = start;
     for (let i = 0; i < 8; i++) {                       // climb toward the filesystem root
@@ -220,6 +220,7 @@ class DaemonClient {
         break;
       }
       case 'remove': this.wts.delete(m.id); this.onChange('fleet'); break;
+      case 'release': this.onChange('release', this.wts.get(m.id) || { id: m.id }); break;
       case 'accounts': this.accounts = m.accounts || []; this.onChange('accounts'); break;
       case 'metrics': this.metrics = m.metrics; this.onChange('metrics'); break;
       case 'groups': this.groups = m.groups || []; this.onChange('fleet'); break;
@@ -266,6 +267,8 @@ class DevSummaryProvider {
     this.view = null; this.limTimer = null; this.rosTimer = null; this._tick = null; this._lastUsage = {};
     this._postAll = null;         // set in resolveWebviewView; replayed on the webview's 'ready' handshake
     this._terms = new Map();      // worktree key -> Terminal we opened (to focus instead of duplicate)
+    this._shells = new Map();     // worktree key -> its plain shell terminal (bottom-left group)
+    this._shownShell = null;      // key of the shell currently revealed there
     this._lastStatus = {};        // worktree key -> last status seen (to detect transitions)
     this._unread = {};            // worktree key -> true when it flipped to "your turn" and not yet opened
     this._current = null;         // the Terminal of the worktree session currently focused (marked in roster)
@@ -406,6 +409,7 @@ class DevSummaryProvider {
     }
     this._terms.set(key, t);
     this._current = t;            // the just-opened session is now the selected one
+    this._showShell(slug, name, t).catch((e) => _dbg('shell: ' + e.message));
     this.clearUnread(key);
     _dbg(`  -> branch=${branch} tname=${JSON.stringify(t && t.name)} exit=${t && t.exitStatus}`);
     setTimeout(() => this._postRoster(), 1500);
@@ -659,6 +663,97 @@ class DevSummaryProvider {
   _showPreviewByKey(key) { const i = key.indexOf('\x01'); if (i >= 0) this.showPreview(key.slice(0, i), key.slice(i + 1)); }
 
   // the worktree key of the currently-focused session (null for assistant/terminal/non-worktree)
+  // ---- editor-area layout: [Claude chat 80% / shell 20%] | Changes panel ----
+  _shellOn() { return vscode.workspace.getConfiguration('claudeStatus').get('sessionShell', true); }
+  // ViewColumns in grid order: top-left = 1, bottom-left = 2, right = 2 or 3
+  _cols() {
+    const shell = this._shellOn(), panel = !!(this.changes && this.changes.enabled());
+    return { chat: 1, shell: shell ? 2 : null, panel: panel ? (shell ? 3 : 2) : null };
+  }
+  ensureLayout() {
+    const c = this._cols();
+    const want = 1 + (c.shell ? 1 : 0) + (c.panel ? 1 : 0);
+    if (want === 1 || vscode.window.tabGroups.all.length === want) return Promise.resolve();
+    if (this._layingOut) return this._layingOut;
+    const left = c.shell ? { size: 0.5, groups: [{ size: 0.8 }, { size: 0.2 }] } : { size: 0.5 };
+    const layout = c.panel ? { orientation: 0, groups: [left, { size: 0.5 }] } : { orientation: 1, groups: [{ size: 0.8 }, { size: 0.2 }] };
+    this._layingOut = Promise.resolve(vscode.commands.executeCommand('vscode.setEditorLayout', layout)).catch(() => {}).then(() => {
+      this._layingOut = null;
+      // existing groups are re-used in grid order, so a panel from a 2-column layout lands bottom-left
+      const p = this.changes && this.changes.panel;
+      if (p && c.panel && p.viewColumn !== c.panel) p.reveal(c.panel, true);
+    });
+    return this._layingOut;
+  }
+  _shellName(slug, name) { return 'sh · ' + slug + '/' + name; }
+  _shellKey(t) {
+    if (!t) return null;
+    for (const [k, v] of this._shells) if (v === t) return k;
+    const m = /^sh · ([^/]+)\/(.+)$/.exec(termName(t));   // a reload-revived shell
+    if (m) { const k = this._key(m[1], m[2]); if (!this._shells.has(k) && t.exitStatus === undefined) this._shells.set(k, t); return k; }
+    return null;
+  }
+  // show (creating on first use) the worktree's plain shell under its Claude session
+  async _showShell(slug, name, session) {
+    if (!this._shellOn()) return;
+    const key = this._key(slug, name);
+    let sh = this._shells.get(key);
+    if (sh && sh.exitStatus !== undefined) { this._shells.delete(key); sh = null; }
+    if (sh && this._shownShell === key) return;   // already the one showing
+    await this.ensureLayout();
+    const col = this._cols().shell;
+    if (!sh) {
+      sh = vscode.window.terminals.find((x) => termName(x) === this._shellName(slug, name) && x.exitStatus === undefined);
+      if (!sh) {
+        const wt = this._wtPath(slug, name);
+        if (!fs.existsSync(wt)) return;
+        sh = vscode.window.createTerminal({ name: this._shellName(slug, name), cwd: wt, location: { viewColumn: col, preserveFocus: true },
+          env: wtdTermEnv(), shellPath: bashShell(), shellArgs: ['-l', '-i'], iconPath: new vscode.ThemeIcon('terminal') });
+      }
+      this._shells.set(key, sh);
+    }
+    sh.show(true);
+    this._shownShell = key;
+    // showing a terminal makes it the active one; hand that back to the session (focus never moved)
+    if (session && session.exitStatus === undefined) session.show(true);
+  }
+  // Close everything that holds a worktree's folder open — its session + shell terminals, editors and
+  // diffs on its files, the Changes panel's watch — before it's archived or deleted. On Windows any of
+  // them makes `git worktree move/remove` fail. Called by our Archive/Delete and on the daemon's
+  // `release` push (when the archive/rm came from a CLI or the assistant).
+  async releaseWorktree(w) {
+    let slug = w.slug, name = w.name;
+    if ((!slug || !name) && w.id) { const i = w.id.indexOf('/'); slug = w.id.slice(0, i); name = w.id.slice(i + 1); }
+    if (!slug || !name) return;
+    const key = this._key(slug, name), wt = this._wtPath(slug, name);
+    const kill = new Set();
+    const t = this._terms.get(key); if (t) kill.add(t);
+    const sh = this._shells.get(key); if (sh) kill.add(sh);
+    const others = new Set([...this._terms.entries()].filter(([k]) => k !== key).map(([, v]) => v));
+    for (const x of vscode.window.terminals) {
+      const n = termName(x);
+      if (n === this._shellName(slug, name) || (!t && n === name && !others.has(x))) kill.add(x);
+    }
+    for (const x of kill) { try { x.dispose(); } catch {} }
+    this._terms.delete(key); this._shells.delete(key);
+    if (this._shownShell === key) this._shownShell = null;
+    if (this.changes) this.changes.forget(slug, name);
+    if (this.gitView && this.gitView.target && this.gitView.target.slug === slug && this.gitView.target.name === name) {
+      this.gitView.target = null; this.gitView.state = null; this.gitView.refresh();
+    }
+    const under = (p) => { if (!p) return false; const a = path.resolve(p).toLowerCase(), b = path.resolve(wt).toLowerCase(); return a === b || a.startsWith(b + path.sep); };
+    const holds = (u) => !!u && ((u.scheme === 'file' && under(u.fsPath))
+      || (u.scheme === 'wtd-git' && (() => { try { return under(JSON.parse(u.query).wt); } catch { return false; } })()));
+    const tabs = [];
+    for (const g of vscode.window.tabGroups.all) for (const tab of g.tabs) {
+      const i = tab.input || {};
+      if (holds(i.uri) || holds(i.original) || holds(i.modified)) tabs.push(tab);
+    }
+    if (tabs.length) { try { await vscode.window.tabGroups.close(tabs, true); } catch {} }
+    if (kill.size || tabs.length) await new Promise((r) => setTimeout(r, 600));   // let the processes exit
+    this._postRoster();
+  }
+
   _focusedWorktreeKey() { return this._terminalKey(this._current || vscode.window.activeTerminal); }
   // the worktree key a session terminal belongs to (null for the assistant / dev shell / other terminals)
   _terminalKey(t) {
@@ -693,15 +788,18 @@ class DevSummaryProvider {
     else if (this._pvPanel) { this._pvAutoClosing = true; this._pvPanel.dispose(); }
   }
 
-  onTermClosed(t) { if (this._current === t) { this._current = null; this._postRoster(); } if (this._asstTerm === t) this._asstTerm = null; if (this._term === t) this._term = null; for (const [k, v] of this._terms) if (v === t) { this._terms.delete(k); break; } }
+  onTermClosed(t) { const sk = this._shellKey(t); if (sk) { this._shells.delete(sk); if (this._shownShell === sk) this._shownShell = null; return; }
+    if (this._current === t) { this._current = null; this._postRoster(); } if (this._asstTerm === t) this._asstTerm = null; if (this._term === t) this._term = null; for (const [k, v] of this._terms) if (v === t) { this._terms.delete(k); break; } }
   onTermActive(t) {
     if (!t) return;
+    if (this._shellKey(t)) return;   // the bottom shell: the session above stays the selected one
     this._current = t; setTimeout(() => this._postRoster(), 0);   // mark the focused session as selected
     this._syncPreviewPanel(t);   // make the design-preview panel follow the worktree you switched to
     const tk = this._terminalKey(t);   // …and the Changes tree
     if (tk) { const j = tk.indexOf('\x01'); const s = tk.slice(0, j), n = tk.slice(j + 1);
       if (this.gitView) this.gitView.follow(s, n);
-      if (this.changes) this.changes.follow(s, n); }
+      if (this.changes) this.changes.follow(s, n);
+      if (this._terms.get(tk) === t) this._showShell(s, n, t).catch(() => {}); }
     for (const [k, v] of this._terms) if (v === t) { this.clearUnread(k); return; }
     // also match a reload-revived terminal by name
     for (const k of Object.keys(this._unread)) { const name = k.split('')[1]; if (this._unread[k] && termName(t) === name) { this.clearUnread(k); return; } }
@@ -839,11 +937,11 @@ class DevSummaryProvider {
           { modal: true }, 'Archive'
         ).then((ch) => {
           if (ch !== 'Archive') return;
-          wtdRun(['archive', m.slug, m.name], { timeout: 60000 }, (e, so, se) => {
+          this.releaseWorktree(m).then(() => wtdRun(['archive', m.slug, m.name], { timeout: 60000 }, (e, so, se) => {
             if (e) vscode.window.showErrorMessage('archive failed: ' + ((se || '').trim() || e.message));
             else vscode.window.showInformationMessage('Archived ' + m.slug + ' ' + m.name);
             this._postRoster();
-          });
+          }));
         });
       } else if (m.cmd === 'delete' && m.slug && m.name) {
         // Two-option modal: remove the worktree (keep the branch) or also force-delete the branch.
@@ -878,7 +976,7 @@ class DevSummaryProvider {
               vscode.window.showErrorMessage('delete failed: ' + (out || e.message));
             });
           };
-          run(false);
+          this.releaseWorktree(m).then(() => run(false));
         });
       } else if (m.cmd === 'switchAccount' && m.slug && m.name) {
         this.switchAccount(m.slug, m.name);
@@ -912,7 +1010,7 @@ class DevSummaryProvider {
       } else if (m.cmd === 'previewFocused') {
         this.previewFocused();
       } else if (m.cmd === 'openCommits' && m.slug) {
-        if (this.changes && this.changes.enabled()) this.changes.follow(m.slug, m.name).then(() => this.changes.panel && this.changes.panel.reveal(vscode.ViewColumn.Two, true));
+        if (this.changes && this.changes.enabled()) this.changes.follow(m.slug, m.name).then(() => this.changes.panel && this.changes.panel.reveal(this._cols().panel, true));
         else if (this.gitView) this.gitView.show(m.slug, m.name);
       } else if (m.cmd === 'pasteImage') {
         this.pasteImage();
@@ -1796,6 +1894,7 @@ function activate(context) {
     if (kind === 'fleet' && wt && dev.gitView) dev.gitView.onWorktree(wt, prev);
     if (kind === 'fleet' && wt && dev.changes) dev.changes.onWorktree(wt, prev);
     if (settings && (kind === 'daemon' || kind === 'accounts')) settings.onDaemonChange();
+    if (kind === 'release' && wt) { dev.releaseWorktree(wt).catch(() => {}); return; }
     if (kind === 'messages') { dev._onMessages(); kick('fleet'); }
     kick(kind);
   });
