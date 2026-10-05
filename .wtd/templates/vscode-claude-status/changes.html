@@ -15,7 +15,7 @@
     --selfg: var(--vscode-list-activeSelectionForeground);
     --inactsel: var(--vscode-list-inactiveSelectionBackground);
     --mono: var(--vscode-editor-font-family, Consolas, monospace);
-    --monosize: var(--vscode-editor-font-size, 13px);
+    --monosize: 11px;   /* set from the page's zoom (Ctrl +/-/0, Ctrl+wheel) */
     --add-line: var(--vscode-diffEditor-insertedLineBackground, rgba(155,185,85,.15));
     --del-line: var(--vscode-diffEditor-removedLineBackground, rgba(255,0,0,.12));
     --add-text: var(--vscode-diffEditor-insertedTextBackground, rgba(155,185,85,.35));
@@ -105,10 +105,10 @@
   .file.collapsed .chev { transform: rotate(-90deg); }
   .chev { transition: transform .1s; }
 
-  .fb { overflow-x: auto; font-family: var(--mono); font-size: var(--monosize); line-height: 1.5; }
+  .fb { overflow-x: auto; font-family: var(--mono); font-size: var(--monosize); line-height: 1.45; }
   table.d { border-collapse: collapse; width: 100%; table-layout: auto; }
   table.d td { padding: 0; vertical-align: top; }
-  td.ln { width: 1%; min-width: 44px; padding: 0 8px !important; text-align: right; color: var(--gutter); user-select: none; font-size: .92em; opacity: .9; }
+  td.ln { width: 1%; min-width: 34px; padding: 0 8px !important; text-align: right; color: var(--gutter); user-select: none; font-size: .92em; opacity: .9; }
   td.mk { width: 14px; user-select: none; color: var(--dim); text-align: center; }
   td.c { white-space: pre; padding-right: 16px !important; }
   tr.add td.c, tr.add td.mk { background: var(--add-line); } tr.add td.ln { background: var(--add-line); }
@@ -149,6 +149,8 @@
     <span class="sync" id="sync"></span>
     <span class="grow"></span>
     <input id="filter" placeholder="Filter files" spellcheck="false">
+    <button class="icon" id="bSmaller" title="Smaller code (Ctrl -)"><span class="codicon codicon-zoom-out"></span></button>
+    <button class="icon" id="bBigger" title="Larger code (Ctrl =)"><span class="codicon codicon-zoom-in"></span></button>
     <button class="icon" id="bTests" title="Hide test files"><span class="codicon codicon-beaker"></span></button>
     <button class="icon" id="bMode" title="Side-by-side"><span class="codicon codicon-split-horizontal"></span></button>
     <button class="icon" id="bFold" title="Collapse all files"><span class="codicon codicon-collapse-all"></span></button>
@@ -165,7 +167,14 @@
   const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const WORKING = '~working';
   const BIG = 600;                     // diff lines above which a file starts collapsed
-  const st = Object.assign({ listH: 0, mode: 'unified' }, vs.getState() || {});
+  const st = Object.assign({ listH: 0, mode: 'unified', fs: 11 }, vs.getState() || {});
+  // code font size: persisted, 8–20px
+  function setFont(px) {
+    st.fs = Math.max(8, Math.min(20, px)); vs.setState(st);
+    document.documentElement.style.setProperty('--monosize', st.fs + 'px');
+  }
+  setFont(st.fs);
+  let diffSig = '';
   let list = null, diff = null, sel = WORKING, hideTests = false, collapsed = {}, filterText = '';
 
   // ---------- layout: draggable split between commit list and diff ----------
@@ -184,6 +193,15 @@
 
   // ---------- header ----------
   $('wt').addEventListener('click', () => vs.postMessage({ cmd: 'pick' }));
+  $('bSmaller').addEventListener('click', () => setFont(st.fs - 1));
+  $('bBigger').addEventListener('click', () => setFont(st.fs + 1));
+  document.addEventListener('keydown', (e) => {
+    if (!e.ctrlKey && !e.metaKey) return;
+    if (e.key === '=' || e.key === '+') { e.preventDefault(); setFont(st.fs + 1); }
+    else if (e.key === '-') { e.preventDefault(); setFont(st.fs - 1); }
+    else if (e.key === '0') { e.preventDefault(); setFont(11); }
+  });
+  document.addEventListener('wheel', (e) => { if (!e.ctrlKey) return; e.preventDefault(); setFont(st.fs + (e.deltaY < 0 ? 1 : -1)); }, { passive: false });
   $('bRefresh').addEventListener('click', () => vs.postMessage({ cmd: 'refresh' }));
   $('bTests').addEventListener('click', () => vs.postMessage({ cmd: 'toggleTests' }));
   $('bMode').addEventListener('click', () => { st.mode = st.mode === 'split' ? 'unified' : 'split'; vs.setState(st); syncButtons(); renderDiff(true); });
@@ -347,6 +365,11 @@
   function renderDiff(keepScroll) {
     busy(false);
     const y = diffEl.scrollTop;
+    const sx = {};   // path → horizontal scroll of that file's body
+    if (keepScroll && diffEl._files) diffEl.querySelectorAll('.file').forEach((fe) => {
+      const f = diffEl._files[+fe.dataset.i], fb = fe.querySelector('.fb');
+      if (f && fb && fb.scrollLeft) sx[f.path] = fb.scrollLeft;
+    });
     if (!list) { diffEl.innerHTML = '<div id="empty"><span class="codicon codicon-git-compare"></span><div>Open a session to see its commits and changes here.</div></div>'; return; }
     if (!diff || diff.sel !== sel) return;
     let h = '';
@@ -378,7 +401,12 @@
     });
     diffEl.innerHTML = h;
     diffEl._files = files;
-    if (keepScroll) diffEl.scrollTop = y; else diffEl.scrollTop = 0;
+    if (keepScroll) {
+      diffEl.scrollTop = y;
+      diffEl.querySelectorAll('.file').forEach((fe) => {
+        const f = files[+fe.dataset.i]; if (f && sx[f.path]) fe.querySelector('.fb').scrollLeft = sx[f.path];
+      });
+    } else diffEl.scrollTop = 0;
   }
   diffEl.addEventListener('click', (e) => {
     const cp = e.target.closest('[data-copy]'); if (cp) { vs.postMessage({ cmd: 'copy', text: cp.dataset.copy }); return; }
@@ -412,7 +440,7 @@
   // ---------- host messages ----------
   window.addEventListener('message', (ev) => {
     const m = ev.data || {};
-    if (m.type === 'tests') { hideTests = !!m.hide; syncButtons(); renderDiff(true); }
+    if (m.type === 'tests') { if (hideTests === !!m.hide) return; hideTests = !!m.hide; syncButtons(); renderDiff(true); }
     else if (m.type === 'clear') { list = null; diff = null; $('wt').textContent = 'No session'; $('br').innerHTML = ''; $('sync').innerHTML = ''; renderList(); renderDiff(); }
     else if (m.type === 'list') {
       const newTarget = !list || list.target.slug !== m.target.slug || list.target.name !== m.target.name;
@@ -428,6 +456,9 @@
     else if (m.type === 'diff') {
       if (m.sel !== sel) return;   // a stale answer for a row we've moved off
       const same = diff && diff.sel === m.sel;
+      const sig = JSON.stringify([m.files, m.meta, m.omitted]);
+      if (same && sig === diffSig) { busy(false); return; }
+      diffSig = sig;
       diff = m; renderDiff(same);
     }
   });
