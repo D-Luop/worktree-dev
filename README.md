@@ -53,12 +53,23 @@ extension's:
 The chosen issue is seeded into the worktree's `CLAUDE.md`. If the repo's Project source names a
 "started" column, the card moves there.
 
-**Worktree Changes** (Explorer) is a native tree of the focused worktree's uncommitted changes and
-its branch commits:
+**The Changes panel** splits the editor area in half. The focused session's Claude chat is on the
+left, and its commits and diff are on the right:
+
+- Uncommitted changes come first, then the branch's commits; pick any one to see its diff.
+- Diffs show inline or side-by-side, with word-level highlights, line numbers and collapsible files.
+- It updates live as the agent edits files, and follows whichever session you focus.
+- Commit SHAs printed in a session's terminal open that commit here.
+- You can filter files by path, hide test files, or open any file in VS Code's own diff editor.
+
+If you close it, it comes back the next time you focus a session. To turn it off, set
+`claudeStatus.changesPanel` to `false`.
+
+**Worktree Changes** (Explorer, collapsed by default) is a native tree of the same uncommitted
+changes and commits:
 
 - Files open in VS Code's own diff editor.
 - *Open All Changes* shows a whole commit in the multi-diff editor.
-- Commit SHAs printed in a session's terminal are clickable.
 - A beaker toggle hides test files.
 
 **Settings** (gear icon, or *WorkTreeDev: Open Settings*):

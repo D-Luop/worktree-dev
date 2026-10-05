@@ -4,6 +4,7 @@ const os = require('os');
 const path = require('path');
 const cp = require('child_process');
 const { GitView } = require('./gitview.js');   // the native Worktree Changes tree + diffs
+const { ChangesPanel } = require('./changespanel.js');   // the docked right-half commits/diff panel
 const { SettingsPanel } = require('./settings.js');   // the WorkTreeDev Settings editor tab
 
 const STATUS_FILE = '.claude-status';
@@ -399,7 +400,7 @@ class DevSummaryProvider {
       branch = 'create';
       disposeDeadTerminals(name);   // reap reload-orphaned dead tabs so they can't be focused instead
       const nm = name;   // tab = worktree name only (no slug, no status glyph — status shows in the roster)
-      t = vscode.window.createTerminal({ name: nm, location: vscode.TerminalLocation.Editor,
+      t = vscode.window.createTerminal({ name: nm, location: { viewColumn: vscode.ViewColumn.One },
         env: wtdTermEnv(), shellPath: wtdExe(), shellArgs: ['agent', slug, name] });
       t.show();
     }
@@ -422,7 +423,7 @@ class DevSummaryProvider {
     if (t && t.exitStatus === undefined) { t.show(); }
     else {
       disposeDeadTerminals(ASST_NAME);
-      t = vscode.window.createTerminal({ name: ASST_NAME, location: vscode.TerminalLocation.Editor,
+      t = vscode.window.createTerminal({ name: ASST_NAME, location: { viewColumn: vscode.ViewColumn.One },
         env: wtdTermEnv(), shellPath: wtdExe(), shellArgs: ['assistant'] });
       t.show();
     }
@@ -439,7 +440,7 @@ class DevSummaryProvider {
     if (t && t.exitStatus === undefined) { t.show(); }
     else {
       disposeDeadTerminals(TERM_NAME);
-      t = vscode.window.createTerminal({ name: TERM_NAME, location: vscode.TerminalLocation.Editor,
+      t = vscode.window.createTerminal({ name: TERM_NAME, location: { viewColumn: vscode.ViewColumn.One },
         env: wtdTermEnv(), shellPath: bashShell(), shellArgs: ['-l', '-i'] });
       t.show();
     }
@@ -698,7 +699,9 @@ class DevSummaryProvider {
     this._current = t; setTimeout(() => this._postRoster(), 0);   // mark the focused session as selected
     this._syncPreviewPanel(t);   // make the design-preview panel follow the worktree you switched to
     const tk = this._terminalKey(t);   // …and the Changes tree
-    if (tk && this.gitView) { const j = tk.indexOf('\x01'); this.gitView.follow(tk.slice(0, j), tk.slice(j + 1)); }
+    if (tk) { const j = tk.indexOf('\x01'); const s = tk.slice(0, j), n = tk.slice(j + 1);
+      if (this.gitView) this.gitView.follow(s, n);
+      if (this.changes) this.changes.follow(s, n); }
     for (const [k, v] of this._terms) if (v === t) { this.clearUnread(k); return; }
     // also match a reload-revived terminal by name
     for (const k of Object.keys(this._unread)) { const name = k.split('')[1]; if (this._unread[k] && termName(t) === name) { this.clearUnread(k); return; } }
@@ -909,7 +912,8 @@ class DevSummaryProvider {
       } else if (m.cmd === 'previewFocused') {
         this.previewFocused();
       } else if (m.cmd === 'openCommits' && m.slug) {
-        if (this.gitView) this.gitView.show(m.slug, m.name);
+        if (this.changes && this.changes.enabled()) this.changes.follow(m.slug, m.name).then(() => this.changes.panel && this.changes.panel.reveal(vscode.ViewColumn.Two, true));
+        else if (this.gitView) this.gitView.show(m.slug, m.name);
       } else if (m.cmd === 'pasteImage') {
         this.pasteImage();
       } else if (m.cmd === 'toggleTests') {
@@ -920,6 +924,7 @@ class DevSummaryProvider {
         } catch (e) { vscode.window.showErrorMessage('toggle tests failed: ' + e.message); }
         this._postTests();
         if (this.gitView) this.gitView.testsToggled();
+        if (this.changes) this.changes.testsToggled();
       } else if (m.cmd === 'toggleBell') {
         this.toggleBell();
       }
@@ -1743,7 +1748,7 @@ async function launchSession(dev, st) {
     fs.writeFileSync(file, issueMarkdown(st.item, detail));
     args.push('--issue-file', file.replace(/\\/g, '/'));
   }
-  const t = vscode.window.createTerminal({ name, location: vscode.TerminalLocation.Editor, env: wtdTermEnv(), shellPath: wtdExe(),
+  const t = vscode.window.createTerminal({ name, location: { viewColumn: vscode.ViewColumn.One }, env: wtdTermEnv(), shellPath: wtdExe(),
     shellArgs: ['agent', slug, name].concat(args) });
   dev._terms.set(dev._key(slug, name), t); dev._current = t;
   t.show();
@@ -1789,6 +1794,7 @@ function activate(context) {
     // folder colours: refresh just the worktree whose status changed
     if (kind === 'fleet' && wt && (!prev || prev.status !== wt.status)) provider.refresh(vscode.Uri.file(wt.path));
     if (kind === 'fleet' && wt && dev.gitView) dev.gitView.onWorktree(wt, prev);
+    if (kind === 'fleet' && wt && dev.changes) dev.changes.onWorktree(wt, prev);
     if (settings && (kind === 'daemon' || kind === 'accounts')) settings.onDaemonChange();
     if (kind === 'messages') { dev._onMessages(); kick('fleet'); }
     kick(kind);
@@ -1812,7 +1818,15 @@ function activate(context) {
   reg('claudeStatus.openTerminal', () => dev.openOrFocusTerminal());
   context.subscriptions.push(vscode.window.registerWebviewViewProvider('claudeStatus.limit', dev));
   dev.gitView = new GitView(context, dev, TESTS_FLAG);
-  { const k = dev._terminalKey(vscode.window.activeTerminal); if (k) { const j = k.indexOf('\x01'); dev.gitView.follow(k.slice(0, j), k.slice(j + 1)); } }
+  dev.changes = new ChangesPanel(context, dev, TESTS_FLAG);
+  // terminal SHA links select the commit in the docked panel (the tree's multi-diff when it's off)
+  dev.gitView.onShowCommit = (t, sha) => (t && dev.changes.enabled() ? dev.changes.showCommit(t.slug, t.name, sha) : dev.gitView.showCommit(t, sha));
+  reg('claudeStatus.showChanges', () => {
+    const k = dev._focusedWorktreeKey();
+    if (k) { const j = k.indexOf('\x01'); dev.changes.follow(k.slice(0, j), k.slice(j + 1)); } else dev.changes.pick();
+  });
+  { const k = dev._terminalKey(vscode.window.activeTerminal);
+    if (k) { const j = k.indexOf('\x01'); dev.gitView.follow(k.slice(0, j), k.slice(j + 1)); dev.changes.follow(k.slice(0, j), k.slice(j + 1)); } }
   // ctrl+v in a focused session → image-aware paste (see DevSummaryProvider.smartPaste)
   context.subscriptions.push(vscode.commands.registerCommand('claudeStatus.smartPaste', () => dev.smartPaste()));
 

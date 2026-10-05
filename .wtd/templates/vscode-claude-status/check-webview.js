@@ -7,7 +7,7 @@ const HERE = __dirname;
 let failures = 0;
 
 function checkScripts(tag, html) {
-  const re = /<script>([\s\S]*?)<\/script>/g;
+  const re = /<script[^>]*>([\s\S]*?)<\/script>/g;
   let m, n = 0;
   while ((m = re.exec(html)) !== null) {
     n++;
@@ -46,5 +46,9 @@ try {
   const st = require(path.join(HERE, 'settings.js'));
   checkScripts('settings', st.settingsHtml());
 } catch (e) { failures++; console.error('settings check failed: ' + e.message); }
+
+// 3. The Changes panel page (a static file with placeholders)
+try { checkScripts('changes', fs.readFileSync(path.join(HERE, 'changes.html'), 'utf8')); }
+catch (e) { failures++; console.error('changes check failed: ' + e.message); }
 
 process.exit(failures ? 1 : 0);
