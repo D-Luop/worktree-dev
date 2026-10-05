@@ -2,7 +2,7 @@
   "name": "claude-status",
   "displayName": "Claude Status",
   "description": "WorkTreeDev: a fleet roster for parallel Claude/Codex worktrees driven by the wtd.exe daemon — session list with groups and search, New Session picker, usage limits, native commit/diff browser, and status-coloured worktree folders.",
-  "version": "0.0.90",
+  "version": "0.0.91",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -280,6 +280,11 @@
           "type": "boolean",
           "default": true,
           "description": "Dock a Changes panel (branch commits + live diff of the focused session) in the right half of the editor area, with the session on the left."
+        },
+        "claudeStatus.sessionShell": {
+          "type": "boolean",
+          "default": true,
+          "description": "Give each session a plain shell terminal in its worktree, in the bottom 20% of the left column under the Claude chat."
         }
       }
     }

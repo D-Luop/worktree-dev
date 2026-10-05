@@ -2,10 +2,10 @@
 // is the left half). It follows the focused session and shows that worktree's branch commits plus
 // uncommitted changes, with a live, VSCode-styled diff (inline or side-by-side, word-level highlights).
 //
-// Layout contract: session terminals open in ViewColumn.One; this panel lives in ViewColumn.Two, and the
-// two columns are set to an even 50/50 split whenever the panel is (re)created. Closing the panel only
-// hides it until the next session is focused — it's meant to be always there (setting:
-// claudeStatus.changesPanel). Live: one recursive fs.watch on the shown worktree (debounced) plus the
+// Layout contract (extension.js ensureLayout): the left column is the session's Claude chat (top 80%)
+// over a plain shell in the worktree (bottom 20%); this panel is the right column, at an even 50/50.
+// Closing the panel only hides it until the next session is focused — it's meant to be always there
+// (setting: claudeStatus.changesPanel). Live: one recursive fs.watch on the shown worktree (debounced) plus the
 // daemon's git-state pushes for commits.
 
 const vscode = require('vscode');
@@ -38,6 +38,8 @@ class ChangesPanel {
     }));
   }
   enabled() { return vscode.workspace.getConfiguration('claudeStatus').get('changesPanel', true); }
+  // the right-hand column (2, or 3 when the bottom-left shell group exists)
+  _col() { return (this.dev._cols && this.dev._cols().panel) || vscode.ViewColumn.Two; }
 
   // ---- docking ----
   async _evenLayout() {
@@ -49,14 +51,14 @@ class ChangesPanel {
   // → true when the panel was (re)created
   async ensure() {
     if (!this.enabled()) return false;
+    if (this.dev.ensureLayout) await this.dev.ensureLayout(); else if (vscode.window.tabGroups.all.length !== 2) await this._evenLayout();
     if (this.panel) {
-      if (!this.panel.visible) this.panel.reveal(vscode.ViewColumn.Two, true);
+      if (!this.panel.visible || this.panel.viewColumn !== this._col()) this.panel.reveal(this._col(), true);
       return false;
     }
-    if (vscode.window.tabGroups.all.length !== 2) await this._evenLayout();
     const media = vscode.Uri.joinPath(this.context.extensionUri, 'media');
     const p = vscode.window.createWebviewPanel('claudeStatus.changesPanel', 'Changes',
-      { viewColumn: vscode.ViewColumn.Two, preserveFocus: true },
+      { viewColumn: this._col(), preserveFocus: true },
       { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [media] });
     p.iconPath = new vscode.ThemeIcon('git-compare');
     const nonce = Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -209,13 +211,13 @@ class ChangesPanel {
       case 'openFile': {
         if (!t || !m.file) return;
         const fp = path.join(t.wt, m.file.path);
-        if (fs.existsSync(fp)) await vscode.window.showTextDocument(vscode.Uri.file(fp), { viewColumn: vscode.ViewColumn.Two, preview: true });
+        if (fs.existsSync(fp)) await vscode.window.showTextDocument(vscode.Uri.file(fp), { viewColumn: this._col(), preview: true });
         break;
       }
       case 'openNative': {
         if (!t || !m.file) return;
         const s = this._sides(m.sel, m.file);
-        await vscode.commands.executeCommand('vscode.diff', s.left, s.right, s.title, { viewColumn: vscode.ViewColumn.Two, preview: true });
+        await vscode.commands.executeCommand('vscode.diff', s.left, s.right, s.title, { viewColumn: this._col(), preview: true });
         break;
       }
       case 'openAll': {
