@@ -49,6 +49,11 @@ wtd_link ship.sh      ship
 wtd_link assistant.sh assistant
 wtd_link preview.sh   preview
 wtd_link tokens.sh    tokens
+# the CLI itself (wtd preflight / ticket / custom …), for agents and you
+if [ "$OS" = windows ]; then
+  printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$WTD/bin/wtd.exe" > "$HOME/.local/bin/wtd"; chmod +x "$HOME/.local/bin/wtd" 2>/dev/null || true
+  echo "    shimmed ~/.local/bin/wtd -> wtd.exe"
+fi
 # migrate: strip the obsolete bashrc function block if a previous install added it
 if grep -q '>>> agent worktree launcher >>>' "$BASHRC" 2>/dev/null; then
   tmp=$(mktemp)

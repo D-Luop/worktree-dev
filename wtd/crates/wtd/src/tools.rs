@@ -121,7 +121,7 @@ pub fn tokens_main(args: &[String]) -> Result<i32> {
         let st = statusfile::read(Path::new(&w.path)).status.as_str().to_string();
         known.insert(enc(Path::new(&w.path)), (w.id.clone(), if st.is_empty() { "none".into() } else { st }));
     }
-    let prefixes: Vec<(String, String)> = crate::settings::registered(&dev).into_iter().map(|(slug, _)| (format!("{}-worktrees-{slug}-", enc(&dev)), slug)).collect();
+    let prefixes: Vec<(String, String)> = crate::repos::all(&dev).into_iter().map(|r| (format!("{}-worktrees-{}-", enc(&dev), r.slug), r.slug)).collect();
     // every account's transcripts count: usage bills to whichever login a session ran under
     let mut roots: Vec<PathBuf> = vec![home.join(".claude").join("projects")];
     if let Ok(rd) = std::fs::read_dir(home.join(".claude-accounts")) {

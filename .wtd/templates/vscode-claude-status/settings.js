@@ -54,12 +54,14 @@ class SettingsPanel {
 
   async reload() {
     if (!this.panel) return;
-    const [repos, accounts, env] = await Promise.all([
+    const [repos, accounts, env, config, custom] = await Promise.all([
       this.wtd(['repo', 'ls']).catch((e) => ({ error: e.message })),
       this.wtd(['account', 'ls']).catch((e) => ({ error: e.message })),
       this.wtd(['env']).catch((e) => ({ error: e.message })),
+      this.wtd(['repo', 'config']).catch(() => ({})),
+      this.wtd(['custom', 'ls']).catch(() => ({})),
     ]);
-    this.post({ type: 'data', repos, accounts, env, daemon: this._daemonState(), usage: this._usage() });
+    this.post({ type: 'data', repos, accounts, env, config, custom, daemon: this._daemonState(), usage: this._usage() });
   }
 
   terminal(name, env, command, why) {
@@ -124,6 +126,44 @@ class SettingsPanel {
       case 'ghScopes':
         return this.terminal('GitHub: project access', {}, 'gh auth refresh --hostname github.com -s read:project,project',
           'Grant the project scopes in the browser, then close the terminal.');
+
+      // --- repos folder ---
+      case 'reposDirPick': {
+        const pick = await vscode.window.showOpenDialog({ canSelectFolders: true, canSelectFiles: false, canSelectMany: false,
+          openLabel: 'Use as repos folder', title: 'The folder that holds your git clones' });
+        if (!pick || !pick[0]) return done(false, { cancelled: true });
+        return run(['repo', 'set-dir', pick[0].fsPath]);
+      }
+      case 'reposDirClear': return run(['repo', 'set-dir', '--clear']);
+
+      // --- guardrails ---
+      case 'guardSave': return run(['repo', 'set-guardrails', m.slug, JSON.stringify(m.value)]);
+
+      // --- customizations ---
+      case 'customOpen': {
+        const r = await this.wtd(['custom', 'dir'].concat(m.repo ? ['--repo', m.repo] : []));
+        if (r && r.path) await vscode.env.openExternal(vscode.Uri.file(r.path));
+        return;
+      }
+      case 'customNewSkill': {
+        const name = await vscode.window.showInputBox({ title: 'New skill' + (m.repo ? ' for ' + m.repo : ' (every repo)'), prompt: 'Its /name — letters, digits, - or _',
+          placeHolder: 'e.g. deploy-check', validateInput: (v) => (/^[A-Za-z0-9_-]{1,64}$/.test(v) ? null : 'Letters, digits, - or _') });
+        if (!name) return;
+        const r = await this.wtd(['custom', 'new-skill', name].concat(m.repo ? ['--repo', m.repo] : [])).catch((e) => { vscode.window.showErrorMessage(e.message); return null; });
+        if (r && r.path) await vscode.window.showTextDocument(vscode.Uri.file(r.path), { preview: false });
+        return this.reload();
+      }
+      case 'customEdit': {   // CLAUDE.md additions or hooks.json, created on first edit
+        const r = await this.wtd(['custom', 'dir'].concat(m.repo ? ['--repo', m.repo] : []));
+        if (!r || !r.path) return;
+        const fp = require('path').join(r.path, m.file), fs = require('fs');
+        if (!fs.existsSync(fp)) fs.writeFileSync(fp, m.file === 'hooks.json'
+          ? '{\n  "hooks": {\n  }\n}\n'
+          : '<!-- Added to the CLAUDE.md of ' + (m.repo ? 'every ' + m.repo + ' worktree' : 'every worktree') + '. Re-applied on each open. -->\n\n');
+        await vscode.window.showTextDocument(vscode.Uri.file(fp), { preview: false });
+        return this.reload();
+      }
+      case 'customApply': return run(['custom', 'apply', '--all']);
 
       // --- daemon / tray ---
       case 'daemonToggle': this.d.toggleDaemon(m.want); return;
@@ -200,7 +240,9 @@ function settingsHtml() {
   input[type=text],select{font:inherit;color:var(--vscode-input-foreground);background:var(--vscode-input-background);
        border:1px solid var(--vscode-input-border,var(--vscode-panel-border,transparent));border-radius:2px;padding:4px 6px;width:100%;max-width:420px;box-sizing:border-box;}
   select{background:var(--vscode-dropdown-background);color:var(--vscode-dropdown-foreground);border-color:var(--vscode-dropdown-border,transparent);}
-  input[type=text]:focus,select:focus{outline:none;border-color:var(--vscode-focusBorder);}
+  input[type=text]:focus,select:focus,textarea:focus{outline:none;border-color:var(--vscode-focusBorder);}
+  textarea{font-family:var(--vscode-editor-font-family);font-size:12px;color:var(--vscode-input-foreground);background:var(--vscode-input-background);
+       border:1px solid var(--vscode-input-border,var(--vscode-panel-border,transparent));border-radius:2px;padding:4px 6px;width:100%;max-width:520px;box-sizing:border-box;resize:vertical;}
   input::placeholder{color:var(--vscode-input-placeholderForeground);}
   .seg{display:inline-flex;border:1px solid var(--vscode-panel-border,rgba(127,127,127,.35));border-radius:4px;overflow:hidden;}
   .seg button{border:none;border-radius:0;background:none;color:var(--vscode-foreground);padding:4px 12px;}
@@ -229,6 +271,8 @@ function settingsHtml() {
     <a data-to="repos"><i class="codicon codicon-repo"></i>Repositories</a>
     <a data-to="accounts"><i class="codicon codicon-account"></i>Accounts</a>
     <a data-to="defaults"><i class="codicon codicon-settings"></i>Defaults</a>
+    <a data-to="guardrails"><i class="codicon codicon-shield"></i>PR guardrails</a>
+    <a data-to="custom"><i class="codicon codicon-extensions"></i>Customizations</a>
     <a data-to="github"><i class="codicon codicon-github"></i>GitHub</a>
     <a data-to="daemon"><i class="codicon codicon-server-process"></i>Daemon &amp; tray</a>
   </nav>
@@ -259,17 +303,18 @@ function settingsHtml() {
       '<span class="chip">'+r.worktrees+' worktree'+(r.worktrees===1?'':'s')+(r.archived?' · '+r.archived+' archived':'')+'</span>',
       r.local_only?'<span class="chip warn">local only</span>':'',
       !r.cloned?'<span class="chip warn">not cloned</span>':'',
+      r.kind==='folder'?'<span class="chip" title="A clone in your repos folder">'+ico('folder')+'folder</span>':'',
     ].join('');
     const log=ui.logs[k]?'<div class="log">'+esc(ui.logs[k].join('\\n'))+'</div>':'';
     return '<div class="card"><div class="hd">'
       +'<div class="ico">'+ico('repo')+'</div>'
       +'<div class="main"><div class="name"><span>'+esc(r.slug)+'</span>'+badges+'</div>'
-      +'<div class="sub mono" title="'+esc(r.url)+'">'+esc(r.local_only?'local repository (no remote yet)':r.url)+'</div>'
+      +'<div class="sub mono" title="'+esc(r.url)+'">'+esc(r.kind==='folder'?r.path:(r.local_only?'local repository (no remote yet)':r.url))+'</div>'
       +'<div class="sub">'+ico('issues')+' '+esc(ghSummary(r))+'</div></div>'
       +'<div class="acts">'
       +(r.local_only?'':'<button class="icon" title="Fetch from origin" data-act="repoFetch" data-slug="'+esc(r.slug)+'"'+(busy(k)?' disabled':'')+'>'+ico(busy(k)?'loading':'sync', busy(k)?'spin':'')+'</button>')
       +'<button class="icon" title="GitHub link & issue source" data-act="toggle" data-k="'+k+'">'+ico(open?'chevron-up':'chevron-down')+'</button>'
-      +'<button class="icon danger" title="Remove repository" data-act="repoRm" data-slug="'+esc(r.slug)+'"'+(r.worktrees||r.archived?' disabled':'')+'>'+ico('trash')+'</button>'
+      +(r.kind==='folder'?'':'<button class="icon danger" title="Remove repository" data-act="repoRm" data-slug="'+esc(r.slug)+'"'+(r.worktrees||r.archived?' disabled':'')+'>'+ico('trash')+'</button>')
       +'</div></div>'
       +(open?'<div class="body">'+ghForm(r)+'</div>':'')+(log&&!open?'<div class="body">'+log+'</div>':'')
       +'</div>';
@@ -312,6 +357,17 @@ function settingsHtml() {
       + '</div>';
     return h;
   }
+  function reposDirCard(){
+    const c=D.config||{}, dir=c.reposDir||'';
+    const n=(Array.isArray(D.repos)?D.repos:[]).filter(r=>r.kind==='folder').length;
+    return '<div class="card"><div class="hd"><div class="ico">'+ico('folder-library')+'</div><div class="main"><div class="name">Repos folder'
+      +(dir?(c.reposDirOk?'<span class="chip ok">'+n+' repo'+(n===1?'':'s')+' found</span>':'<span class="chip warn">folder missing</span>'):'')+'</div>'
+      +'<div class="sub'+(dir?' mono':'')+'">'+(dir?esc(dir):'Optional — point at the folder where you keep your git clones, and each clone becomes a repo here (no cloning or registering).')+'</div></div>'
+      +'<div class="acts"><button class="secondary" data-act="reposDirPick">'+ico('folder-opened')+(dir?'Change…':'Choose folder…')+'</button>'
+      +(dir?'<button class="icon" title="Stop using a repos folder" data-act="reposDirClear">'+ico('close')+'</button>':'')+'</div></div>'
+      +(dir?'<div class="body help" style="margin:0">Worktrees are cut straight off those clones. Clones one level down (e.g. <span class="mono">work/api</span>) count too; a name registered below wins over a clone with the same name.</div>':'')
+      +'</div>';
+  }
   function addRepoCard(){
     const k='repo:+', m=ui.addMode, f=ui.forms[k]||(ui.forms[k]={});
     const log=ui.logs[k]?'<div class="log">'+esc(ui.logs[k].join('\\n'))+'</div>':'';
@@ -326,6 +382,84 @@ function settingsHtml() {
       + (res?'<div class="note '+(res.ok?'ok':'err')+'">'+ico(res.ok?'pass':'error')+'<div>'+res.html+'</div></div>':'')
       + '<button class="primary" data-act="repoAdd"'+(busy(k)?' disabled':'')+'>'+ico(busy(k)?'loading':'cloud-download',busy(k)?'spin':'')+(m==='clone'?'Clone':'Create')+'</button>'
       + log + '</div></div>';
+  }
+
+  // ---------- Guardrails ----------
+  function grForm(key, g){
+    return ui.forms[key] || (ui.forms[key] = { enabled:!!g.enabled, preflight:(g.preflight||[]).join('\\n'), requireClean:g.requireClean!==false,
+      requirePushed:g.requirePushed!==false, blockPush:(g.blockPush||[]).join(', ') });
+  }
+  function grValue(f){
+    return { enabled:!!f.enabled, preflight:f.preflight.split('\\n').map(s=>s.trim()).filter(Boolean), requireClean:!!f.requireClean,
+      requirePushed:!!f.requirePushed, blockPush:f.blockPush.split(',').map(s=>s.trim()).filter(Boolean) };
+  }
+  function grBody(key, slug){
+    const f=ui.forms[key], res=ui.results[key];
+    return '<label class="toggle"><input type="checkbox" data-gr="enabled" data-k="'+key+'"'+(f.enabled?' checked':'')+'> Enforce guardrails</label>'
+      + '<div style="margin-top:12px'+(f.enabled?'':';opacity:.55')+'">'
+      + '<div class="row"><label class="k">Preflight commands</label><div class="v"><textarea data-gr="preflight" data-k="'+key+'" rows="3" spellcheck="false" placeholder="go build ./...&#10;go test ./...">'+esc(f.preflight)+'</textarea>'
+      + '<div class="help">One per line, run in the worktree with bash (Git Bash on Windows). All must succeed. The pass is stamped on the commit, so a new commit needs a new pass.</div></div></div>'
+      + '<div class="row"><label class="k">Before PR-ready</label><div class="v"><label class="chk"><input type="checkbox" data-gr="requireClean" data-k="'+key+'"'+(f.requireClean?' checked':'')+'>No uncommitted changes</label>'
+      + '<label class="chk"><input type="checkbox" data-gr="requirePushed" data-k="'+key+'"'+(f.requirePushed?' checked':'')+'>Branch pushed to its upstream</label></div></div>'
+      + '<div class="row"><label class="k">Never push</label><div class="v"><input type="text" data-gr="blockPush" data-k="'+key+'" value="'+esc(f.blockPush)+'" placeholder="main, release/*, planning">'
+      + '<div class="help">Branch names (<span class="mono">*</span> wildcards) a push is refused for — the agent’s, yours, or a tool’s.</div></div></div></div>'
+      + (res?'<div class="note '+(res.ok?'ok':'err')+'">'+ico(res.ok?'pass':'error')+'<div>'+res.html+'</div></div>':'')
+      + '<div style="display:flex;gap:6px;margin-top:6px"><button class="primary" data-act="grSave" data-k="'+key+'" data-slug="'+esc(slug)+'">'+ico('save')+'Save</button>'
+      + (slug!=='*'?'<button class="secondary" data-act="grReset" data-k="'+key+'" data-slug="'+esc(slug)+'">'+ico('discard')+'Use the defaults</button>':'')+'</div>';
+  }
+  function grSummary(g){
+    if(!g.enabled) return 'off';
+    const bits=[]; if((g.preflight||[]).length) bits.push((g.preflight||[]).length+' check'+((g.preflight||[]).length===1?'':'s'));
+    if(g.requireClean) bits.push('clean'); if(g.requirePushed) bits.push('pushed'); if((g.blockPush||[]).length) bits.push('blocks '+g.blockPush.join(', '));
+    return bits.join(' · ')||'on';
+  }
+  function guardrailsSection(){
+    const def=(D.config&&D.config.guardrails)||{};
+    const dk='gr:*'; grForm(dk, def);
+    let h='<div class="card"><div class="hd"><div class="ico">'+ico('shield')+'</div><div class="main"><div class="name">Defaults for every repo'
+      + (def.enabled?'<span class="chip ok">on</span>':'<span class="chip">off</span>')+'</div><div class="sub">'+esc(grSummary(def))+'</div></div>'
+      + '<div class="acts"><button class="icon" data-act="toggle" data-k="'+dk+'">'+ico(ui.open[dk]?'chevron-up':'chevron-down')+'</button></div></div>'
+      + (ui.open[dk]?'<div class="body">'+grBody(dk,'*')+'</div>':'')+'</div>';
+    for(const r of (Array.isArray(D.repos)?D.repos:[])){
+      const g=r.guardrails||{}, k='gr:'+r.slug, own=g.source==='repo';
+      grForm(k, g);
+      h+='<div class="card"><div class="hd"><div class="ico">'+ico('repo')+'</div><div class="main"><div class="name">'+esc(r.slug)
+        + (own?'<span class="chip role">own rules</span>':'<span class="chip">defaults</span>')+(g.enabled?'<span class="chip ok">on</span>':'')+'</div>'
+        + '<div class="sub">'+esc(grSummary(g))+'</div></div>'
+        + '<div class="acts"><button class="icon" title="'+(own?'Edit':'Give it its own rules')+'" data-act="toggle" data-k="'+k+'">'+ico(ui.open[k]?'chevron-up':'chevron-down')+'</button></div></div>'
+        + (ui.open[k]?'<div class="body">'+(own?'':'<div class="help" style="margin:0 0 10px">Saving here gives '+esc(r.slug)+' its own rules instead of the defaults.</div>')+grBody(k,r.slug)+'</div>':'')+'</div>';
+    }
+    return h;
+  }
+
+  // ---------- Customizations ----------
+  function chips(list, icon){ return list.length?list.map(x=>'<span class="chip">'+ico(icon)+esc(x)+'</span>').join(' '):'<span class="muted">none</span>'; }
+  function layerCard(title, sub, info, repo){
+    const r=repo?' data-repo="'+esc(repo)+'"':'';
+    return '<div class="card"><div class="hd"><div class="ico">'+ico(repo?'repo':'globe')+'</div><div class="main"><div class="name">'+esc(title)+'</div><div class="sub">'+sub+'</div></div>'
+      + '<div class="acts"><button class="icon" title="Open the folder" data-act="customOpen"'+r+'>'+ico('folder-opened')+'</button></div></div><div class="body">'
+      + '<div class="row"><label class="k">Skills</label><div class="v">'+chips(info.skills||[],'symbol-event')+' <a data-act="customNewSkill"'+r+'>'+ico('add')+' New skill</a>'
+      + '<div class="help">Folders with a <span class="mono">SKILL.md</span>; copied into each worktree’s <span class="mono">.claude/skills</span>.</div></div></div>'
+      + '<div class="row"><label class="k">Tools</label><div class="v">'+chips(info.tools||[],'tools')
+      + '<div class="help">Files in <span class="mono">tools/</span> are on PATH in the session and its shell — e.g. a build or db script.</div></div></div>'
+      + '<div class="row"><label class="k">CLAUDE.md</label><div class="v"><a data-act="customEdit" data-file="CLAUDE.md"'+r+'>'+ico(info.claudeMd?'edit':'add')+' '+(info.claudeMd?'Edit additions':'Add instructions')+'</a>'
+      + '<div class="help">Appended to each worktree’s CLAUDE.md as its own section, kept in sync.</div></div></div>'
+      + '<div class="row"><label class="k">Claude hooks</label><div class="v"><a data-act="customEdit" data-file="hooks.json"'+r+'>'+ico(info.hooks?'edit':'add')+' '+(info.hooks?'Edit hooks.json':'Add hooks')+'</a>'
+      + '<div class="help">A <span class="mono">{"hooks": {…}}</span> fragment merged into each worktree’s <span class="mono">.claude/settings.json</span>; <span class="mono">__DEV__</span> becomes the dev root.</div></div></div>'
+      + (repo?'<div class="row"><label class="k">Env files</label><div class="v">'+(info.env?info.env+' item(s)':'<span class="muted">none</span>')+'<div class="help">Files in <span class="mono">env/</span> are copied into new worktrees when absent (e.g. <span class="mono">.env</span>).</div></div></div>':'')
+      + '</div></div>';
+  }
+  function customSection(){
+    const c=D.custom||{}, repos=(Array.isArray(D.repos)?D.repos:[]).map(r=>r.slug), have=Object.keys(c.repos||{});
+    let h='<div style="display:flex;gap:6px;margin-bottom:10px"><button class="secondary" data-act="customApply"'+(busy('custom:apply')?' disabled':'')+'>'
+      + ico(busy('custom:apply')?'loading':'sync',busy('custom:apply')?'spin':'')+'Apply to open worktrees</button>'
+      + '<span class="help" style="margin:4px 0 0">New sessions pick changes up automatically.</span></div>';
+    h+=layerCard('Every repo','Applies to all worktrees.', c.global||{}, null);
+    for(const slug of have) h+=layerCard(slug,'Only '+esc(slug)+' worktrees, on top of the above.', c.repos[slug], slug);
+    const rest=repos.filter(s=>!have.includes(s));
+    if(rest.length) h+='<div class="row" style="margin-top:6px"><label class="k">Add for a repo</label><div class="v"><select data-act="customAddRepo"><option value="">Choose a repo…</option>'
+      + rest.map(s=>'<option>'+esc(s)+'</option>').join('')+'</select><div class="help">e.g. a <span class="mono">/proto</span> skill and a <span class="mono">build</span> tool that only make sense in one repo.</div></div></div>';
+    return h;
   }
 
   // ---------- Accounts ----------
@@ -414,7 +548,9 @@ function settingsHtml() {
     const focusId=document.activeElement&&document.activeElement.id;
     document.getElementById('main').innerHTML =
         section('repos','repo','Repositories','Each repo is cloned once; worktrees branch off it. Link a repo to GitHub to pick issues when starting a session.',
-          (D.repos&&D.repos.error?'<div class="note err">'+esc(D.repos.error)+'</div>':'')+(repos.length?repos.map(repoCard).join(''):'<div class="empty">No repositories yet.</div>')+addRepoCard())
+          (D.repos&&D.repos.error?'<div class="note err">'+esc(D.repos.error)+'</div>':'')+reposDirCard()+(repos.length?repos.map(repoCard).join(''):'<div class="empty">No repositories yet.</div>')+addRepoCard())
+      + section('guardrails','shield','PR guardrails','Checks a worktree must pass before it can be marked PR-ready (<span class="mono">agent pr</span> / <span class="mono">/pr</span>), and branches nothing may push. Enforced by wtd and a git pre-push hook — not just instructions to the agent.', guardrailsSection())
+      + section('custom','extensions','Customizations','Your own skills, tools, CLAUDE.md additions and Claude hooks — for every worktree, or just one repo’s. Kept in <span class="mono">.wtd/custom</span> (yours, not in git) and applied each time a session opens.', customSection())
       + section('accounts','account','Accounts','Claude and Codex logins. Usage and billing follow the account a session runs under.', accountsSection())
       + section('defaults','settings','Defaults','Which login each kind of work uses unless you choose otherwise.', defaultsSection())
       + section('github','github','GitHub','Used to list issues and project items in New Session.', githubSection())
@@ -431,6 +567,7 @@ function settingsHtml() {
     if(t.id==='addUrl'){ const f=ui.forms['repo:+']; f.url=t.value; const m=t.value.match(/([^\\/:]+?)(\\.git)?\\/?$/); if(m&&!f.slugTouched){ f.slug=m[1].toLowerCase().replace(/[^a-z0-9_-]/g,'-'); const s=document.getElementById('addSlug'); if(s) s.value=f.slug; } return; }
     if(t.id==='addSlug'){ ui.forms['repo:+'].slug=t.value; ui.forms['repo:+'].slugTouched=true; return; }
     if(t.id==='acctName'){ ui.forms['acct:+'].name=t.value; return; }
+    if(t.dataset.gr){ const f=ui.forms[t.dataset.k]; if(f) f[t.dataset.gr]=t.type==='checkbox'?t.checked:t.value; if(t.type==='checkbox') render(); return; }
     const k=t.dataset.k, fp=t.dataset.f; if(!k||!fp) return;
     const f=ui.forms[k];
     if(fp==='src.labels') setPath(f,'issueSource.labels',t.value.split(',').map(s=>s.trim()).filter(Boolean));
@@ -444,6 +581,7 @@ function settingsHtml() {
     const t=e.target;
     if(t.dataset.act==='role') send({op:'roleSet', role:t.dataset.role, target:t.value});
     else if(t.dataset.act==='trayLogon') send({op:'trayLogon', on:t.checked});
+    else if(t.dataset.act==='customAddRepo' && t.value) send({op:'customEdit', file:'CLAUDE.md', repo:t.value});
     else if(t.dataset.f==='src.onStart'||t.dataset.f==='src.statusField'){ const f=ui.forms[t.dataset.k]; setPath(f,'issueSource.'+t.dataset.f.slice(4),t.value); }
   });
   function parseProjectUrl(f){
@@ -464,7 +602,7 @@ function settingsHtml() {
     const n=e.target.closest('[data-to]'); if(n){ document.getElementById(n.dataset.to).scrollIntoView({behavior:'smooth'}); return; }
     const b=e.target.closest('[data-act]'); if(!b||b.disabled) return;
     const a=b.dataset.act, k=b.dataset.k;
-    if(a==='role'||a==='trayLogon') return;   // handled on change
+    if(a==='role'||a==='trayLogon'||a==='customAddRepo') return;   // handled on change
     if(a==='toggle'){ ui.open[k]=!ui.open[k]; render(); }
     else if(a==='kind'){ const f=ui.forms[k]; const v=b.dataset.v; const slug=k.slice(5); const r=D.repos.find(x=>x.slug===slug)||{};
       f.issueSource = v==='none'?null:(v==='repo'?{kind:'repo',repo:(f.repo||r.github_detected||''),labels:[],assignee:''}:{kind:'project'});
@@ -492,10 +630,18 @@ function settingsHtml() {
     else if(a==='reload') send({op:'reload'});
     else if(a==='daemon') send({op:'daemonToggle', want:b.dataset.v==='1'});
     else if(a==='traySpawn') send({op:'traySpawn'});
+    else if(a==='reposDirPick') send({op:'reposDirPick'});
+    else if(a==='reposDirClear') send({op:'reposDirClear'});
+    else if(a==='grSave'){ delete ui.results[k]; send({op:'guardSave', key:k, slug:b.dataset.slug, value:grValue(ui.forms[k])}); }
+    else if(a==='grReset'){ delete ui.forms[k]; delete ui.results[k]; send({op:'guardSave', key:k, slug:b.dataset.slug, value:null}); }
+    else if(a==='customOpen') send({op:'customOpen', repo:b.dataset.repo||null});
+    else if(a==='customNewSkill') send({op:'customNewSkill', repo:b.dataset.repo||null});
+    else if(a==='customEdit') send({op:'customEdit', file:b.dataset.file, repo:b.dataset.repo||null});
+    else if(a==='customApply'){ ui.busy['custom:apply']=true; render(); send({op:'customApply', key:'custom:apply'}); }
   });
 
   // nav highlight follows scroll
-  function spy(){ const ids=['repos','accounts','defaults','github','daemon']; let cur=ids[0];
+  function spy(){ const ids=['repos','guardrails','custom','accounts','defaults','github','daemon']; let cur=ids[0];
     for(const id of ids){ const s=document.getElementById(id); if(s && s.getBoundingClientRect().top<120) cur=id; }
     document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('on', a.dataset.to===cur)); }
   window.addEventListener('scroll', spy, {passive:true});
@@ -504,7 +650,7 @@ function settingsHtml() {
     const m=e.data; if(!m) return;
     if(m.type==='data'){ D=m;
       // fresh server state for collapsed cards; an open form keeps its unsaved edits across reloads
-      Object.keys(ui.forms).forEach(k=>{ if(k.startsWith('repo:') && k!=='repo:+' && !ui.open[k]) delete ui.forms[k]; });
+      Object.keys(ui.forms).forEach(k=>{ if((k.startsWith('repo:') && k!=='repo:+' || k.startsWith('gr:')) && !ui.open[k]) delete ui.forms[k]; });
       render(); }
     else if(m.type==='live'){ if(D){ D.daemon=m.daemon; D.usage=m.usage; render(); } }
     else if(m.type==='log'){ (ui.logs[m.key]=ui.logs[m.key]||[]).push(m.line); if(ui.logs[m.key].length>200) ui.logs[m.key].shift();
@@ -526,6 +672,9 @@ function settingsHtml() {
       else if(m.op==='projectFields'){ ui.busy[k+':fields']=false;
         if(!m.ok){ ui.results[k]={ok:false,html:esc(m.error).replace(/\\n/g,'<br>')}; }
         else { ui.fields[k]=(m.result&&m.result.fields)||[]; const s=ui.forms[k].issueSource; if(!s.statusField){ const f=ui.fields[k].find(x=>/status/i.test(x.name))||ui.fields[k][0]; if(f) s.statusField=f.name; } delete ui.results[k]; } }
+      else if(m.op==='guardSave'){ ui.results[k]=m.ok?{ok:true,html:'Saved.'}:{ok:false,html:esc(m.error)}; if(m.ok) delete ui.forms[k]; }
+      else if(m.op==='customApply'){ ui.busy[k]=false; }
+      else if(m.op==='reposDirPick'||m.op==='reposDirClear'){ if(!m.ok&&!m.cancelled) ui.results['repo:+']={ok:false,html:esc(m.error)}; }
       else if(m.op==='accountAdd'){ ui.results[k]=m.ok?{ok:true,html:'Created — finish signing in in the terminal that just opened.'}:{ok:false,html:esc(m.error)}; if(m.ok) ui.forms['acct:+']={provider:ui.forms['acct:+'].provider}; }
       render();
     }

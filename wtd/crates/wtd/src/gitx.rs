@@ -47,20 +47,13 @@ pub fn s(p: &Path) -> String {
     p.to_string_lossy().to_string()
 }
 
-pub fn registered(dev: &Path, slug: &str) -> bool {
-    crate::settings::registered(dev).iter().any(|(s, _)| s == slug)
+/// The path `git -C` should target for a repo: its registered bare, or its clone in the repos folder.
+pub fn require_repo(dev: &Path, slug: &str) -> Result<PathBuf> {
+    Ok(crate::repos::require(dev, slug)?.path)
 }
 
-pub fn require_repo(dev: &Path, slug: &str) -> Result<PathBuf> {
-    if !registered(dev, slug) {
-        let known: Vec<String> = crate::settings::registered(dev).into_iter().map(|(s, _)| s).collect();
-        bail!("repo '{slug}' is not registered (known: {}). Add it in Settings → Repositories or `wtd repo add`.", if known.is_empty() { "none".into() } else { known.join(", ") });
-    }
-    let b = bare(dev, slug);
-    if !b.is_dir() {
-        bail!("repo '{slug}' is registered but not cloned ({} missing)", b.display());
-    }
-    Ok(b)
+fn repo_path(dev: &Path, slug: &str) -> PathBuf {
+    crate::repos::find(dev, slug).map(|r| r.path).unwrap_or_else(|| bare(dev, slug))
 }
 
 pub fn has_origin(bare: &Path) -> bool {
@@ -86,7 +79,7 @@ pub fn ref_exists(bare: &Path, r: &str) -> bool {
 pub fn parse_ref_token(dev: &Path, token: &str) -> (String, String) {
     match token.split_once('@') {
         Some((s, b)) => (s.to_string(), b.to_string()),
-        None => (token.to_string(), default_branch(&bare(dev, token))),
+        None => (token.to_string(), default_branch(&repo_path(dev, token))),
     }
 }
 
@@ -121,7 +114,7 @@ pub fn remove_ref(dev: &Path, slug: &str, branch: &str) -> bool {
     if !p.is_dir() {
         return false;
     }
-    let b = bare(dev, slug);
+    let b = repo_path(dev, slug);
     if !ok(&["-C", &s(&b), "worktree", "remove", "--force", &s(&p)]) {
         let _ = crate::settings::remove_tree(&p);
         let _ = ok(&["-C", &s(&b), "worktree", "prune"]);
@@ -134,8 +127,8 @@ pub fn remove_ref(dev: &Path, slug: &str, branch: &str) -> bool {
 pub fn list_refs(dev: &Path) -> Vec<(String, PathBuf, String)> {
     let root = dev.join("refs");
     let mut v = Vec::new();
-    for (slug, _) in crate::settings::registered(dev) {
-        let b = bare(dev, &slug);
+    for repo in crate::repos::all(dev) {
+        let (slug, b) = (repo.slug, repo.path);
         if !b.is_dir() {
             continue;
         }

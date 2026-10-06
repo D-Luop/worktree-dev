@@ -192,6 +192,9 @@ fn default_branch(bare: &Path) -> Option<String> {
 #[derive(Serialize)]
 struct RepoInfo {
     slug: String,
+    /// `registered` (bare clone managed by wtd) | `folder` (a clone found in the repos folder)
+    kind: &'static str,
+    path: String,
     url: String,
     local_only: bool,
     cloned: bool,
@@ -200,26 +203,31 @@ struct RepoInfo {
     archived: usize,
     github_detected: Option<String>,
     github: Value,
+    /// the PR guardrails in force for this repo (its own, else the defaults)
+    guardrails: Value,
 }
 
 fn repo_list(dev: &Path) -> Vec<RepoInfo> {
     let cfg = load_config(dev);
     let wts = daemon::scan::scan(dev);
-    registered(dev)
+    crate::repos::all(dev)
         .into_iter()
-        .map(|(slug, url)| {
-            let bare = dev.join("repos").join(&slug).join(".bare");
+        .map(|r| {
+            let slug = r.slug.clone();
             let archived = std::fs::read_dir(dev.join("worktrees").join(&slug).join("archive")).map(|r| r.count()).unwrap_or(0);
             RepoInfo {
                 worktrees: wts.iter().filter(|w| w.slug == slug).count(),
                 archived,
-                local_only: url == "(local)",
-                cloned: bare.is_dir(),
-                default_branch: default_branch(&bare),
-                github_detected: github_repo_from_url(&url),
+                local_only: r.url == "(local)" || r.url.is_empty(),
+                cloned: r.path.is_dir(),
+                default_branch: default_branch(&r.admin),
+                github_detected: github_repo_from_url(&r.url),
                 github: cfg.pointer(&format!("/repos/{slug}/github")).cloned().unwrap_or(Value::Null),
+                guardrails: crate::guard::effective(dev, &slug),
+                kind: r.kind,
+                path: r.path.to_string_lossy().to_string(),
                 slug,
-                url,
+                url: r.url,
             }
         })
         .collect()
@@ -255,13 +263,63 @@ pub fn repo_main(args: &[String]) -> Result<i32> {
         ["add", slug, url] => repo_add(&dev, slug, Some(url)),
         ["rm", slug] => repo_rm(&dev, slug, false),
         ["rm", slug, "--delete-clone"] => repo_rm(&dev, slug, true),
+        // the install-wide repo settings: the repos folder and the default guardrails
+        ["config"] => {
+            let cfg = load_config(&dev);
+            let mut g = cfg.get("guardrails").filter(|v| v.is_object()).cloned().unwrap_or_else(crate::guard::defaults);
+            for (k, v) in crate::guard::defaults().as_object().unwrap() {
+                if g.get(k).is_none() {
+                    g[k] = v.clone();
+                }
+            }
+            out(json!({ "reposDir": cfg.get("reposDir"), "reposDirOk": crate::repos::repos_dir(&dev).is_some(), "guardrails": g }))
+        }
         ["fetch", slug] => {
-            let bare = dev.join("repos").join(slug).join(".bare");
-            git_run(&["-C", &bare.to_string_lossy(), "fetch", "--prune", "origin"])?;
+            let r = crate::repos::require(&dev, slug)?;
+            git_run(&["-C", &r.path.to_string_lossy(), "fetch", "--prune", "origin"])?;
+            out(json!({ "ok": true }))
+        }
+        // a folder of clones: every git clone in it (and one level of subfolders) is a repo
+        ["set-dir", "--clear"] | ["set-dir", ""] => {
+            let mut cfg = load_config(&dev);
+            cfg.as_object_mut().unwrap().remove("reposDir");
+            save_config(&dev, &cfg)?;
+            out(json!({ "ok": true }))
+        }
+        ["set-dir", dir] => {
+            let p = paths::normalize(dir);
+            if !p.is_dir() {
+                bail!("not a folder: {}", p.display());
+            }
+            let mut cfg = load_config(&dev);
+            cfg["reposDir"] = json!(p.to_string_lossy());
+            save_config(&dev, &cfg)?;
+            let found: Vec<String> = crate::repos::discovered(&dev).into_iter().map(|r| r.slug).collect();
+            out(json!({ "ok": true, "found": found }))
+        }
+        ["set-guardrails", slug, value] => {
+            let v: Value = serde_json::from_str(value).context("guardrails must be JSON")?;
+            crate::guard::validate(&v)?;
+            let mut cfg = load_config(&dev);
+            if *slug == "*" {
+                cfg["guardrails"] = v;
+            } else {
+                if crate::repos::find(&dev, slug).is_none() {
+                    bail!("no repo '{slug}'");
+                }
+                let repos = cfg.as_object_mut().unwrap().entry("repos").or_insert_with(|| json!({}));
+                let entry = repos.as_object_mut().context("config.repos is not an object")?.entry(slug.to_string()).or_insert_with(|| json!({}));
+                if v.is_null() {
+                    entry.as_object_mut().map(|o| o.remove("guardrails"));
+                } else {
+                    entry["guardrails"] = v;
+                }
+            }
+            save_config(&dev, &cfg)?;
             out(json!({ "ok": true }))
         }
         ["set-github", slug, value] => {
-            if !registered(&dev).iter().any(|(s, _)| s == slug) {
+            if crate::repos::find(&dev, slug).is_none() {
                 bail!("no repo '{slug}'");
             }
             let v: Value = serde_json::from_str(value).context("github settings must be JSON")?;
@@ -275,7 +333,7 @@ pub fn repo_main(args: &[String]) -> Result<i32> {
         }
         ["test-issues", slug] => test_issues(&dev, slug),
         ["project-fields", owner, number] => project_fields(owner, number),
-        _ => bail!("usage: wtd repo ls | add <slug> <url> | add --new <slug> | rm <slug> [--delete-clone] | fetch <slug> | set-github <slug> <json> | test-issues <slug> | project-fields <owner> <number>"),
+        _ => bail!("usage: wtd repo ls | add <slug> <url> | add --new <slug> | rm <slug> [--delete-clone] | fetch <slug> | set-dir <folder>|--clear | set-github <slug> <json> | set-guardrails <slug>|* <json> | test-issues <slug> | project-fields <owner> <number>"),
     }
 }
 
@@ -315,7 +373,6 @@ fn repo_add(dev: &Path, slug: &str, url: Option<&str>) -> Result<i32> {
     if slug == "plan" {
         bail!("'plan' is reserved for repo-less planning agents");
     }
-    let wtd = dev.join(".wtd");
     let bare = dev.join("repos").join(slug).join(".bare");
     let bare_s = bare.to_string_lossy().to_string();
     if bare.exists() {
@@ -367,24 +424,8 @@ fn repo_add(dev: &Path, slug: &str, url: Option<&str>) -> Result<i32> {
     // same per-repo setup add-repo.sh does
     git_run(&["-C", &bare_s, "config", "core.untrackedCache", "true"])?;
     git_run(&["-C", &bare_s, "config", "feature.manyFiles", "true"])?;
-    let excl = bare.join("info").join("exclude");
-    std::fs::create_dir_all(excl.parent().unwrap())?;
-    let mut text = std::fs::read_to_string(&excl).unwrap_or_default();
-    for ign in ["CLAUDE.md", "pr-notes.md", ".claude-status", ".claude-status.resume", ".claude/issue.md", ".claude/skills/"] {
-        if !text.lines().any(|l| l.trim() == ign) {
-            if !text.is_empty() && !text.ends_with('\n') {
-                text.push('\n');
-            }
-            text.push_str(ign);
-            text.push('\n');
-        }
-    }
-    std::fs::write(&excl, text)?;
-    let hook = bare.join("hooks").join("commit-msg");
-    if !hook.exists() {
-        std::fs::create_dir_all(hook.parent().unwrap())?;
-        let target = wtd.join("hooks").join("strip-claude-attribution.sh").to_string_lossy().replace('\\', "/");
-        std::fs::write(&hook, format!("#!/bin/sh\n# worktree-dev: strip AI attribution lines from commit messages\nexec \"{target}\" \"$@\"\n"))?;
+    if let Some(r) = crate::repos::find(dev, slug) {
+        crate::repos::prepare(dev, &r)?;
     }
     let branch = default_branch(&bare).unwrap_or_else(|| "?".into());
     println!("ready: {slug} (default branch {branch})");
@@ -392,6 +433,9 @@ fn repo_add(dev: &Path, slug: &str, url: Option<&str>) -> Result<i32> {
 }
 
 fn repo_rm(dev: &Path, slug: &str, delete_clone: bool) -> Result<i32> {
+    if crate::repos::find(dev, slug).is_some_and(|r| r.is_folder()) {
+        bail!("'{slug}' is a clone in your repos folder — it isn't registered, so there's nothing to remove here");
+    }
     let info = repo_list(dev).into_iter().find(|r| r.slug == slug).with_context(|| format!("no repo '{slug}'"))?;
     if info.worktrees > 0 || info.archived > 0 {
         bail!("'{slug}' still has {} worktree(s) and {} archived — remove them first", info.worktrees, info.archived);

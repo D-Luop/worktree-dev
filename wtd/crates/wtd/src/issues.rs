@@ -10,7 +10,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::paths;
-use crate::settings::{gh_json, github_repo_from_url, load_config, out, registered};
+use crate::settings::{gh_json, load_config, out};
 
 #[derive(Serialize)]
 struct Item {
@@ -40,12 +40,12 @@ fn my_login() -> String {
 /// The repo's issue source; unconfigured = the linked (or detected) GitHub repo's issues.
 fn source_for(slug: &str) -> Result<Value> {
     let dev = paths::dev_root()?;
-    let url = registered(&dev).into_iter().find(|(s, _)| s == slug).map(|(_, u)| u).with_context(|| format!("no repo '{slug}'"))?;
+    crate::repos::find(&dev, slug).with_context(|| format!("no repo '{slug}'"))?;
     let gh = load_config(&dev).pointer(&format!("/repos/{slug}/github")).cloned().unwrap_or(Value::Null);
     if let Some(src) = gh.get("issueSource").filter(|v| v.is_object()) {
         return Ok(src.clone());
     }
-    let repo = gh.get("repo").and_then(Value::as_str).map(String::from).or_else(|| github_repo_from_url(&url));
+    let repo = crate::repos::github_repo(&dev, slug);
     match repo {
         Some(r) => Ok(json!({ "kind": "repo", "repo": r, "labels": [], "assignee": "" })),
         None => bail!("'{slug}' isn't linked to GitHub — set it up in Settings → Repositories"),

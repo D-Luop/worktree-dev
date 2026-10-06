@@ -113,9 +113,12 @@ function registeredSlugs() {
 const LOCAL_BIN = path.join(HOME, '.local', 'bin');
 // env for the bash terminals we open (sessions, assistant, dev shell): the wtd commands live in
 // ~/.local/bin, which a fresh Git Bash login shell doesn't have on PATH unless the user's profile adds it.
-function wtdTermEnv() {
+function wtdTermEnv(slug) {
   const pk = Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
-  return { [pk]: LOCAL_BIN + path.delimiter + (process.env[pk] || '') };
+  // your own tools (.wtd/custom/tools, and the repo's) come first, like in the session itself
+  const custom = [path.join(WTD, 'custom', 'tools')].concat(slug ? [path.join(WTD, 'custom', 'repos', slug, 'tools')] : [])
+    .filter((d) => { try { return fs.statSync(d).isDirectory(); } catch { return false; } });
+  return { [pk]: custom.concat([LOCAL_BIN, process.env[pk] || '']).join(path.delimiter) };
 }
 
 // --- wtd daemon (v2) -------------------------------------------------------------------------------
@@ -663,6 +666,39 @@ class DevSummaryProvider {
   _showPreviewByKey(key) { const i = key.indexOf('\x01'); if (i >= 0) this.showPreview(key.slice(0, i), key.slice(i + 1)); }
 
   // the worktree key of the currently-focused session (null for assistant/terminal/non-worktree)
+  // ---- the linked ticket (.claude-ticket.md) ----
+  async ticketMenu(slug, name) {
+    const id = slug + '/' + name;
+    const info = await wtdJson(['ticket', 'show', id]).catch(() => ({}));
+    const link = info && info.link;
+    const items = [];
+    if (info && info.exists) items.push({ label: '$(go-to-file) Open .claude-ticket.md', act: 'open' });
+    items.push({ label: '$(link) ' + (link ? 'Link a different issue or PR…' : 'Link an issue or PR…'),
+      description: link ? 'now ' + link.repo + '#' + link.number : 'the PR for the branch is picked up automatically', act: 'link' });
+    items.push({ label: '$(refresh) Refresh from GitHub', act: 'sync' });
+    if (link) items.push({ label: '$(debug-disconnect) Unlink', act: 'unlink' });
+    const it = await vscode.window.showQuickPick(items, { title: 'Ticket · ' + id, placeHolder: 'The agent reads .claude-ticket.md instead of querying GitHub' });
+    if (!it) return;
+    const file = info && info.path;
+    const openIt = () => file && fs.existsSync(file) && vscode.window.showTextDocument(vscode.Uri.file(file), { viewColumn: this._cols().panel || vscode.ViewColumn.Beside, preview: true });
+    if (it.act === 'open') return openIt();
+    if (it.act === 'link') {
+      const spec = await vscode.window.showInputBox({ title: 'Link ' + id + ' to…', prompt: 'An issue or PR URL, owner/repo#123, or #123 for this repo',
+        value: link ? link.repo + '#' + link.number : '' });
+      if (!spec) return;
+      const r = await wtdJson(['ticket', 'link', id, spec.trim()]);
+      vscode.window.setStatusBarMessage('$(issues) Linked ' + id + ' to ' + r.repo + '#' + r.number, 5000);
+      return openIt();
+    }
+    if (it.act === 'unlink') { await wtdJson(['ticket', 'unlink', id]); vscode.window.setStatusBarMessage('$(issues) Unlinked ' + id, 4000); return; }
+    await vscode.window.withProgress({ location: vscode.ProgressLocation.Window, title: 'Refreshing the ticket for ' + id }, () =>
+      new Promise((res) => wtdRun(['ticket', 'sync', id], { timeout: 60000 }, (e, so, se) => {
+        if (e) vscode.window.showErrorMessage('Ticket refresh failed: ' + ((se || '').trim() || e.message));
+        else vscode.window.setStatusBarMessage('$(issues) ' + (so || '').trim(), 5000);
+        res();
+      })));
+  }
+
   // ---- editor-area layout: [Claude chat 80% / shell 20%] | Changes panel ----
   _shellOn() { return vscode.workspace.getConfiguration('claudeStatus').get('sessionShell', true); }
   // ViewColumns in grid order: top-left = 1, bottom-left = 2, right = 2 or 3
@@ -708,7 +744,7 @@ class DevSummaryProvider {
         const wt = this._wtPath(slug, name);
         if (!fs.existsSync(wt)) return;
         sh = vscode.window.createTerminal({ name: this._shellName(slug, name), cwd: wt, location: { viewColumn: col, preserveFocus: true },
-          env: wtdTermEnv(), shellPath: bashShell(), shellArgs: ['-l', '-i'], iconPath: new vscode.ThemeIcon('terminal') });
+          env: wtdTermEnv(slug), shellPath: bashShell(), shellArgs: ['-l', '-i'], iconPath: new vscode.ThemeIcon('terminal') });
       }
       this._shells.set(key, sh);
     }
@@ -1009,6 +1045,8 @@ class DevSummaryProvider {
         this.openOrFocusTerminal();
       } else if (m.cmd === 'previewFocused') {
         this.previewFocused();
+      } else if (m.cmd === 'ticket' && m.slug) {
+        this.ticketMenu(m.slug, m.name).catch((e) => vscode.window.showErrorMessage('Ticket: ' + e.message));
       } else if (m.cmd === 'openCommits' && m.slug) {
         if (this.changes && this.changes.enabled()) this.changes.follow(m.slug, m.name).then(() => this.changes.panel && this.changes.panel.reveal(this._cols().panel, true));
         else if (this.gitView) this.gitView.show(m.slug, m.name);
@@ -1483,6 +1521,7 @@ class DevSummaryProvider {
       +'<span class="git">'+git+'</span>'
       +'<span class="acts">'
       +'<i class="codicon codicon-diff dif" title="Commits & diffs"></i>'
+      +'<i class="codicon codicon-issues tkt" title="Linked ticket (.claude-ticket.md)…"></i>'
       +(groupsData&&canEditGroups?'<i class="codicon codicon-folder mv" title="Move to group…"></i>':'')
       +(w.active&&!w.unread?'<i class="codicon codicon-mail unr" title="Mark unread"></i>':'')
       +(w.active&&multiAcct?'<i class="codicon codicon-arrow-swap acc" title="Switch account (reopens under the one with most capacity)"></i>':'')
@@ -1534,7 +1573,7 @@ class DevSummaryProvider {
     }
     const on=(sel,cmd)=>el.querySelectorAll(sel).forEach(x=>x.onclick=(ev)=>{ ev.stopPropagation(); const p=x.closest('.wt'); vsc.postMessage({cmd,slug:p.dataset.slug,name:p.dataset.name}); });
     el.querySelectorAll('.wt').forEach(x=>x.onclick=()=>vsc.postMessage({cmd:'open',slug:x.dataset.slug,name:x.dataset.name,glyph:x.dataset.glyph}));
-    on('.arch','archive'); on('.del','delete'); on('.term','terminate'); on('.unr','markunread'); on('.acc','switchAccount'); on('.dif','openCommits');
+    on('.arch','archive'); on('.del','delete'); on('.term','terminate'); on('.unr','markunread'); on('.acc','switchAccount'); on('.dif','openCommits'); on('.tkt','ticket');
     el.querySelectorAll('.mv').forEach(x=>x.onclick=(ev)=>{ ev.stopPropagation(); vsc.postMessage({cmd:'groupMove', worktree:x.closest('.wt').dataset.id}); });
     el.querySelectorAll('.msgp').forEach(x=>x.onclick=(ev)=>{ ev.stopPropagation(); vsc.postMessage({cmd:'reviewMessages', worktree:x.closest('.wt').dataset.id}); });
   }
@@ -1845,6 +1884,7 @@ async function launchSession(dev, st) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, issueMarkdown(st.item, detail));
     args.push('--issue-file', file.replace(/\\/g, '/'));
+    if (st.item.number && st.item.repo) args.push('--ticket', st.item.repo + '#' + st.item.number);
   }
   const t = vscode.window.createTerminal({ name, location: { viewColumn: vscode.ViewColumn.One }, env: wtdTermEnv(), shellPath: wtdExe(),
     shellArgs: ['agent', slug, name].concat(args) });

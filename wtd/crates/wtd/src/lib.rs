@@ -5,16 +5,20 @@ pub mod agent;
 pub mod attach;
 pub mod client;
 pub mod codex;
+pub mod custom;
 pub mod daemon;
 pub mod gitx;
+pub mod guard;
 pub mod hook;
 pub mod issues;
 pub mod mcp;
 pub mod paths;
+pub mod repos;
 pub mod review;
 pub mod run;
 pub mod settings;
 pub mod statusfile;
+pub mod ticket;
 pub mod tools;
 pub mod tray;
 pub mod win;
@@ -41,6 +45,9 @@ Worktrees & sessions (also on PATH as plain `agent`, `archive`, … via ~/.local
   wtd ask <slug>[@branch] [question] ask an expert about another repo/branch
   wtd ref add|sync|rm|ls …           read-only reference checkouts for agents
   wtd preview <file.html> [label]    stage an HTML design for the preview panel
+  wtd preflight [<slug>/<name>]      run the repo's PR guardrails here (agent pr requires a pass)
+  wtd ticket link|unlink|sync|show … the linked GitHub issue/PR, written to .claude-ticket.md
+  wtd custom ls|dir|new-skill|apply  your own skills/tools/CLAUDE.md/hooks (.wtd/custom)
   wtd tokens                         token usage across sessions
   wtd ship                           package the toolkit for another machine
 
@@ -101,6 +108,10 @@ fn dispatch(cmd: &str, rest: &[String]) -> Result<i32> {
         "close" => agent::close_main(),
         "assistant" => agent::assistant_main(rest),
         "ref" => gitx::ref_main(rest),
+        "preflight" => guard::preflight_main(rest),
+        "guard" => guard::guard_main(rest),
+        "ticket" => ticket::main(rest),
+        "custom" => custom::main(rest),
         "review" => review::main(rest),
         "wt-review" => review::wt_review_main(rest),
         "ask" => tools::ask_main(rest),

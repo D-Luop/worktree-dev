@@ -339,6 +339,23 @@ Phase 4 notes:
   usage fetching and PowerShell monitor; `monitor-stats.*`; and the Windows process-reaping
   PowerShell in `session-lib.sh`.
 
+Since Phase 4 (2026-10-05):
+
+- **Repos folder.** Repos resolve through `repos.rs`: either registered bare clones, or any clone under
+  `config.json → reposDir` (two levels deep; a registered slug wins). `git -C` targets either kind,
+  and per-repo files (info/exclude, hooks) go to the clone's `.git`.
+- **PR guardrails** (`guard.rs`): `guardrails` defaults plus `repos.<slug>.guardrails`. `wtd preflight`
+  stamps HEAD on a pass, and `agent pr` refuses an unstamped, dirty or unpushed HEAD. Blocked
+  branches are enforced by a `pre-push` hook (`wtd guard pre-push`) installed into every repo; a
+  user's own hook is never overwritten.
+- **Linked ticket** (`ticket.rs`): a link in `.wtd/state/tickets/` (from New Session's `--ticket` or
+  `wtd ticket link`). `sync` renders the issue, its comments, the closing PRs and the branch's PR, with
+  reviews and inline review threads, to `.claude-ticket.md`, writing only on a change. The daemon
+  re-syncs live worktrees every 300 s.
+- **Customizations** (`custom.rs`): `.wtd/custom/` plus `repos/<slug>/` layers of skills, tools (on the
+  session's PATH and its shell's), a CLAUDE.md block between markers (re-synced on each open), and
+  `hooks.json`, merged into `.claude/settings.json` and tracked so a re-apply replaces it.
+
 What changed from the plan while building Phases 1–3:
 
 - **Store:** groups, membership and messages live in a JSON file (`.wtd/state/store.json`, atomic
