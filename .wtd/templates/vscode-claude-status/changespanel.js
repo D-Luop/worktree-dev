@@ -18,7 +18,7 @@ const { baseRef, revUri } = require('./gitview.js');
 const WORKING = '~working';
 const MAX_COMMITS = 200;
 const FALLBACK_COMMITS = 30;
-const IGNORE = /(^|[\\/])(\.git|node_modules|target|dist|build|out|\.next|\.turbo|\.cache|__pycache__|\.venv)([\\/]|$)|\.claude-status/i;
+const IGNORE = /(^|[\\/])(\.git|node_modules|target|dist|build|out|\.next|\.turbo|\.cache|__pycache__|\.venv)([\\/]|$)|\.claude-status|\.claude-ticket\.md/i;
 
 function git(wt, args) {
   return new Promise((resolve) => {

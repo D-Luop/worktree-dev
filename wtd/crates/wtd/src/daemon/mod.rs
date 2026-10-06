@@ -270,6 +270,7 @@ async fn serve(dev: PathBuf) -> Result<()> {
     tokio::spawn(usage_loop(d.clone()));
     tokio::spawn(metrics_loop(d.clone()));
     tokio::spawn(jobs_loop(d.clone()));
+    tokio::spawn(tickets_loop(d.clone()));
 
     loop {
         server.connect().await?;
@@ -837,6 +838,28 @@ fn stop_sessions(d: &Daemon, id: &str) -> u64 {
 
 /// Run due scheduled jobs (`wtd <kind> <args…>`, output to a log next to the worktree). A job that
 /// came due while the daemon was stopped runs on the next start.
+/// Keep live worktrees' `.claude-ticket.md` current (issue comments, PR reviews arrive while they work).
+async fn tickets_loop(d: Arc<Daemon>) {
+    let mut t = tokio::time::interval(Duration::from_secs(300));
+    t.tick().await;
+    loop {
+        t.tick().await;
+        let live: Vec<String> = d.lock().worktrees.values().filter(|w| w.live && w.id != DEV_ID && w.slug != "plan").map(|w| w.id.clone()).collect();
+        if live.is_empty() || crate::settings::which("gh").is_none() {
+            continue;
+        }
+        let dev = d.dev.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            for id in live {
+                if let Err(e) = crate::ticket::sync(&dev, &id) {
+                    eprintln!("[{}] ticket sync {id}: {e:#}", now());
+                }
+            }
+        })
+        .await;
+    }
+}
+
 async fn jobs_loop(d: Arc<Daemon>) {
     let mut t = tokio::time::interval(Duration::from_secs(30));
     loop {

@@ -37,6 +37,22 @@ is a **separate, user-initiated** step: only the user runs `wt-review`, if and w
 not autonomously; run it only if the user explicitly asks. If they do run one, address its **Fix**
 findings (or justify ignoring them).
 
+## Linked ticket — read `.claude-ticket.md`, don't re-query GitHub
+
+If this worktree is linked to a GitHub issue or PR — or its branch has a PR — `.claude-ticket.md` at the
+worktree root holds it: title, state, assignees, description, comments, the related PR(s), their reviews
+and the **inline review comments** (`## Review comments`: each thread at `file:line` with its diff hunk,
+resolved or not). It's kept current while you work. When the user says "the ticket", "the issue", "address
+the review comments", etc., **read that file first** instead of running `gh issue view` / `gh pr view` /
+`gh api`. Run `wtd ticket sync` if you need it refreshed right now; fall back to `gh` only when the file
+is missing or the user asks for a live query.
+
+## PR guardrails
+
+This repo may have PR guardrails (checks that must pass before a worktree is PR-ready, branches that
+can't be pushed). `wtd preflight` runs them; `/pr` does it for you. If a guardrail blocks you, fix the
+cause — never bypass it (no `--no-verify`, no marking the worktree some other way).
+
 ## Project
 
 <!-- Repo-specific orientation. Describe what this codebase is, its language/stack, where the

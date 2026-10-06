@@ -42,3 +42,5 @@ Thumbs.db
 wtd/target/
 .wtd/bin/
 .wtd/config.json
+# your own skills/tools/CLAUDE.md additions/hooks (Settings → Customizations)
+.wtd/custom/

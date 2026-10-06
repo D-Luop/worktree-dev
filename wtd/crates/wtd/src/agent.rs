@@ -62,6 +62,9 @@ pub fn main(args: &[String]) -> Result<i32> {
         Some("done") | Some("pr") | Some("wip") | Some("working") => {
             let word = if args[0] == "working" { "wip" } else { args[0].as_str() };
             let r = here(&dev)?;
+            if word == "pr" {
+                crate::guard::check_pr(&dev, &r)?; // the repo's PR guardrails (no-op when none are enabled)
+            }
             let st = apply_status(&dev, &r, Event::from_word(word, "").unwrap(), word)?;
             println!("marked {} as '{}'", r.root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), st.as_str());
             Ok(0)
@@ -266,8 +269,8 @@ fn add_excludes(exclude: &Path) -> Result<()> {
     std::fs::create_dir_all(exclude.parent().unwrap())?;
     let mut text = std::fs::read_to_string(exclude).unwrap_or_default();
     let before = text.len();
-    for ign in ["CLAUDE.md", "pr-notes.md", ".claude-status", ".claude-status.resume", ".claude/issue.md", ".claude/skills/"] {
-        if !text.lines().any(|l| l.trim() == ign) {
+    for ign in crate::repos::WORKTREE_LOCAL {
+        if !text.lines().any(|l| l.trim() == *ign) {
             if !text.is_empty() && !text.ends_with('\n') {
                 text.push('\n');
             }
@@ -336,7 +339,7 @@ fn announce_refs(wtp: &Path, refs: &[(String, PathBuf)]) -> Result<()> {
 }
 
 fn launch(dev: &Path, args: &[String]) -> Result<i32> {
-    let (mut from, mut account, mut issue) = (None::<String>, None::<String>, None::<PathBuf>);
+    let (mut from, mut account, mut issue, mut ticket) = (None::<String>, None::<String>, None::<PathBuf>, None::<String>);
     let mut launch_agent = std::env::var_os("AGENT_NO_CLAUDE").is_none();
     let mut pmode = std::env::var("AGENT_PERMISSION_MODE").unwrap_or_else(|_| "auto".into());
     let mut pos: Vec<String> = vec![];
@@ -348,6 +351,7 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
             "--from" => { from = Some(val(i)?); i += 2; }
             "--account" | "-a" => { account = Some(val(i)?); i += 2; }
             "--issue-file" => { issue = Some(paths::normalize(&val(i)?)); i += 2; }
+            "--ticket" => { ticket = Some(val(i)?); i += 2; }
             "--mode" => { pmode = val(i)?; i += 2; }
             "--no-auto" => { pmode = "default".into(); i += 1; }
             "--no-claude" => { launch_agent = false; i += 1; }
@@ -359,7 +363,8 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
     let (Some(slug), Some(name)) = (pos.first().cloned(), pos.get(1).cloned()) else { bail!("usage: agent <slug> <name> [options] [ref…]") };
     let ref_tokens = pos[2..].to_vec();
     let is_plan = slug == "plan";
-    let bare = if is_plan { None } else { Some(gitx::require_repo(dev, &slug)?) };
+    let repo = if is_plan { None } else { Some(crate::repos::require(dev, &slug)?) };
+    let bare = repo.as_ref().map(|r| r.path.clone());
     let id = format!("{slug}/{name}");
     let wtp = paths::worktree_path(dev, &id);
     let session = session_name(&slug, &name);
@@ -378,6 +383,7 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
         println!("reopened from the archive → {}", wtp.display());
     }
 
+    let created = !wtp.exists();
     if !wtp.exists() {
         if is_plan {
             std::fs::create_dir_all(&wtp)?;
@@ -425,10 +431,18 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
         if envsrc.is_dir() {
             seed_env(&envsrc, &envsrc, &wtp)?;
         }
-        let exclude = if is_plan { wtp.join(".git").join("info").join("exclude") } else { bare.as_ref().unwrap().join("info").join("exclude") };
-        add_excludes(&exclude)?;
+        if is_plan {
+            add_excludes(&wtp.join(".git").join("info").join("exclude"))?;
+        }
     }
 
+    // per-repo git setup (ignore rules, commit-msg + guardrail hooks) — idempotent, so repos found in
+    // the repos folder get it on first use and existing ones pick up changes
+    if let Some(r) = &repo {
+        if let Err(e) = crate::repos::prepare(dev, r) {
+            eprintln!("warning: repo setup for '{slug}': {e:#}");
+        }
+    }
     // template skills refresh on every open, so new/updated skills reach existing worktrees
     let skills = dev.join(".wtd").join("templates").join(".claude").join("skills");
     if skills.is_dir() {
@@ -439,6 +453,23 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
     if !pvplan.exists() {
         std::fs::create_dir_all(pvplan.parent().unwrap())?;
         let _ = std::fs::copy(dev.join(".wtd").join("templates").join("plan-placeholder.html"), &pvplan);
+    }
+    // your own skills / CLAUDE.md additions / hooks (.wtd/custom), global and for this repo
+    match crate::custom::apply(dev, &slug, &wtp, created) {
+        Ok(log) => log.iter().for_each(|l| println!("{l}")),
+        Err(e) => eprintln!("warning: customizations: {e:#}"),
+    }
+    // the linked ticket: link it (New Session passes the picked issue), then refresh
+    // .claude-ticket.md in the background so the session doesn't wait on GitHub
+    if let (Some(spec), false) = (&ticket, is_plan) {
+        match crate::ticket::parse_spec(dev, &slug, spec) {
+            Ok((repo, n)) => crate::ticket::link(dev, &id, &repo, n)?,
+            Err(e) => eprintln!("warning: --ticket {spec}: {e:#}"),
+        }
+    }
+    if !is_plan && (crate::ticket::link_of(dev, &id).is_some() || crate::repos::github_repo(dev, &slug).is_some()) {
+        let (d, i) = (dev.to_path_buf(), id.clone());
+        std::thread::spawn(move || { let _ = crate::ticket::sync(&d, &i); });
     }
     if !is_plan && wt::merge_repo_hooks(dev, &slug, &wtp)? {
         println!("wired repo hooks for '{slug}' into .claude/settings.json");
@@ -476,6 +507,13 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
         std::env::set_var("CODEX_HOME", h);
     }
     std::env::set_var("WTD_SESSION", &session);
+    // custom tools (.wtd/custom/tools, …/repos/<slug>/tools) on the session's PATH
+    let tools = crate::custom::tool_dirs(dev, &slug);
+    if !tools.is_empty() {
+        let cur = std::env::var_os("PATH").unwrap_or_default();
+        let joined = std::env::join_paths(tools.iter().cloned().chain(std::env::split_paths(&cur)))?;
+        std::env::set_var("PATH", joined);
+    }
     let host_args: Vec<String> = if acct.codex_home.is_some() {
         let mark = format!("{key}.codex");
         let resume = wt::read_state(dev, "session-ids", &mark).is_some() || wt::state(dev, "session-ids").join(&mark).exists();

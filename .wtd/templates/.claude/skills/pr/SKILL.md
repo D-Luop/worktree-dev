@@ -3,9 +3,9 @@ name: pr
 description: >
   Mark a worktree PR-ready and write its PR message. Use when the user is ready to open a pull
   request for this worktree's work, says "/pr", "pr notes", "ready for PR", or "write the PR".
-  Marks the worktree `pr` (light-blue 🔹 — sorts just below working, above done) by running
-  `agent pr`, pushes already-committed local work to origin, then writes a concise PR message to
-  pr-notes.md in the worktree root. Does NOT mark the worktree done (that's /done) and does NOT run a
+  Runs the repo's PR guardrails (`wtd preflight`), pushes already-committed local work to origin,
+  marks the worktree `pr` (light-blue 🔹 — sorts just below working, above done) by running
+  `agent pr`, then writes a concise PR message to pr-notes.md in the worktree root. Does NOT mark the worktree done (that's /done) and does NOT run a
   review (only the user runs `wt-review`).
 allowed-tools: Read, Grep, Glob, Bash, Write
 ---
@@ -17,14 +17,14 @@ allowed-tools: Read, Grep, Glob, Bash, Write
 without claiming the work is fully finished. Run the steps **in order**, for real — actually call the
 tools; never just say you did.
 
-## 1. Mark the worktree PR-ready
-Run this as a Bash command:
+## 1. Run the PR guardrails
 ```
-agent pr
+wtd preflight
 ```
-It prints `marked <name> as 'pr'` and flips the Explorer folder + roster glyph to light-blue 🔹
-(sticky: survives Stop/SessionEnd; a real source edit or `agent wip` reverts it to working). If it
-doesn't print that line, it didn't work — fix it before continuing.
+It runs this repo's configured checks (Settings → PR guardrails: build/test commands, a clean tree)
+and stamps the commit when they pass. "no guardrails enabled" means there's nothing to check — carry
+on. If it **fails**, stop here: report what failed and fix it (or ask the user), commit, and run it
+again. Never work around it — `agent pr` re-checks and refuses an unverified commit anyway.
 
 ## 2. Push committed work to origin
 Push the branch's already-committed commits (a PR needs them on the remote):
@@ -33,10 +33,19 @@ git push -u origin HEAD
 ```
 This pushes **only what's already committed** — it does NOT commit or stage anything. If the tree has
 uncommitted changes, leave them (mention it in the report); don't commit on the user's behalf unless
-asked. "Everything up-to-date" is fine. If the push fails (no remote, rejected/non-fast-forward),
-report the error and continue — never force-push.
+asked. "Everything up-to-date" is fine. If the push fails (no remote, rejected/non-fast-forward, or a
+guardrail blocking that branch), report the error and continue — never force-push.
 
-## 3. Write the PR message to `pr-notes.md`
+## 3. Mark the worktree PR-ready
+```
+agent pr
+```
+It prints `marked <name> as 'pr'` and flips the Explorer folder + roster glyph to light-blue 🔹
+(sticky: survives Stop/SessionEnd; a real source edit or `agent wip` reverts it to working). If it
+refuses with a `guardrails:` message (unverified commit, uncommitted changes, unpushed commits), do
+what it says — don't mark the worktree any other way.
+
+## 4. Write the PR message to `pr-notes.md`
 Write (overwrite) `pr-notes.md` in the **worktree root** (`git rev-parse --show-toplevel`). Base it on
 the ACTUAL changes — inspect the unpushed diff if needed:
 `git diff "$(git merge-base HEAD origin/HEAD 2>/dev/null || echo origin/main)"...` and `git log`.
@@ -60,7 +69,7 @@ Factual and signal-dense: no filler, no restating the diff, no praise, no AI att
 `pr-notes.md` is git-ignored — a scratch artifact for the PR body. (Double-click the `view_pr_notes`
 button in the commit pane to render it; ctrl-click to open the source.)
 
-## 4. Report
+## 5. Report
 Tell the user: whether the push succeeded (and the branch pushed to, e.g. `origin/<branch>`, or
 "nothing to push" / any error + leftover uncommitted changes), the **absolute** path to `pr-notes.md`
 (absolute so it's clickable), and a one-line summary. The worktree now shows light-blue `pr`. Done.

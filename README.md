@@ -83,12 +83,53 @@ changes and commits:
 
 **Settings** (gear icon, or *WorkTreeDev: Open Settings*):
 
-- add, clone or remove repos
+- add, clone or remove repos, or point at a **repos folder** (below)
 - link each repo to GitHub and choose its issue source, either **repo issues** or a **Project (v2)
   board**
+- set **PR guardrails**, for every repo or per repo (below)
+- manage your **customizations** (below)
 - log Claude and Codex accounts in and out
 - set which account each role uses (dev sessions, reviews, assistant)
 - check installed tools and GitHub scopes, and the daemon and tray
+
+**Repos folder (optional):** instead of registering each repo, point Settings at the folder where you
+keep your git clones. Every clone in it, or one subfolder down, becomes a repo, and worktrees are cut
+straight off the clone. Registered repos keep working alongside it; a registered name wins over a
+clone with the same name.
+
+**Linked ticket on disk:** a worktree can be linked to a GitHub issue or PR. New Session links the
+issue you pick; the roster's ticket button links anything else, and the PR for the worktree's branch
+is found automatically. The linked item is written to `.claude-ticket.md` in the worktree:
+
+- its description and comments
+- the related PRs, with their reviews and **inline review comments** (`file:line`, the diff hunk, and
+  whether the thread is resolved)
+
+The agent reads that file instead of calling `gh`. The daemon refreshes it every 5 minutes while the
+session is live, and the file is git-ignored.
+
+**PR guardrails:** checks a worktree must pass before it can be marked PR-ready.
+
+- **Preflight commands** run in the worktree, for example a build and tests.
+- **A clean tree:** no uncommitted changes.
+- **Pushed:** the branch is pushed to its upstream.
+- **Blocked branches** can never be pushed. This is enforced by a git pre-push hook, so it applies to
+  every push: the agent's, yours, or a tool's.
+
+`agent pr`, which `/pr` runs, refuses unless the current commit passed preflight. It runs preflight
+itself first when it hasn't. Turn guardrails on per repo, or as defaults for all repos.
+
+**Customizations:** your own additions for every worktree, or for one repo's, kept in `.wtd/custom/`
+(yours, not in git):
+
+- **Skills:** `skills/<name>/SKILL.md`
+- **Tools on the session's PATH:** `tools/`
+- **CLAUDE.md additions:** `CLAUDE.md`
+- **Claude hooks:** `hooks.json`
+- **Env files for new worktrees:** `repos/<slug>/env/`
+
+They're applied every time a session opens. Team- or stack-specific things belong here, such as a
+`/proto` skill, a `build` or `db` script, or house rules.
 
 **Agent messaging:** agents can see the rest of the fleet through the `wtd` MCP server
 (`fleet_list`, `fleet_get`, `fleet_read_file`). They can also *propose* a message to another
@@ -119,6 +160,10 @@ On Windows: `wtd help`. Each command below also works as a bare name through its
 | `account ls\|add\|login\|rm\|use\|usage\|switch …` | Claude and Codex logins, role defaults, live usage, moving a session to another account. |
 | `repo ls\|add\|rm\|fetch …` · `add-repo <slug> <url>` | Register and bare-clone repos (`repo add --new <slug>` creates a local-only repo). |
 | `preview <file.html> [label]` | Stage an HTML design mockup for the preview panel. |
+| `wtd preflight [<slug>/<name>]` | Run the repo's PR guardrails in a worktree. A pass is stamped on the commit, which `agent pr` requires. |
+| `wtd ticket link\|unlink\|sync\|show …` | Link a worktree to an issue or PR (URL, `owner/repo#N` or `#N`), and refresh `.claude-ticket.md`. |
+| `wtd custom ls\|dir\|new-skill\|apply …` | Your customizations: list them, create a skill, or re-apply them to open worktrees. |
+| `wtd repo set-dir <folder>\|--clear` · `wtd repo set-guardrails <slug>\|* <json>` | The repos folder, and guardrails for one repo or the defaults (`*`). |
 | `tokens` | Token usage and estimated cost per worktree. |
 | `ship [out]` | Package the toolkit (no secrets, worktrees or repos) for another machine. |
 | `wtd daemon start\|stop\|status` · `wtd tray` · `wtd ls` | Daemon control, tray icon, and a fleet listing. |
