@@ -209,7 +209,7 @@ pub fn tokens_main(args: &[String]) -> Result<i32> {
 
 // --- ship: package the engine for a teammate (no worktrees, clones, state or secrets) -------------
 
-fn copy_filtered(src: &Path, dst: &Path, skip: &dyn Fn(&Path) -> bool) -> Result<()> {
+pub(crate) fn copy_filtered(src: &Path, dst: &Path, skip: &dyn Fn(&Path) -> bool) -> Result<()> {
     std::fs::create_dir_all(dst)?;
     for e in std::fs::read_dir(src)?.flatten() {
         let p = e.path();

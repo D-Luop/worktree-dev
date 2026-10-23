@@ -883,7 +883,8 @@ pub fn account_main(args: &[String]) -> Result<i32> {
 
 /// Give a new Claude login the fleet MCP tools (each config dir has its own MCP registry).
 fn register_mcp(dir: &Path) {
-    let (Some(claude), Ok(exe)) = (which("claude"), std::env::current_exe()) else { return };
+    let Some(claude) = which("claude") else { return };
+    let exe = crate::paths::wtd_exe();
     let mut c = Command::new(claude);
     c.args(["mcp", "add", "--scope", "user", "wtd", "--"]).arg(exe).arg("mcp").env("CLAUDE_CONFIG_DIR", dir)
         .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());

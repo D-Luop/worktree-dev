@@ -11,21 +11,29 @@
 #                   announced in CLAUDE.md.
 set -euo pipefail
 
-WTD="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"   # ~/dev/.wtd
-DEV="$(dirname "$WTD")"                                                   # ~/dev
+# Program files (templates, hooks, scripts) live beside this script: <dev>/.wtd in a checkout, or the
+# program dir's current/ when installed. User data is always under <dev>/.wtd.
+WTA="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+if [ "$(basename "$WTA")" = .wtd ]; then
+  DEV="$(dirname "$WTA")"                                                 # ~/dev
+else
+  DEV="${WTD_DEV:-$(cat "$HOME/.config/wtd/dev-root" 2>/dev/null)}"
+  command -v cygpath >/dev/null 2>&1 && DEV="$(cygpath -u "$DEV")"
+fi
+WTD="$DEV/.wtd"
 # shipped repo-hooks use __DEV__ placeholders (portability); render to this machine's dev root.
 wtd_render_dev() { sed "s#__DEV__#$DEV#g" "$1"; }
 REG="$WTD/repos.tsv"
 # shared ref-checkout helpers: registered, default_branch, parse_ref_token, ensure_ref
 # shellcheck source=refs-lib.sh
-. "$WTD/scripts/refs-lib.sh"
+. "$WTA/scripts/refs-lib.sh"
 # shellcheck source=account-lib.sh
-. "$WTD/scripts/account-lib.sh"          # account_dir_for_role/name, account_name_for_role
+. "$WTA/scripts/account-lib.sh"          # account_dir_for_role/name, account_name_for_role
 # platform detection + backend-agnostic session ops (tmux on Linux/WSL/mac, VSCode terminals on Windows)
 # shellcheck source=platform-lib.sh
-. "$WTD/scripts/platform-lib.sh"
+. "$WTA/scripts/platform-lib.sh"
 # shellcheck source=session-lib.sh
-. "$WTD/scripts/session-lib.sh"
+. "$WTA/scripts/session-lib.sh"
 
 # --- teardown subcommand:  agent rm <slug> <name> [--branch] [--force] [-y] ---
 # Kill the tmux session, remove the worktree, and (with --branch) delete the branch.
@@ -134,7 +142,7 @@ fi
 # This is what the agent runs at the matching milestone (work finished / ready for PR).
 if [ "${1:-}" = "done" ] || [ "${1:-}" = "pr" ] || [ "${1:-}" = "wip" ] || [ "${1:-}" = "working" ]; then
   ev="$1"; [ "$ev" = "working" ] && ev="wip"
-  "$WTD/hooks/wt-status.sh" "$ev" </dev/null      # writes .claude-status + updates tmux tab glyph
+  "$WTA/hooks/wt-status.sh" "$ev" </dev/null      # writes .claude-status + updates tmux tab glyph
   root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
   echo "marked $(basename "$root") as '$(cat "$root/.claude-status" 2>/dev/null)'"
   exit 0
@@ -166,7 +174,7 @@ if [ "${1:-}" = "stop" ] || [ "${1:-}" = "kill" ]; then
     cur="$(wtd_session_current)"
     if [ -n "$cur" ]; then
       sroot="$(git rev-parse --show-toplevel 2>/dev/null)"
-      [ -n "$sroot" ] && CLAUDE_PROJECT_DIR="$sroot" "$WTD/hooks/wt-status.sh" sessionend </dev/null
+      [ -n "$sroot" ] && CLAUDE_PROJECT_DIR="$sroot" "$WTA/hooks/wt-status.sh" sessionend </dev/null
       echo "ending current session '$cur' (worktree kept → red 'stopped' unless done)"
       wtd_session_kill "$cur" "$sroot"; exit 0
     fi
@@ -175,7 +183,7 @@ if [ "${1:-}" = "stop" ] || [ "${1:-}" = "kill" ]; then
   fi
   ssession="${sslug}-${sname}"; ssession="${ssession//[.:]/-}"
   swt="$DEV/worktrees/$sslug/$sname"
-  [ -d "$swt" ] && CLAUDE_PROJECT_DIR="$swt" "$WTD/hooks/wt-status.sh" sessionend </dev/null
+  [ -d "$swt" ] && CLAUDE_PROJECT_DIR="$swt" "$WTA/hooks/wt-status.sh" sessionend </dev/null
   if wtd_session_exists "$ssession"; then
     wtd_session_kill "$ssession" "$swt" "$sslug" "$sname"
     echo "stopped session '$ssession' (worktree kept → red 'stopped' unless done). Re-open: agent $sslug $sname"
@@ -364,7 +372,7 @@ if [ ! -d "$wt" ]; then
   # seed: stub CLAUDE.md + .claude scaffolding (plans dir); template skills are refreshed below on
   # EVERY open (not just creation), so new skills reach existing worktrees too.
   mkdir -p "$wt/.claude/skills" "$wt/.claude/plans"
-  [ -f "$wt/CLAUDE.md" ] || cp "$WTD/templates/CLAUDE.md" "$wt/CLAUDE.md"
+  [ -f "$wt/CLAUDE.md" ] || cp "$WTA/templates/CLAUDE.md" "$wt/CLAUDE.md"
   # the issue / project card this worktree is for (from New Session) → the Context / scope section
   if [ -n "$issue_file" ] && [ -f "$issue_file" ]; then
     tmp=$(mktemp)
@@ -406,11 +414,11 @@ fi
 # refresh template skills on EVERY open (not just creation) so new/updated skills — e.g. /preview —
 # propagate to existing worktrees on re-open. Skills are template-managed, not per-worktree edits.
 mkdir -p "$wt/.claude/skills"
-cp -r "$WTD/templates/.claude/skills/." "$wt/.claude/skills/" 2>/dev/null || true
+cp -r "$WTA/templates/.claude/skills/." "$wt/.claude/skills/" 2>/dev/null || true
 
 # presets (.wtd/custom: skills/agents/commands/rules/CLAUDE.md/AGENTS.md/hooks, per platform + repo)
-[ "$is_plan" = 1 ] || "$WTD/scripts/custom-apply.sh" "$repo" "$wt" $fresh || echo "warning: presets not applied (custom-apply.sh failed)"
-while read -r td; do [ -n "$td" ] && PATH="$td:$PATH"; done < <("$WTD/scripts/custom-apply.sh" --tool-dirs "$repo" 2>/dev/null)
+[ "$is_plan" = 1 ] || "$WTA/scripts/custom-apply.sh" "$repo" "$wt" $fresh || echo "warning: presets not applied (custom-apply.sh failed)"
+while read -r td; do [ -n "$td" ] && PATH="$td:$PATH"; done < <("$WTA/scripts/custom-apply.sh" --tool-dirs "$repo" 2>/dev/null)
 export PATH
 
 # ensure the always-present living-plan preview tab exists (seed a placeholder until the agent writes a
@@ -418,7 +426,7 @@ export PATH
 pvplan="$WTD/state/previews/$repo/$name/plan.html"
 if [ ! -f "$pvplan" ]; then
   mkdir -p "$(dirname "$pvplan")"
-  cp "$WTD/templates/plan-placeholder.html" "$pvplan" 2>/dev/null || true
+  cp "$WTA/templates/plan-placeholder.html" "$pvplan" 2>/dev/null || true
 fi
 
 # --- per-repo hooks: merge .wtd/repo-hooks/<slug>.json into the worktree (idempotent) ---
@@ -459,7 +467,7 @@ if [ "${#refs[@]}" -gt 0 ]; then
   done
   if [ "${#refpaths[@]}" -gt 0 ]; then
     cmd="$wt/CLAUDE.md"
-    [ -f "$cmd" ] || cp "$WTD/templates/CLAUDE.md" "$cmd"
+    [ -f "$cmd" ] || cp "$WTA/templates/CLAUDE.md" "$cmd"
     # Gather already-announced entries (label -> path) so the block accumulates across runs.
     declare -A REFMAP=()
     while IFS= read -r line; do
@@ -518,11 +526,11 @@ if ! tmux has-session -t "=$session" 2>/dev/null; then
     [ -n "$diffcmd" ] && [ -x "$diffcmd" ] && "$diffcmd" --seed "$wt" >/dev/null 2>&1 || true
     # diff pane (right column): live-tails the colored diff log. @dpane/@dlog let the commit-click
     # helper repaint it with a specific commit's diff (and exec back here on q).
-    diff_pane=$(tmux split-window -d -h -l 48% -P -F '#{pane_id}' -t "$main_pane" -c "$wt" "$WTD/hooks/diff-pane.sh '$wt' '$rel_log'")
+    diff_pane=$(tmux split-window -d -h -l 48% -P -F '#{pane_id}' -t "$main_pane" -c "$wt" "$WTA/hooks/diff-pane.sh '$wt' '$rel_log'")
     tmux set -p -t "$diff_pane" @dpane 1
     tmux set -p -t "$diff_pane" @dlog "$rel_log"
     # commit-history pane stacked ABOVE the diff pane (~20% tall, aligned with the command pane).
-    commit_pane=$(tmux split-window -d -v -b -l 20% -P -F '#{pane_id}' -t "$diff_pane" -c "$wt" "$WTD/hooks/commit-pane.sh '$wt'")
+    commit_pane=$(tmux split-window -d -v -b -l 20% -P -F '#{pane_id}' -t "$diff_pane" -c "$wt" "$WTA/hooks/commit-pane.sh '$wt'")
     tmux set -p -t "$commit_pane" @cpane 1
   fi
   # COMMAND pane above the claude pane (left column, ~20% height — aligned with the commit pane): a
@@ -559,7 +567,7 @@ fi
 tmux set -t "$session" @wt_label "$name" 2>/dev/null || true
 # Sync the tab glyph from the worktree's current .claude-status (e.g. a reopened 'done' worktree
 # should show 🟢, not nothing) — a no-op on the file, just refreshes @wt_status.
-CLAUDE_PROJECT_DIR="$wt" "$WTD/hooks/wt-status.sh" sync </dev/null 2>/dev/null || true
+CLAUDE_PROJECT_DIR="$wt" "$WTA/hooks/wt-status.sh" sync </dev/null 2>/dev/null || true
 
 if [ -n "${TMUX:-}" ]; then
   tmux switch-client -t "$session"      # already inside tmux: can't nest attach

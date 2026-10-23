@@ -20,6 +20,7 @@ pub mod mcp;
 pub mod new;
 pub mod nudge;
 pub mod paths;
+pub mod program;
 pub mod proposal;
 pub mod repos;
 pub mod review;
@@ -64,6 +65,8 @@ Worktrees & sessions (also on PATH as plain `agent`, `archive`, … via ~/.local
                                      per platform and repo (.wtd/custom)
   wtd tokens                         token usage across sessions
   wtd ship                           package the toolkit for another machine
+  wtd version                        version, channel, program dir and dev root (JSON)
+  wtd setup --migrate                move a checkout install's program files to the program dir
 
 Fleet & daemon
   wtd daemon start|stop [--force]|status|run
@@ -146,6 +149,8 @@ fn dispatch(cmd: &str, rest: &[String]) -> Result<i32> {
         "preview" => tools::preview_main(rest),
         "tokens" => tools::tokens_main(rest),
         "ship" => tools::ship_main(rest),
+        "version" | "--version" => program::version_main(rest),
+        "setup" => program::setup_main(rest),
         "stop" => {
             let id = rest.first().ok_or_else(|| anyhow::anyhow!("usage: wtd stop <slug/name>"))?;
             let r = client::Client::connect_required()?.request(method::SESSION_STOP, json!({ "id": id }))?;

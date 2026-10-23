@@ -564,7 +564,7 @@ function settingsHtml() {
   // ---------- Daemon & tray ----------
   function daemonSection(){
     const d=D.daemon||{};
-    if(!d.installed) return '<div class="note warn">'+ico('warning')+'<div>wtd.exe isn’t installed — run <span class="mono">install.sh</span> (needs Rust).</div></div>';
+    if(!d.installed) return '<div class="note warn">'+ico('warning')+'<div>wtd.exe isn’t installed — run the WorkTreeDev installer, or <span class="mono">install.sh</span> from a checkout (needs Rust).</div></div>';
     return '<div class="card"><div class="hd"><div class="ico">'+ico('server-process')+'</div><div class="main"><div class="name">Daemon'
       + (d.running?'<span class="chip ok">'+ico('circle-filled')+'running</span>':'<span class="chip">'+ico('circle-outline')+'stopped</span>')+'</div>'
       + '<div class="sub">Live status, git state, usage and metrics. It never starts by itself; sessions keep running when it stops.</div></div><div class="acts">'
