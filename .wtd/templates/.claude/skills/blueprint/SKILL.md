@@ -40,12 +40,17 @@ Write `.claude/plans/active-plan.md` using `references/plan-template.md`. Rules:
   would always be reviewed or reverted together, merge them.** Each step produces exactly one commit,
   so coarser steps mean fewer, more reviewable commits. (Tests and green build are the separate fixed
   tail steps below — don't pre-split those into the body.)
-- **Put the steps checklist at the TOP of the file** (right under the title), per the template —
-  Context, Decisions, and the Progress Log go below it. The checklist is the first thing anyone sees.
+- **Put the `## Handoff` section, then the steps checklist, at the TOP of the file** (right under the
+  title), per the template — Context, Decisions, and the Progress Log go below them. Fill Handoff in
+  now (current step = Step 1 not started, next action = its first concrete edit, open questions,
+  gotchas the research turned up). It's what a replacement agent reads first, and `wtd` inlines it at
+  the top of the account-switch handoff brief.
 - After each step the executing agent must: **commit + push** (user reviews in GitHub), **log
   progress in the plan's Progress Log**, then **ask the user before continuing**. State this per step.
 - The plan must instruct the agent to **actively log completed work in the Progress Log of this same
-  file** — context may be wiped between steps; a fresh agent recovers state only from this file.
+  file, and overwrite the Handoff section at every step boundary and before any long-running
+  command** — context may be wiped, or the work handed to another agent, at any moment; a fresh agent
+  recovers state only from this file.
 - The Steps checklist must END with these fixed tail steps, in order (reviews are NOT a step — the
   user runs `wt-review` separately, never the agent):
   - **A. Tests:** write tests per the repo's own test conventions for this kind of change.

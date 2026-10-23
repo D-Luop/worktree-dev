@@ -1,11 +1,23 @@
-> **Source of truth across context resets.** Context may be wiped between steps. A fresh agent
-> recovers all state from this file: read it top-to-bottom, resume from the first unchecked step
-> (or the bottom of the Progress Log), and append a Progress Log entry after every step.
+> **Source of truth across context resets and handoffs.** Context may be wiped, or the work handed
+> to another agent, at any moment. A fresh agent recovers all state from this file: read the
+> **Handoff** section first, then resume from the first unchecked step (or the bottom of the Progress
+> Log). Update Progress Log + Handoff at every step boundary and before any long-running command.
 
 # Plan: <task name>
 
-<!-- The STEPS CHECKLIST goes first (right under the title) so it's the first thing you see — context,
-     decisions, and the log live below it. -->
+<!-- HANDOFF then the STEPS CHECKLIST go first (right under the title) so they're the first thing you
+     see — context, decisions, and the log live below them. -->
+
+## Handoff
+<!-- Live state for whoever picks this up next. OVERWRITE (don't append) at every step boundary and
+     before any long-running command (build, test suite, deploy). Exact enough that another agent
+     could continue with no transcript. -->
+- **Current step:** <step N — name; done / in progress / blocked>
+- **Next action:** <the exact next command or edit, e.g. "add `foo()` to src/bar.rs, then run `cargo test bar`">
+- **Open questions:** <unresolved questions for the user, or "none">
+- **Decisions made (why):** <choices made during the work + reason; settled ones move to "Decisions locked">
+- **Gotchas found:** <surprises, traps, things that didn't work>
+- **Files in flux / uncommitted:** <files edited but not committed, half-done changes, or "clean">
 
 ## Sequential Steps
 <!-- Each step = one meaningful, self-contained, independently-reviewable unit of behavior. Err
