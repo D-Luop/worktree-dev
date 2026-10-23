@@ -43,6 +43,8 @@ jobs:
           node-version: '20'
 
       - name: cargo build
+        env:
+          WTD_COMMIT: ${{ github.sha }}
         run: cargo build --release --locked --manifest-path wtd/Cargo.toml
 
       - name: Signing disabled
