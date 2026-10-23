@@ -1987,11 +1987,23 @@ function activate(context) {
     if (!cur.includes('claudeStatus.smartPaste'))
       tcfg.update('commandsToSkipShell', cur.concat('claudeStatus.smartPaste'), vscode.ConfigurationTarget.Global).then(undefined, () => {});
   }
-  // the chat / shell / Changes split needs visible dividers; the default group border is near-invisible
-  { const wcfg = vscode.workspace.getConfiguration('workbench');
-    const cc = (wcfg.inspect('colorCustomizations') || {}).globalValue || {};
-    if (!cc['editorGroup.border'])
-      wcfg.update('colorCustomizations', Object.assign({}, cc, { 'editorGroup.border': '#6e7681' }), vscode.ConfigurationTarget.Global).then(undefined, () => {}); }
+  // the chat / shell / Changes split needs visible dividers: paint them in the window's Peacock colour
+  // (beside Peacock's own workspace colorCustomizations), else a neutral grey in user settings
+  const syncDividers = () => {
+    const wcfg = vscode.workspace.getConfiguration('workbench');
+    const ins = wcfg.inspect('colorCustomizations') || {};
+    const peacock = vscode.workspace.getConfiguration('peacock').get('color');
+    const set = (scope, cur, val) => {
+      if ((cur || {})['editorGroup.border'] === val) return;
+      const next = Object.assign({}, cur);
+      if (val) next['editorGroup.border'] = val; else delete next['editorGroup.border'];
+      wcfg.update('colorCustomizations', next, scope).then(undefined, () => {});
+    };
+    if (peacock && vscode.workspace.workspaceFolders) set(vscode.ConfigurationTarget.Workspace, ins.workspaceValue, peacock);
+    else if (!(ins.globalValue || {})['editorGroup.border']) set(vscode.ConfigurationTarget.Global, ins.globalValue, '#6e7681');
+  };
+  syncDividers();
+  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => { if (e.affectsConfiguration('peacock.color')) syncDividers(); }));
 
   // agents publish design mockups via the `preview` command (→ .wtd/state/previews/<slug>/<name>.html);
   // watch that tree so a 🖼 appears on the worktree's roster row, and clears when the file is removed.
