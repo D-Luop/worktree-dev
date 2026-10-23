@@ -449,6 +449,8 @@
   // show a file in the Diff tab (and bring that tab forward)
   function showFile(p, keepTab) {
     if (!p) return;
+    // re-rendering the row under a double-click detaches it, and the dblclick then never reaches treeEl
+    if (p === file && tab === 'diff' && treeEl.querySelector('.row.sel')) return;
     const d = dirOf(p); if (folded[d]) { folded[d] = false; }
     file = p; fileBySel[sel] = p;
     renderTree();
@@ -580,7 +582,8 @@
       + '<span class="pos">' + (i + 1) + '/' + nav.length + '</span>'
       + '<button class="icon" data-act="next" title="Next file (J)"' + (i >= nav.length - 1 ? ' disabled' : '') + '><span class="codicon codicon-chevron-right"></span></button></span>'
       + '<button class="icon" data-act="native" title="Open in the diff editor"><span class="codicon codicon-diff"></span></button>'
-      + (f.status !== 'deleted' ? '<button class="tgl" data-act="open" title="Open file">Open file</button>' : '')
+      + (f.status === 'deleted' ? '<button class="tgl" data-act="open" title="Open the version before it was deleted (read-only)">Open old version</button>'
+        : '<button class="tgl" data-act="open" title="Open file (a file no longer on disk opens this commit\'s version, read-only)">Open file</button>')
       + '</div><div id="fb" data-path="' + esc(f.path) + '">' + fileBody(f) + '</div>';
     const fb = $('fb'); fb.scrollTop = y; fb.scrollLeft = x;
   }
