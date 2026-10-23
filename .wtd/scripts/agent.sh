@@ -393,7 +393,7 @@ if [ ! -d "$wt" ]; then
   if [ "$is_plan" = 1 ]; then exclude="$wt/.git/info/exclude"; else exclude="$bare/info/exclude"; fi
   mkdir -p "$(dirname "$exclude")"; [ -f "$exclude" ] || : > "$exclude"
   if [ -f "$exclude" ]; then
-    for ign in CLAUDE.md pr-notes.md .claude-status .claude-status.resume .claude/issue.md .claude/skills/; do
+    for ign in CLAUDE.md pr-notes.md .claude-status .claude-status.resume .claude-status.limit .claude/issue.md .claude/skills/; do
       grep -qxF "$ign" "$exclude" && continue
       [ -s "$exclude" ] && [ -n "$(tail -c1 "$exclude")" ] && printf '\n' >> "$exclude"
       printf '%s\n' "$ign" >> "$exclude"
@@ -543,8 +543,9 @@ if ! tmux has-session -t "=$session" 2>/dev/null; then
   if [ "$launch_claude" = 1 ]; then
     if command -v claude >/dev/null 2>&1; then
       cli="claude --permission-mode $(printf %q "$pmode")"
-      if [ -n "$ccdir" ]; then tmux send-keys -t "$main_pane" "CLAUDE_CONFIG_DIR=$(printf %q "$ccdir") $cli" C-m
-      else                     tmux send-keys -t "$main_pane" "$cli" C-m; fi
+      [ -n "$ccdir" ] && cli="CLAUDE_CONFIG_DIR=$(printf %q "$ccdir") $cli"
+      # the tmux server may have been started from inside a Claude session
+      tmux send-keys -t "$main_pane" "unset $WTD_SESSION_ENV_VARS; $cli" C-m
     else
       echo "note: 'claude' not on PATH; left a shell in the worktree"
     fi

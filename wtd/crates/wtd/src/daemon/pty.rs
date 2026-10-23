@@ -68,9 +68,11 @@ pub fn quote_arg(a: &str) -> String {
     out
 }
 
-/// A CREATE_UNICODE_ENVIRONMENT block, sorted case-insensitively as Windows expects.
+/// A CREATE_UNICODE_ENVIRONMENT block, sorted case-insensitively as Windows expects. Parent-session
+/// vars are dropped here too, for clients that predate scrubbing them.
 fn env_block(env: &[(String, String)]) -> Vec<u16> {
-    let mut vars: Vec<&(String, String)> = env.iter().filter(|(k, _)| !k.is_empty() && !k.contains('=')).collect();
+    let mut vars: Vec<&(String, String)> =
+        env.iter().filter(|(k, _)| !k.is_empty() && !k.contains('=') && !crate::session_env::is_session_var(k)).collect();
     vars.sort_by_key(|(k, _)| k.to_uppercase());
     let mut block = Vec::new();
     for (k, v) in vars {

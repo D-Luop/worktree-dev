@@ -19,6 +19,11 @@ struct HookInput {
     tool_input: Option<serde_json::Value>,
     #[serde(default)]
     tool_response: Option<ToolResponse>,
+    /// StopFailure: the API error text, e.g. "You've hit your session limit · resets 10:20pm".
+    #[serde(default)]
+    last_assistant_message: Option<String>,
+    #[serde(default)]
+    error_details: Option<String>,
 }
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -61,7 +66,15 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             path = format!("{}/{}", c.trim_end_matches(['/', '\\']), path);
         }
     }
-    let Some(ev) = Event::from_word(word, &path) else { anyhow::bail!("unknown event '{word}'") };
+    let Some(mut ev) = Event::from_word(word, &path) else { anyhow::bail!("unknown event '{word}'") };
+    if let Event::Limited { resets_at } = &mut ev {
+        let (now, off) = (crate::daemon::now(), crate::daemon::local_offset());
+        *resets_at = [&input.last_assistant_message, &input.error_details]
+            .into_iter()
+            .flatten()
+            .find_map(|t| crate::limit::parse_reset(t, now, off))
+            .unwrap_or(0);
+    }
 
     let dir: PathBuf = std::env::var("CLAUDE_PROJECT_DIR")
         .ok()
@@ -87,10 +100,11 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             event: word.into(),
             status: new.status,
             changed,
+            resets_at: new.resets_at,
         });
     }
     // Turn ended: ring the terminal bell so VSCode badges the session's tab while it's unfocused.
-    if matches!(ev, Event::Stop) {
+    if matches!(ev, Event::Stop | Event::Limited { .. }) {
         if let Ok(mut con) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
             let _ = con.write_all(b"\x07");
         }

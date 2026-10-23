@@ -95,6 +95,7 @@ fn status_color(s: Status) -> Rgb {
     match s {
         Status::Input => Rgb(0xff, 0xb9, 0x00),
         Status::Working => Rgb(0x4a, 0xa3, 0xff),
+        Status::Limited => Rgb(0xff, 0x8c, 0x00),
         Status::Reviewing => Rgb(0xb3, 0x88, 0xff),
         Status::Pr => Rgb(0x60, 0xcd, 0xff),
         Status::Done => Rgb(0x6c, 0xcb, 0x5f),
@@ -102,8 +103,9 @@ fn status_color(s: Status) -> Rgb {
     }
 }
 
-fn status_word(w: &Worktree) -> &'static str {
+fn status_word(w: &Worktree) -> String {
     match w.status {
+        Status::Limited => return format!("⚠ {}", crate::limit::label_now(w.limit_resets_at)),
         Status::Input => "needs you",
         Status::Working => "working",
         Status::Reviewing => "reviewing",
@@ -111,6 +113,7 @@ fn status_word(w: &Worktree) -> &'static str {
         Status::Done => "done",
         Status::None | Status::Stopped => if w.live { "idle" } else { "stopped" },
     }
+    .into()
 }
 
 #[derive(Clone, PartialEq)]
@@ -384,7 +387,7 @@ struct Data {
 
 fn data() -> Data {
     let rank = |s: Status| match s {
-        Status::Input => 0,
+        Status::Input | Status::Limited => 0,
         Status::Working => 1,
         Status::Reviewing => 2,
         Status::Pr => 3,
@@ -553,13 +556,13 @@ fn layout(f: &mut Fly, t: &Theme) -> (Vec<Op>, Vec<Hit>, f32) {
                 ops.push(Op::Ring { cx, cy, r: 2.6, t: 1.1, c, clip: true });
             }
             let word = status_word(w);
-            let ww = text_width(f, Font::Small, word);
+            let ww = text_width(f, Font::Small, &word);
             let name = if w.kind == WorktreeKind::Delegate { "delegator".to_string() } else { w.name.clone() };
             let nc = if w.live { t.text } else { t.muted };
             ops.push(Op::Text { r: rect(x + 12.0, ly, right - ww - 10.0, ly + ROW_H), s: name, font: Font::Body, c: nc,
                 flags: DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX, clip: true });
-            ops.push(Op::Text { r: rect(right - ww - 4.0, ly, right, ly + ROW_H), s: word.into(), font: Font::Small,
-                c: if w.status == Status::Input { c } else { t.muted }, flags: DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX, clip: true });
+            ops.push(Op::Text { r: rect(right - ww - 4.0, ly, right, ly + ROW_H), s: word, font: Font::Small,
+                c: if matches!(w.status, Status::Input | Status::Limited) { c } else { t.muted }, flags: DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX, clip: true });
             hits.push(Hit { r: rect(4.0, ly, WIDTH - 4.0, ly + ROW_H), act, in_list: true });
             ly += ROW_H;
         }

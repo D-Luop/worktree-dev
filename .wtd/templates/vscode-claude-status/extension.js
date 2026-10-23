@@ -250,6 +250,7 @@ class ClaudeStatusProvider {
 
     if (content === 'working')   return new vscode.FileDecoration('◐', 'Claude working',       new vscode.ThemeColor('claudeStatus.working'));
     if (content === 'input')     return new vscode.FileDecoration('!', 'Your turn',             new vscode.ThemeColor('claudeStatus.input'));
+    if (content === 'limited')   return new vscode.FileDecoration('⚠', 'Usage limit — waiting for reset', new vscode.ThemeColor('claudeStatus.limited'));
     if (content === 'reviewing') return new vscode.FileDecoration('⋯', 'Waiting on review',     new vscode.ThemeColor('claudeStatus.reviewing'));
     if (content === 'pr')        return new vscode.FileDecoration('◆', 'PR ready',              new vscode.ThemeColor('claudeStatus.pr'));
     if (content === 'done')      return new vscode.FileDecoration('✓', 'Done',                  new vscode.ThemeColor('claudeStatus.done'));
@@ -1213,7 +1214,7 @@ class DevSummaryProvider {
       if (w.kind === 'dev') continue;   // the assistant has its own pinned row
       const slug = w.slug, name = w.name;
       rows.push({ id: w.id, group: w.group || null, parent: w.parent || null, slug, name, status: w.status === 'none' ? '' : w.status, dirty: !!(w.git && w.git.dirty), ahead: (w.git && w.git.ahead) || 0,
-                  branch: (w.git && w.git.branch) || '', plan: w.plan_title || '', account: w.account || '', live: !!w.live, kind: w.kind || '', program: w.program || '', msgPending: pendingFrom[w.id] || 0 });
+                  branch: (w.git && w.git.branch) || '', plan: w.plan_title || '', account: w.account || '', live: !!w.live, kind: w.kind || '', program: w.program || '', msgPending: pendingFrom[w.id] || 0, limitResetsAt: w.limit_resets_at || 0 });
       if (w.live) live.add(slug + '-' + name);
     }
     return { rows, live };
@@ -1448,9 +1449,10 @@ class DevSummaryProvider {
   let ungroupedCollapsed = !!saved.ungroupedCollapsed;
   function save(){ vsc.setState({activeOnly, query, searchOpen, statuses:[...statuses], ungroupedCollapsed}); }
 
-  const GLYPH={working:'🔵',input:'🟡',reviewing:'🟣',pr:'🔹',done:'🟢',stopped:'🔴'};   // editor tab name prefix (host side)
+  const GLYPH={working:'🔵',input:'🟡',limited:'⚠️',reviewing:'🟣',pr:'🔹',done:'🟢',stopped:'🔴'};   // editor tab name prefix (host side)
   const STATUS=[
     ['input','Your turn','bell-dot','var(--vscode-charts-yellow,#d2a000)'],
+    ['limited','Usage limit','warning','var(--vscode-charts-orange,#e8912d)'],
     ['working','Working','loading codicon-modifier-spin','var(--vscode-charts-blue,#4aa3ff)'],
     ['reviewing','Reviewing','eye','var(--vscode-charts-purple,#c586f0)'],
     ['pr','PR ready','git-pull-request','var(--vscode-charts-blue,#5cc8ff)'],
@@ -1458,10 +1460,12 @@ class DevSummaryProvider {
     ['stopped','Stopped','circle-large-outline','var(--vscode-descriptionForeground)'],
   ];
   const SMAP=Object.fromEntries(STATUS.map(s=>[s[0],s]));
-  const PRIO={input:0,reviewing:1,working:2,pr:3,done:4,stopped:5,'':6};
+  const PRIO={input:0,limited:0,reviewing:1,working:2,pr:3,done:4,stopped:5,'':6};
   function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
   function col(p){ return p>=90?'var(--vscode-charts-red,#e5534b)':p>=70?'var(--vscode-charts-yellow,#d2a000)':'var(--vscode-charts-green,#3fb950)'; }
   function rel(ts){ if(!ts) return ''; const s=ts-Math.floor(Date.now()/1000); if(s<=0) return 'resetting'; const h=Math.floor(s/3600),m=Math.floor((s%3600)/60); return h>0?(h+'h'+m+'m'):(m+'m'); }
+  function limTxt(ts){ if(!ts) return 'limit'; const s=ts-Math.floor(Date.now()/1000); if(s<=0) return 'limit · reset passed';
+    const d=new Date(ts*1000); return 'limit · resets '+(s>86400?d.toLocaleDateString([],{weekday:'short'})+' ':'')+d.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}); }
   function ago(ts){ if(!ts) return 0; return Math.max(0, Math.floor(Date.now()/1000)-ts); }
   function agoTxt(s){ const m=Math.floor(s/60); return m>=60?(Math.floor(m/60)+'h'+(m%60)+'m'):(m>0?(m+'m'):(s+'s')); }
   const ico=(name,extra)=>'<i class="codicon codicon-'+name+(extra?' '+extra:'')+'"></i>';
@@ -1541,11 +1545,13 @@ class DevSummaryProvider {
     const acct = (w.active && w.program==='codex') ? '<span class="badge" title="Codex session'+(acctName&&acctName!=='default'?' · account '+esc(acctName):'')+'">codex'+(acctName&&acctName!=='default'?' · '+esc(acctName):'')+'</span>'
       : (multiAcct && w.active && w.account && w.account!=='default') ? '<span class="badge" title="Claude account">'+esc(w.account)+'</span>' : '';
     const role = w.kind==='delegate' ? '<span class="badge" title="Delegator for '+esc(w.name)+': keeps its docs and research, and starts worktrees">delegator</span>' : '';
-    const tip = w.slug+'/'+w.name+' — '+s[1]+(w.active?' · live session':'')+(w.branch?' · '+w.branch:'')+(w.plan?'\\n'+w.plan:'')+'\\nclick to open';
+    const lim = w.status==='limited' ? limTxt(w.limitResetsAt) : '';
+    const tip = w.slug+'/'+w.name+' — '+s[1]+(lim?' · '+lim:'')+(w.active?' · live session':'')+(w.branch?' · '+w.branch:'')+(w.plan?'\\n'+w.plan:'')+'\\nclick to open';
     const drag = groupsData && canEditGroups;
     return '<div class="row wt'+(child?' child':'')+(w.active?' live':'')+(w.unread?' unread':'')+(w.current?' current':'')+'" data-id="'+esc(w.id||'')+'" data-slug="'+esc(w.slug)+'" data-name="'+esc(w.name)+'" data-glyph="'+g+'" title="'+esc(tip)+'"'+(drag?' draggable="true"':'')+'>'
       +'<span class="st" style="color:'+s[3]+'">'+ico(s[2])+'</span>'
       +'<span class="nm">'+esc(w.name)+'</span>'+(groupsData&&w.kind!=='delegate'?'<span class="rb" title="repository">'+esc(w.slug)+'</span>':'')+role+acct
+      +(lim?'<span class="badge" style="color:'+s[3]+'" title="'+esc(lim)+'">'+esc(lim.replace(/^limit · /,''))+'</span>':'')
       +(w.msgPending?'<i class="codicon codicon-comment-unresolved msgp" title="'+w.msgPending+' message'+(w.msgPending===1?'':'s')+' from this agent awaiting your approval — click to review"></i>':'')
       +'<span class="git">'+git+'</span>'
       +'<span class="acts">'
