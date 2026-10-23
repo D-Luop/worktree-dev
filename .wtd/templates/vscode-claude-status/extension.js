@@ -1204,7 +1204,7 @@ class DevSummaryProvider {
     }
   }
 
-  // daemon mode: rows straight from the pushed fleet state (no disk scan, no git, no registry reads)
+  // daemon mode: rows straight from the pushed fleet state (no git, no registry reads; only a stat of each .claude-ticket.md)
   _daemonRows() {
     const rows = []; const live = new Set();
     const pendingFrom = {};
@@ -1213,7 +1213,7 @@ class DevSummaryProvider {
       if (w.kind === 'dev') continue;   // the assistant has its own pinned row
       const slug = w.slug, name = w.name;
       rows.push({ id: w.id, group: w.group || null, parent: w.parent || null, slug, name, status: w.status === 'none' ? '' : w.status, dirty: !!(w.git && w.git.dirty), ahead: (w.git && w.git.ahead) || 0,
-                  branch: (w.git && w.git.branch) || '', plan: w.plan_title || '', account: w.account || '', live: !!w.live, kind: w.kind || '', program: w.program || '', msgPending: pendingFrom[w.id] || 0 });
+                  branch: (w.git && w.git.branch) || '', plan: w.plan_title || '', account: w.account || '', live: !!w.live, kind: w.kind || '', program: w.program || '', msgPending: pendingFrom[w.id] || 0, ticket: ticketOf(w.path) });
       if (w.live) live.add(slug + '-' + name);
     }
     return { rows, live };
@@ -1543,6 +1543,8 @@ class DevSummaryProvider {
     const role = w.kind==='delegate' ? '<span class="badge" title="Delegator for '+esc(w.name)+': keeps its docs and research, and starts worktrees">delegator</span>' : '';
     const tip = w.slug+'/'+w.name+' — '+s[1]+(w.active?' · live session':'')+(w.branch?' · '+w.branch:'')+(w.plan?'\\n'+w.plan:'')+'\\nclick to open';
     const drag = groupsData && canEditGroups;
+    const tk = w.ticket;
+    const tkIco = !tk ? 'link' : tk.kind==='issue' ? (tk.state==='CLOSED'?'issue-closed':'issue-opened') : (tk.state==='MERGED'?'git-merge':'git-pull-request');
     return '<div class="row wt'+(child?' child':'')+(w.active?' live':'')+(w.unread?' unread':'')+(w.current?' current':'')+'" data-id="'+esc(w.id||'')+'" data-slug="'+esc(w.slug)+'" data-name="'+esc(w.name)+'" data-glyph="'+g+'" title="'+esc(tip)+'"'+(drag?' draggable="true"':'')+'>'
       +'<span class="st" style="color:'+s[3]+'">'+ico(s[2])+'</span>'
       +'<span class="nm">'+esc(w.name)+'</span>'+(groupsData&&w.kind!=='delegate'?'<span class="rb" title="repository">'+esc(w.slug)+'</span>':'')+role+acct
@@ -1550,7 +1552,7 @@ class DevSummaryProvider {
       +'<span class="git">'+git+'</span>'
       +'<span class="acts">'
       +'<i class="codicon codicon-diff dif" title="Commits & diffs"></i>'
-      +'<i class="codicon codicon-issues tkt" title="Linked ticket (.claude-ticket.md)…"></i>'
+      +'<i class="codicon codicon-'+tkIco+' tkt" title="'+esc(tk?'#'+tk.n+' '+tk.title:'Link an issue or PR…')+'"></i>'
       +(groupsData&&canEditGroups?'<i class="codicon codicon-folder mv" title="Move to group…"></i>':'')
       +(w.active&&!w.unread?'<i class="codicon codicon-mail unr" title="Mark unread"></i>':'')
       +(multiAcct?'<i class="codicon codicon-arrow-swap acc" title="Continue on another account (Claude or Codex)…"></i>':'')
@@ -1710,6 +1712,25 @@ function wtdJson(args) {
       try { resolve(JSON.parse((so || '').trim().split('\n').pop() || 'null')); } catch (x) { reject(x); }
     });
   });
+}
+
+// what a worktree's .claude-ticket.md is about, from the header `wtd ticket sync` writes → {kind,n,title,state} | null
+const _tickets = new Map();
+function ticketOf(wtPath) {
+  if (!wtPath) return null;
+  const file = path.join(wtPath, '.claude-ticket.md');
+  let mtime; try { mtime = fs.statSync(file).mtimeMs; } catch { _tickets.delete(file); return null; }
+  const hit = _tickets.get(file);
+  if (hit && hit.mtime === mtime) return hit.t;
+  let t = null;
+  try {
+    const md = fs.readFileSync(file, 'utf8');
+    let m = md.match(/^# #(\d+) (.*)\r?\n\r?\n- Issue · \*\*(\w+)\*\*/);
+    if (m) t = { kind: 'issue', n: m[1], title: m[2], state: m[3] };
+    else if ((m = md.match(/^## Pull request #(\d+) — (.*)\r?\n\r?\n- (\w+) ·/m))) t = { kind: 'pr', n: m[1], title: m[2], state: m[3] };
+  } catch {}
+  _tickets.set(file, { mtime, t });
+  return t;
 }
 
 const BACK = Symbol('back');
