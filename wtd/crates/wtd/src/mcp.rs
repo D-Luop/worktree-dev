@@ -73,7 +73,7 @@ fn tools() -> Value {
     json!([
         {
             "name": "fleet_list",
-            "description": "List every WorkTreeDev worktree: other agents working in parallel on other branches/repos. Shows id (slug/name), status (working | input = waiting on the user | limited = hit a usage limit, waiting for limit_resets_at | reviewing | pr | done | stopped), whether a live agent session is attached, git state (branch, dirty, ahead/behind), and the title of its active plan. Your own worktree is marked self. Read-only.",
+            "description": "List every WorkTreeDev worktree: other agents working in parallel on other branches/repos. Shows id (slug/name), status (working | input = waiting on the user | limited = hit a usage limit, waiting for limit_resets_at | reviewing | pr | done | stopped), whether a live agent session is attached, git state (branch, dirty, ahead/behind), the title of its active plan, and its platform (windows | wsl:<distro>, with wsl_path inside the distro). Your own worktree is marked self. Read-only.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
             "annotations": { "readOnlyHint": true }
         },
@@ -141,7 +141,7 @@ fn call(dev: &Path, me: Option<&str>, name: &str, args: &Value) -> Result<String
                         "id": w.id, "self": me == Some(w.id.as_str()),
                         "kind": w.kind, "status": w.status.as_str(), "live": w.live,
                         "branch": w.git.branch, "dirty": w.git.dirty, "ahead": w.git.ahead, "behind": w.git.behind,
-                        "plan": w.plan_title, "path": w.path,
+                        "plan": w.plan_title, "path": w.path, "platform": w.platform, "wsl_path": w.wsl_path,
                     })
                 })
                 .collect();
@@ -218,6 +218,16 @@ fn list(dev: &Path) -> Result<Vec<Worktree>> {
     Ok(daemon::scan::scan(dev))
 }
 
+fn git_in(w: &Worktree, args: &[&str]) -> String {
+    match (w.platform.distro(), &w.wsl_path) {
+        (Some(d), Some(p)) => {
+            let argv: Vec<&str> = ["git", "--no-optional-locks"].into_iter().chain(args.iter().copied()).collect();
+            crate::wsl_backend::run(&crate::wsl_backend::exec_args(d, Some(p), &argv)).unwrap_or_default()
+        }
+        _ => git(&w.path, args),
+    }
+}
+
 fn git(dir: &str, args: &[&str]) -> String {
     let mut cmd = Command::new("git");
     cmd.arg("--no-optional-locks").args(args).current_dir(dir).stdin(Stdio::null()).stderr(Stdio::null());
@@ -238,14 +248,24 @@ fn get(w: &Worktree, me: Option<&str>) -> Result<String> {
     };
     push(
         &format!("{}{}", w.id, if me == Some(w.id.as_str()) { " (self)" } else { "" }),
-        &format!("status: {}\nlive session: {}\npath: {}", w.status.as_str(), w.live, w.path),
+        &format!(
+            "status: {}\nlive session: {}\nplatform: {}\npath: {}{}",
+            w.status.as_str(),
+            w.live,
+            w.platform,
+            w.path,
+            w.wsl_path.as_deref().map(|p| format!("\nwsl_path: {p}")).unwrap_or_default()
+        ),
     );
-    if w.id != DEV_ID {
-        let base = git(&w.path, &["rev-parse", "--abbrev-ref", "origin/HEAD"]);
-        push("Git", &git(&w.path, &["status", "--short", "--branch"]));
-        push("Recent commits", &git(&w.path, &["log", "-10", "--format=%h %ad %s", "--date=relative"]));
+    // a WSL worktree's git runs in its distro, and only while that's up (reading mustn't boot it)
+    let wsl_up = w.platform.distro().is_none_or(|d| crate::wsl_backend::running_cached().iter().any(|r| r.eq_ignore_ascii_case(d)));
+    if w.id != DEV_ID && wsl_up {
+        let git = |args: &[&str]| git_in(w, args);
+        let base = git(&["rev-parse", "--abbrev-ref", "origin/HEAD"]);
+        push("Git", &git(&["status", "--short", "--branch"]));
+        push("Recent commits", &git(&["log", "-10", "--format=%h %ad %s", "--date=relative"]));
         if !base.is_empty() {
-            push(&format!("Changed vs {base}"), &git(&w.path, &["diff", "--stat", &format!("{base}...HEAD")]));
+            push(&format!("Changed vs {base}"), &git(&["diff", "--stat", &format!("{base}...HEAD")]));
         }
     }
     let plan = std::fs::read_to_string(Path::new(&w.path).join(".claude").join("plans").join("active-plan.md")).unwrap_or_default();

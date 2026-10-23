@@ -13,14 +13,14 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use serde_json::json;
-use wtd_core::platform::Platform;
+use wtd_core::model::Platform;
 use wtd_core::protocol::method;
 use wtd_core::status::{apply, Event};
 
 use crate::client::Client;
 use crate::gitx::{self, s};
 use crate::wt::{self, session_key, session_name};
-use crate::{paths, statusfile};
+use crate::{paths, platforms, statusfile, wsl_backend};
 
 pub(crate) fn confirm(question: &str, default_yes: bool) -> bool {
     if !std::io::stdin().is_terminal() {
@@ -369,11 +369,16 @@ fn add_worktree(bare: &Path, slug: &str, name: &str, wtp: &Path, from: Option<&s
     gitx::run(&["-C", &bs, "worktree", "add", "--no-track", &ws, "-b", name, &base])
 }
 
+fn parse_platform(s: &str) -> Result<Platform> {
+    s.parse().map_err(|e: String| anyhow::anyhow!("--platform {e}"))
+}
+
 fn launch(dev: &Path, args: &[String]) -> Result<i32> {
     let (mut from, mut account, mut issue, mut ticket) = (None::<String>, None::<String>, None::<PathBuf>, None::<String>);
     let mut launch_agent = std::env::var_os("AGENT_NO_CLAUDE").is_none();
     let mut pmode = std::env::var("AGENT_PERMISSION_MODE").unwrap_or_else(|_| "auto".into());
-    let (mut detach, mut prompt, mut parent, mut platform) = (false, None::<String>, None::<String>, None::<String>);
+    let (mut detach, mut prompt, mut parent) = (false, None::<String>, None::<String>);
+    let mut platform = None::<Platform>;
     let mut pos: Vec<String> = vec![];
     let mut i = 0;
     while i < args.len() {
@@ -390,7 +395,8 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
             "--detach" => { detach = true; i += 1; }
             "--prompt" => { prompt = Some(val(i)?); i += 2; }
             "--parent" => { parent = Some(val(i)?); i += 2; }
-            "--platform" => { platform = Some(val(i)?); i += 2; }
+            "--platform" => { platform = Some(parse_platform(&val(i)?)?); i += 2; }
+            _ if a.starts_with("--platform=") => { platform = Some(parse_platform(&a[11..])?); i += 1; }
             "--prompt-file" => { prompt = Some(std::fs::read_to_string(paths::normalize(&val(i)?))?); i += 2; }
             _ if a.starts_with("--from=") => { from = Some(a[7..].into()); i += 1; }
             _ if a.starts_with("--account=") => { account = Some(a[10..].into()); i += 1; }
@@ -401,18 +407,15 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
     let ref_tokens = pos[2..].to_vec();
     let started_from = delegator_of(dev, std::env::var("WTD_WORKTREE").ok().as_deref(), &std::env::current_dir()?);
     let id = format!("{slug}/{name}");
-    let registered = crate::wsl_backend::find_any(dev, &id);
-    let target = match (platform.as_deref().map(str::parse::<Platform>).transpose().map_err(anyhow::Error::msg)?, &registered) {
-        (Some(Platform::Windows), Some(e)) => bail!("'{id}' is a WSL worktree (in '{}'); one branch can't also have a Windows worktree", e.distro),
-        (Some(p), _) => p,
-        (None, Some(e)) => e.platform(),
-        (None, None) => Platform::Windows,
-    };
-    if let Platform::Wsl(distro) = target {
-        let o = crate::wsl_backend::launch::Opts {
+    let platform = platforms::choose(platforms::existing_platform(dev, &id), platform, &id, || platforms::resolve_for(dev, &slug, None))?;
+    if let Platform::Wsl(distro) = &platform {
+        if paths::repo_less(&slug) {
+            bail!("planning agents and delegators run on Windows (drop --platform {platform})");
+        }
+        let o = wsl_backend::launch::Opts {
             slug, name, from, account, issue, ticket, launch_agent, pmode, detach, prompt, parent, ref_tokens, started_from,
         };
-        return crate::wsl_backend::launch::launch(dev, &distro, o);
+        return wsl_backend::launch::launch(dev, distro, o);
     }
     let is_delegate = slug == paths::DELEGATE;
     let repo_less = paths::repo_less(&slug);

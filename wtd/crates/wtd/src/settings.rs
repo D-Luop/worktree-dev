@@ -156,7 +156,7 @@ fn save_config(dev: &Path, cfg: &Value) -> Result<()> {
 
 // --- repos ------------------------------------------------------------------------------------------
 
-fn registry(dev: &Path) -> PathBuf {
+pub(crate) fn registry(dev: &Path) -> PathBuf {
     dev.join(".wtd").join("repos.tsv")
 }
 
@@ -166,7 +166,8 @@ pub fn registered(dev: &Path) -> Vec<(String, String)> {
         .lines()
         .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
         .filter_map(|l| {
-            let mut it = l.splitn(2, '\t');
+            // a 3rd column (a legacy per-repo platform) is read by `platforms::repo_default`
+            let mut it = l.split('\t');
             Some((it.next()?.trim().to_string(), it.next().unwrap_or("").trim().to_string()))
         })
         .filter(|(s, _)| !s.is_empty())
@@ -212,6 +213,8 @@ struct RepoInfo {
     github: Value,
     /// the PR guardrails in force for this repo (its own, else the defaults)
     guardrails: Value,
+    /// this repo's own default platform (`windows` | `wsl:<distro>`), overriding the global one
+    platform: Option<String>,
 }
 
 fn repo_list(dev: &Path) -> Vec<RepoInfo> {
@@ -231,6 +234,7 @@ fn repo_list(dev: &Path) -> Vec<RepoInfo> {
                 github_detected: github_repo_from_url(&r.url),
                 github: cfg.pointer(&format!("/repos/{slug}/github")).cloned().unwrap_or(Value::Null),
                 guardrails: crate::guard::effective(dev, &slug),
+                platform: crate::platforms::repo_default(dev, &cfg, &slug).map(|p| p.to_string()),
                 kind: r.kind,
                 path: r.path.to_string_lossy().to_string(),
                 slug,

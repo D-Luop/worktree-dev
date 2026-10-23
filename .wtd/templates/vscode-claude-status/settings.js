@@ -56,17 +56,19 @@ class SettingsPanel {
     });
   }
 
-  async reload() {
+  async reload(refreshPlatforms) {
     if (!this.panel) return;
-    const [repos, accounts, env, config, custom, update] = await Promise.all([
+    const [repos, accounts, env, config, custom, update, platforms, platformConfig] = await Promise.all([
       this.wtd(['repo', 'ls']).catch((e) => ({ error: e.message })),
       this.wtd(['account', 'ls']).catch((e) => ({ error: e.message })),
       this.wtd(['env']).catch((e) => ({ error: e.message })),
       this.wtd(['repo', 'config']).catch(() => ({})),
       this.wtd(['custom', 'ls']).catch(() => ({})),
       this.wtd(['update', 'status']).catch(() => null),
+      this.wtd(['platforms'].concat(refreshPlatforms ? ['--refresh'] : [])).catch(() => []),
+      this.wtd(['config', 'platform']).catch(() => ({})),
     ]);
-    this.post({ type: 'data', repos, accounts, env, config, custom, update, daemon: this._daemonState(), usage: this._usage() });
+    this.post({ type: 'data', repos, accounts, env, config, custom, update, platforms, platformConfig, daemon: this._daemonState(), usage: this._usage() });
   }
 
   terminal(name, env, command, why) {
@@ -103,6 +105,8 @@ class SettingsPanel {
         if (!ch) return done(false, { cancelled: true });
         return run(['repo', 'rm', m.slug].concat(ch === 'Remove + delete clone' ? ['--delete-clone'] : []));
       }
+      case 'platformSet': return run(['config', 'platform'].concat(m.repo ? ['--repo', m.repo] : [], [m.value || '--clear']));
+      case 'platformsRefresh': return this.reload(true);
       case 'repoSetGithub': return run(['repo', 'set-github', m.slug, JSON.stringify(m.github)]);
       case 'repoTest': return run(['repo', 'test-issues', m.slug], null, false);
       case 'projectFields': return run(['repo', 'project-fields', m.owner, String(m.number)], null, false);
@@ -291,6 +295,7 @@ function settingsHtml() {
     <a data-to="defaults"><i class="codicon codicon-settings"></i>Defaults</a>
     <a data-to="guardrails"><i class="codicon codicon-shield"></i>PR guardrails</a>
     <a data-to="custom"><i class="codicon codicon-extensions"></i>Customizations</a>
+    <a data-to="platforms"><i class="codicon codicon-vm"></i>Platforms</a>
     <a data-to="github"><i class="codicon codicon-github"></i>GitHub</a>
     <a data-to="daemon"><i class="codicon codicon-server-process"></i>Daemon &amp; tray</a>
     <a data-to="updates"><i class="codicon codicon-cloud-download"></i>Updates</a>
@@ -555,6 +560,35 @@ function settingsHtml() {
       + sel('assistant','Assistant','The fleet assistant session.',false);
   }
 
+  // ---------- Platforms ----------
+  function platformLabel(p){ return p.kind==='wsl'?'WSL · '+p.distro:'Windows'; }
+  function platformOptions(cur, first){
+    const list=Array.isArray(D.platforms)?D.platforms:[];
+    const opts=(first?[first]:[]).concat(list.map(p=>[p.id, platformLabel(p)+(p.ok?'':' — not ready')]));
+    if(cur && !opts.some(o=>o[0]===cur)) opts.push([cur, cur+' — not detected']);
+    return opts.map(([v,l])=>'<option value="'+esc(v)+'"'+(v===cur?' selected':'')+'>'+esc(l)+'</option>').join('');
+  }
+  function platformsSection(){
+    const list=Array.isArray(D.platforms)?D.platforms:[];
+    const pc=D.platformConfig||{}, global=pc.default_platform||'windows', own=pc.repos||{};
+    const repos=Array.isArray(D.repos)?D.repos:[];
+    const status=list.map(p=>'<div class="row"><label class="k">'+ico(p.kind==='wsl'?'terminal-linux':'window')+esc(platformLabel(p))+'</label><div class="v">'
+      + (p.ok?'<span class="chip ok">'+ico('pass')+'ready</span>':'<span class="chip warn">'+ico('warning')+'not ready</span>')
+      + (p.default_user?' <span class="muted">as '+esc(p.default_user)+'</span>':'')
+      + ' <span class="muted">'+['git','claude','codex'].map(t=>(p.tools&&p.tools[t]?'✓ ':'✗ ')+t).join(' · ')+'</span>'
+      + ((p.hints||[]).length?'<div class="help">'+p.hints.map(esc).join('<br>')+'</div>':'')+'</div></div>').join('');
+    return '<div class="card"><div class="hd"><div class="ico">'+ico('vm')+'</div><div class="main"><div class="name">Detected</div>'
+      + '<div class="sub">From <span class="mono">wtd platforms</span>: Windows plus each WSL distro, with the tools a session needs inside it.</div></div><div class="acts">'
+      + '<button class="icon" title="Detect again" data-act="platformsRefresh">'+ico('refresh')+'</button></div></div>'
+      + '<div class="body">'+(list.length?status:'<div class="empty">Couldn’t detect platforms.</div>')+'</div></div>'
+      + '<div class="card"><div class="hd"><div class="ico">'+ico('settings')+'</div><div class="main"><div class="name">Defaults for new worktrees</div>'
+      + '<div class="sub">New Session preselects: the repo’s default, else the global default, else Windows. An existing worktree keeps its platform.</div></div></div><div class="body">'
+      + '<div class="row"><label class="k">Global default</label><div class="v"><select data-act="platformSet">'+platformOptions(global)+'</select></div></div>'
+      + repos.map(r=>'<div class="row"><label class="k mono">'+esc(r.slug)+'</label><div class="v"><select data-act="platformSet" data-repo="'+esc(r.slug)+'">'
+          + platformOptions(own[r.slug]||'', ['', 'Global default ('+(global==='windows'?'Windows':global)+')'])+'</select></div></div>').join('')
+      + '</div></div>';
+  }
+
   // ---------- GitHub ----------
   function githubSection(){
     const g=D.env.github||{};
@@ -625,6 +659,7 @@ function settingsHtml() {
       + section('custom','extensions','Customizations','Presets for Claude and Codex (skills, subagents, commands, rules, tools, CLAUDE.md / AGENTS.md and hooks) for every worktree, one repo’s, or one platform’s. Kept in <span class="mono">.wtd/custom</span> (yours, not in git) and applied each time a session opens.', customSection())
       + section('accounts','account','Accounts','Claude and Codex logins. Usage and billing follow the account a session runs under.', accountsSection())
       + section('defaults','settings','Defaults','Which login each kind of work uses unless you choose otherwise.', defaultsSection())
+      + section('platforms','vm','Platforms','Run a worktree on Windows or inside a WSL distro (its own clone in the distro’s filesystem). Pick per session in New Session; set the defaults here.', platformsSection())
       + section('github','github','GitHub','Used to list issues and project items in New Session.', githubSection())
       + section('daemon','server-process','Daemon & tray','', daemonSection())
       + section('updates','cloud-download','Updates','', updatesSection());
@@ -653,6 +688,7 @@ function settingsHtml() {
   document.addEventListener('change', e=>{
     const t=e.target;
     if(t.dataset.act==='role') send({op:'roleSet', role:t.dataset.role, target:t.value});
+    else if(t.dataset.act==='platformSet') send({op:'platformSet', repo:t.dataset.repo||null, value:t.value});
     else if(t.dataset.act==='trayLogon') send({op:'trayLogon', on:t.checked});
     else if(t.dataset.act==='updAuto') send({op:'updConfig', flag:'--auto', value:t.checked?'on':'off'});
     else if(t.dataset.act==='updChannel') send({op:'updConfig', flag:'--channel', value:t.value});
@@ -680,7 +716,7 @@ function settingsHtml() {
     const n=e.target.closest('[data-to]'); if(n){ document.getElementById(n.dataset.to).scrollIntoView({behavior:'smooth'}); return; }
     const b=e.target.closest('[data-act]'); if(!b||b.disabled) return;
     const a=b.dataset.act, k=b.dataset.k;
-    if(a==='role'||a==='trayLogon'||a==='updAuto'||a==='updChannel'||a==='updLive'||a==='customAddRepo'||a==='customAddPlatform'||a==='customDisable') return;   // handled on change
+    if(a==='role'||a==='trayLogon'||a==='updAuto'||a==='updChannel'||a==='updLive'||a==='customAddRepo'||a==='customAddPlatform'||a==='customDisable'||a==='platformSet') return;   // handled on change
     if(a==='toggle'){ ui.open[k]=!ui.open[k]; render(); }
     else if(a==='kind'){ const f=ui.forms[k]; const v=b.dataset.v; const slug=k.slice(5); const r=D.repos.find(x=>x.slug===slug)||{};
       f.issueSource = v==='none'?null:(v==='repo'?{kind:'repo',repo:(f.repo||r.github_detected||''),labels:[],assignee:''}:{kind:'project'});
@@ -712,6 +748,7 @@ function settingsHtml() {
     else if(a==='updApply') send({op:'updApply'});
     else if(a==='reposDirPick') send({op:'reposDirPick'});
     else if(a==='reposDirClear') send({op:'reposDirClear'});
+    else if(a==='platformsRefresh') send({op:'platformsRefresh'});
     else if(a==='grSave'){ delete ui.results[k]; send({op:'guardSave', key:k, slug:b.dataset.slug, value:grValue(ui.forms[k])}); }
     else if(a==='grReset'){ delete ui.forms[k]; delete ui.results[k]; send({op:'guardSave', key:k, slug:b.dataset.slug, value:null}); }
     else if(a==='customOpen') send({op:'customOpen', repo:b.dataset.repo||null, platform:b.dataset.platform||null});
@@ -722,7 +759,7 @@ function settingsHtml() {
   });
 
   // nav highlight follows scroll
-  function spy(){ const ids=['repos','guardrails','custom','accounts','defaults','github','daemon','updates']; let cur=ids[0];
+  function spy(){ const ids=['repos','guardrails','custom','accounts','defaults','platforms','github','daemon','updates']; let cur=ids[0];
     for(const id of ids){ const s=document.getElementById(id); if(s && s.getBoundingClientRect().top<120) cur=id; }
     document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('on', a.dataset.to===cur)); }
   window.addEventListener('scroll', spy, {passive:true});

@@ -2,7 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::platform::Platform;
 use crate::status::Status;
 
 /// Id of the dev-base pseudo-worktree that hosts the fleet assistant.
@@ -21,6 +20,69 @@ pub enum WorktreeKind {
     Delegate,
     /// The dev base itself (the assistant session).
     Dev,
+}
+
+/// Where a worktree's files and processes live. Serialized as `windows` or `wsl:<distro>`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub enum Platform {
+    #[default]
+    Windows,
+    Wsl(String),
+}
+
+impl Platform {
+    pub fn distro(&self) -> Option<&str> {
+        match self {
+            Platform::Wsl(d) => Some(d),
+            Platform::Windows => None,
+        }
+    }
+
+    pub fn is_wsl(&self) -> bool {
+        matches!(self, Platform::Wsl(_))
+    }
+}
+
+impl std::fmt::Display for Platform {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Platform::Windows => f.write_str("windows"),
+            Platform::Wsl(d) => write!(f, "wsl:{d}"),
+        }
+    }
+}
+
+impl std::str::FromStr for Platform {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        let s = s.trim();
+        if s.eq_ignore_ascii_case("windows") {
+            return Ok(Platform::Windows);
+        }
+        match s.split_once(':') {
+            Some((k, d)) if k.eq_ignore_ascii_case("wsl") && valid_distro(d) => Ok(Platform::Wsl(d.to_string())),
+            Some((k, _)) if k.eq_ignore_ascii_case("wsl") => Err(format!("'{s}': bad WSL distro name")),
+            _ => Err(format!("unknown platform '{s}' (expected windows or wsl:<distro>)")),
+        }
+    }
+}
+
+/// Distro names as `wsl.exe --install`/`--import` accept them; anything else can't be passed safely.
+fn valid_distro(d: &str) -> bool {
+    !d.is_empty() && d.len() <= 64 && d.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+impl Serialize for Platform {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Platform {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        String::deserialize(d)?.parse().map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -72,8 +134,9 @@ pub struct Worktree {
     pub program: Option<String>,
     #[serde(default)]
     pub platform: Platform,
-    /// For a WSL worktree: its path inside the distro (`path` is then its `\\wsl.localhost\…` view).
-    #[serde(default)]
+    /// For a WSL worktree: its path inside the distro (`/home/<user>/dev/worktree-dev/worktrees/…`).
+    /// `path` is then the `\\wsl.localhost\…` view of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wsl_path: Option<String>,
 }
 
@@ -216,6 +279,40 @@ mod tests {
             assert_eq!(key_to_id(&id_to_key(id)), id);
         }
         assert_eq!(id_to_key("luop/feat/x"), "luop__feat__x");
+    }
+
+    #[test]
+    fn platform_parse_and_display() {
+        assert_eq!("windows".parse::<Platform>().unwrap(), Platform::Windows);
+        assert_eq!("Windows".parse::<Platform>().unwrap(), Platform::Windows);
+        assert_eq!("wsl:Ubuntu-24.04".parse::<Platform>().unwrap(), Platform::Wsl("Ubuntu-24.04".into()));
+        assert_eq!(" WSL:Debian ".parse::<Platform>().unwrap(), Platform::Wsl("Debian".into()));
+        for bad in ["", "wsl", "wsl:", "wsl:a b", "wsl:x;rm", "linux", "mac"] {
+            assert!(bad.parse::<Platform>().is_err(), "{bad} should be rejected");
+        }
+        for s in ["windows", "wsl:Ubuntu"] {
+            assert_eq!(s.parse::<Platform>().unwrap().to_string(), s);
+        }
+    }
+
+    #[test]
+    fn platform_serde() {
+        assert_eq!(serde_json::to_string(&Platform::Wsl("Ubuntu".into())).unwrap(), "\"wsl:Ubuntu\"");
+        assert_eq!(serde_json::from_str::<Platform>("\"windows\"").unwrap(), Platform::Windows);
+        assert!(serde_json::from_str::<Platform>("\"bogus\"").is_err());
+        // a worktree from an older daemon has no platform field
+        let w: Worktree = serde_json::from_value(serde_json::json!({
+            "id": "a/b", "kind": "repo", "slug": "a", "name": "b", "path": "p", "status": "working",
+            "live": false, "account": null, "git": {"known": false, "branch": null, "dirty": false, "ahead": 0, "behind": 0, "checked_at": 0},
+            "plan_title": null, "last_activity": 0
+        }))
+        .unwrap();
+        assert_eq!(w.platform, Platform::Windows);
+        assert_eq!(w.wsl_path, None);
+        let v = serde_json::to_value(Worktree { platform: Platform::Wsl("Ubuntu".into()), wsl_path: Some("/home/u/x".into()), ..Default::default() }).unwrap();
+        assert_eq!(v["platform"], "wsl:Ubuntu");
+        assert_eq!(v["wsl_path"], "/home/u/x");
+        assert_eq!(serde_json::to_value(Worktree::default()).unwrap()["platform"], "windows");
     }
 
     #[test]

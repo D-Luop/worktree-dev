@@ -21,7 +21,8 @@ pub fn scan(dev: &Path) -> Vec<Worktree> {
         };
         walk(dev, &slug.path(), &slug_name, "", kind, 0, &mut out);
     }
-    out.extend(wsl(dev));
+    let seen: std::collections::HashSet<String> = out.iter().map(|w| w.id.clone()).collect();
+    out.extend(wsl(dev).into_iter().filter(|w| !seen.contains(&w.id)));
     out
 }
 
@@ -130,7 +131,8 @@ mod tests {
         std::fs::create_dir_all(&mirror).unwrap();
         std::fs::write(mirror.join("r__feat__w"), "working").unwrap();
         let w = scan(&t).into_iter().find(|w| w.id == "r/feat/w").unwrap();
-        assert_eq!(w.platform, wtd_core::platform::Platform::Wsl(distro.into()));
+        assert_eq!((w.slug.as_str(), w.name.as_str(), w.kind), ("r", "feat/w", WorktreeKind::Repo));
+        assert_eq!(w.platform, wtd_core::model::Platform::Wsl(distro.into()));
         assert_eq!(w.status, wtd_core::status::Status::Working);
         assert_eq!(w.wsl_path.as_deref(), Some("/home/u/dev/worktree-dev/worktrees/r/feat/w"));
         assert!(w.path.starts_with(r"\\wsl.localhost\NoSuchDistro-wtd-test\home"), "{}", w.path);

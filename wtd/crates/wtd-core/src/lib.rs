@@ -2,6 +2,5 @@
 //! daemon wire protocol. No OS calls here, so a Linux build can reuse it unchanged.
 
 pub mod model;
-pub mod platform;
 pub mod protocol;
 pub mod status;

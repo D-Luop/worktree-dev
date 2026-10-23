@@ -75,14 +75,7 @@ pub fn session_env(base: Vec<(String, String)>, vars: &[(&str, String)]) -> Vec<
 
 // --- running things in a distro ------------------------------------------------------------------
 
-/// wsl.exe's own messages are UTF-16; output of the Linux command is UTF-8.
-pub fn decode(b: &[u8]) -> String {
-    if b.len() >= 2 && b.iter().skip(1).step_by(2).take(8).all(|c| *c == 0) {
-        let u: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        return String::from_utf16_lossy(&u).replace('\0', "");
-    }
-    String::from_utf8_lossy(b).to_string()
-}
+pub use crate::platforms::decode_wsl_output as decode;
 
 fn wsl(args: &[String]) -> Command {
     let mut c = Command::new(wsl_exe());
@@ -118,13 +111,9 @@ fn list(extra: &[&str]) -> Vec<String> {
     c.args(&args).stdin(Stdio::null()).stderr(Stdio::null());
     crate::win::no_window(&mut c);
     match c.output() {
-        Ok(o) if o.status.success() => parse_list(&decode(&o.stdout)),
+        Ok(o) if o.status.success() => crate::platforms::parse_distros(&o.stdout),
         _ => vec![],
     }
-}
-
-pub fn parse_list(text: &str) -> Vec<String> {
-    text.lines().map(|l| l.trim().trim_start_matches('\u{feff}')).filter(|l| !l.is_empty()).map(String::from).collect()
 }
 
 pub fn distros() -> Vec<String> {
@@ -240,8 +229,8 @@ impl Entry {
     pub fn unc(&self) -> PathBuf {
         path::unc(&self.distro, &self.wsl_path)
     }
-    pub fn platform(&self) -> wtd_core::platform::Platform {
-        wtd_core::platform::Platform::Wsl(self.distro.clone())
+    pub fn platform(&self) -> wtd_core::model::Platform {
+        wtd_core::model::Platform::Wsl(self.distro.clone())
     }
 }
 
@@ -403,14 +392,6 @@ mod tests {
         assert_eq!(get("WTD_WORKTREE"), ["r/feat/x"]);
         assert!(get("CLAUDE_CODE_CHILD_SESSION").is_empty() && get("CLAUDECODE").is_empty() && get("NOT_ALLOWED").is_empty());
         assert_eq!(get("SystemRoot"), ["win"]);
-    }
-
-    #[test]
-    fn decodes_both_encodings() {
-        let utf16: Vec<u8> = "Ubuntu\r\nDebian\r\n".encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
-        assert_eq!(parse_list(&decode(&utf16)), ["Ubuntu", "Debian"]);
-        assert_eq!(decode("héllo".as_bytes()), "héllo");
-        assert_eq!(parse_list("\u{feff}Ubuntu\n\n"), ["Ubuntu"]);
     }
 
     #[test]
