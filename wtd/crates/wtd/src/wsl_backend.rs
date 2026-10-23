@@ -1,6 +1,6 @@
 //! The WSL side of a worktree: its clone inside the distro and its hosted session. The boundary
-//! `agent --platform wsl:<distro>` calls through; `feat/wsl-backend` implements it (contract:
-//! docs/wsl-platform-contract.md). Until then every call fails with [`NOT_BUILT`].
+//! `agent --platform wsl:<distro>` calls through; `feat/wsl-backend` implements it (the WSL platform
+//! contract in the worktree-dev delegator docs). Until then every call fails with [`NOT_BUILT`].
 
 use std::path::Path;
 

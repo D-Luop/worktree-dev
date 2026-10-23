@@ -44,7 +44,7 @@ pub fn decode_wsl_output(b: &[u8]) -> String {
     let b = b.strip_prefix(&[0xFF, 0xFE]).unwrap_or(b);
     let looks_utf16 = b.len() >= 2 && b.iter().skip(1).step_by(2).filter(|&&c| c == 0).count() * 2 >= b.len() / 2;
     if looks_utf16 {
-        let units: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let units: Vec<u16> = b.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
         String::from_utf16_lossy(&units)
     } else {
         String::from_utf8_lossy(b).into_owned()
@@ -344,7 +344,6 @@ fn wsl_registry_path(dev: &Path) -> std::path::PathBuf {
     dev.join(".wtd").join("state").join("wsl-worktrees.json")
 }
 
-/// id → its WSL location.
 pub fn wsl_worktrees(dev: &Path) -> std::collections::BTreeMap<String, WslWorktree> {
     std::fs::read_to_string(wsl_registry_path(dev)).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
