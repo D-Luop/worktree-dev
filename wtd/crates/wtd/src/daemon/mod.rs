@@ -242,6 +242,10 @@ impl Daemon {
     }
 
     fn schedule_git(inner: &mut Inner, id: &str, debounced: bool) {
+        // Windows git through \\wsl.localhost is slow and unreliable; WSL rows need git via wsl.exe
+        if inner.worktrees.get(id).is_some_and(|w| w.platform.is_wsl()) {
+            return;
+        }
         let now = Instant::now();
         let e = inner.git_due.entry(id.to_string()).or_insert(GitDue { due: now, first: now });
         if debounced {
@@ -700,7 +704,7 @@ async fn rescan(d: &Arc<Daemon>) {
                 wt.last_activity = if wt.status != old.status { now() } else { old.last_activity };
             }
             None => {
-                if wt.id != DEV_ID {
+                if wt.id != DEV_ID && !wt.platform.is_wsl() {
                     Daemon::schedule_git(&mut inner, &wt.id, false);
                 }
             }
@@ -717,7 +721,7 @@ async fn rescan(d: &Arc<Daemon>) {
         d.remove(&mut inner, id);
     }
     messages::expire_orphans(d, &mut inner);
-    let want: Vec<(String, PathBuf)> = inner.worktrees.values().filter(|w| w.id != DEV_ID).map(|w| (w.id.clone(), PathBuf::from(&w.path))).collect();
+    let want: Vec<(String, PathBuf)> = inner.worktrees.values().filter(|w| w.id != DEV_ID && !w.platform.is_wsl()).map(|w| (w.id.clone(), PathBuf::from(&w.path))).collect();
     drop(inner);
     for id in &gone {
         d.unwatch(id);

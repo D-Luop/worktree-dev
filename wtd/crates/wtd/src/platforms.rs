@@ -243,10 +243,13 @@ pub fn resolve(explicit: Option<Platform>, repo: Option<Platform>, global: Optio
     explicit.or(repo).or(global).unwrap_or_default()
 }
 
+/// Planning agents and delegators always run on Windows: the defaults are for repo worktrees.
 pub fn resolve_for(dev: &Path, slug: &str, explicit: Option<Platform>) -> Platform {
+    if crate::paths::repo_less(slug) {
+        return explicit.unwrap_or_default();
+    }
     let cfg = crate::settings::load_config(dev);
-    let repo = if crate::paths::repo_less(slug) { None } else { repo_default(dev, &cfg, slug) };
-    resolve(explicit, repo, global_default(&cfg))
+    resolve(explicit, repo_default(dev, &cfg, slug), global_default(&cfg))
 }
 
 /// Copy legacy tsv platforms into config.json (an existing config value wins). True if any existed.
@@ -317,11 +320,71 @@ pub fn config_main(args: &[String]) -> Result<i32> {
         Some(p) => obj.insert(key.into(), json!(p.to_string())),
         None => obj.remove(key),
     };
+    if let (Some(slug), true) = (repo, obj.is_empty()) {
+        cfg["repos"].as_object_mut().map(|r| r.remove(slug));
+    }
     crate::settings::update_config(&dev, |c| *c = cfg)?;
     if migrated {
         strip_tsv_column(&dev)?;
     }
     crate::settings::out(show(&dev))
+}
+
+// --- WSL worktrees ----------------------------------------------------------------------------------
+
+/// A worktree living inside a distro. Windows worktrees are found by scanning `worktrees/`; these
+/// can't be (they're not on the Windows disk), so they're recorded when created.
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+pub struct WslWorktree {
+    pub platform: Platform,
+    pub wsl_path: String,
+}
+
+fn wsl_registry_path(dev: &Path) -> std::path::PathBuf {
+    dev.join(".wtd").join("state").join("wsl-worktrees.json")
+}
+
+/// id → its WSL location.
+pub fn wsl_worktrees(dev: &Path) -> std::collections::BTreeMap<String, WslWorktree> {
+    std::fs::read_to_string(wsl_registry_path(dev)).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+pub fn register_wsl(dev: &Path, id: &str, wt: Option<WslWorktree>) -> Result<()> {
+    let mut all = wsl_worktrees(dev);
+    match wt {
+        Some(w) => all.insert(id.to_string(), w),
+        None => all.remove(id),
+    };
+    let p = wsl_registry_path(dev);
+    std::fs::create_dir_all(p.parent().unwrap())?;
+    let tmp = p.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&all)? + "\n")?;
+    std::fs::rename(&tmp, &p)?;
+    Ok(())
+}
+
+/// The Windows view of a path inside a distro (read-only uses: status file, plan title).
+pub fn unc_path(distro: &str, wsl_path: &str) -> String {
+    format!(r"\\wsl.localhost\{distro}{}", wsl_path.replace('/', "\\"))
+}
+
+/// Which platform `id` already lives on, if it exists. One branch gets one worktree.
+pub fn existing_platform(dev: &Path, id: &str) -> Option<Platform> {
+    if crate::paths::worktree_path(dev, id).exists() {
+        return Some(Platform::Windows);
+    }
+    wsl_worktrees(dev).remove(id).map(|w| w.platform)
+}
+
+/// The platform `agent` opens `id` on: where it already is, else the resolved default.
+pub fn choose(existing: Option<Platform>, explicit: Option<Platform>, id: &str, resolved: impl FnOnce() -> Platform) -> Result<Platform> {
+    match (existing, explicit) {
+        (Some(e), Some(x)) if e != x => {
+            bail!("{id} already exists as a {e} worktree; a branch can have only one worktree (asked for {x}). Open it without --platform, or remove it first.")
+        }
+        (Some(e), _) => Ok(e),
+        (None, x) => Ok(x.unwrap_or_else(resolved)),
+    }
 }
 
 pub fn main(args: &[String]) -> Result<i32> {
@@ -412,7 +475,8 @@ mod tests {
         assert_eq!(repo_default(&t, &cfg, "api"), Some(Platform::Windows));
         assert_eq!(repo_default(&t, &cfg, "web"), None, "bad values in both places fall through");
         assert_eq!(resolve_for(&t, "web", None), Platform::Wsl("Debian".into()));
-        assert_eq!(resolve_for(&t, "plan", None), Platform::Wsl("Debian".into()));
+        assert_eq!(resolve_for(&t, "plan", None), Platform::Windows);
+        assert_eq!(resolve_for(&t, "delegate", None), Platform::Windows);
         assert_eq!(resolve_for(&t, "app", Some(Platform::Windows)), Platform::Windows);
         // the third column doesn't leak into the URL
         assert_eq!(crate::settings::registered(&t)[0], ("app".to_string(), "git@x:a.git".to_string()));
@@ -436,6 +500,33 @@ mod tests {
         assert_eq!(resolve_for(&old, "app", None), Platform::Windows);
         std::fs::remove_dir_all(&t).ok();
         std::fs::remove_dir_all(&old).ok();
+    }
+
+    #[test]
+    fn one_worktree_per_branch() {
+        let (w, u) = (Platform::Windows, Platform::Wsl("Ubuntu".into()));
+        let never = || -> Platform { panic!("existing worktrees don't consult the defaults") };
+        assert_eq!(choose(Some(u.clone()), None, "a/b", never).unwrap(), u);
+        assert_eq!(choose(Some(w.clone()), Some(w.clone()), "a/b", never).unwrap(), w);
+        let e = choose(Some(w.clone()), Some(u.clone()), "a/b", never).unwrap_err().to_string();
+        assert!(e.contains("already exists as a windows worktree") && e.contains("wsl:Ubuntu"), "{e}");
+        assert_eq!(choose(None, None, "a/b", || u.clone()).unwrap(), u);
+        assert_eq!(choose(None, Some(w.clone()), "a/b", || u.clone()).unwrap(), w);
+    }
+
+    #[test]
+    fn wsl_registry_roundtrip() {
+        let t = dev_root("registry", "", json!({}));
+        let u = WslWorktree { platform: Platform::Wsl("Ubuntu".into()), wsl_path: "/home/dev/dev/worktree-dev/worktrees/app/feat/x".into() };
+        register_wsl(&t, "app/feat/x", Some(u.clone())).unwrap();
+        assert_eq!(existing_platform(&t, "app/feat/x"), Some(u.platform.clone()));
+        assert_eq!(existing_platform(&t, "app/feat/y"), None);
+        std::fs::create_dir_all(crate::paths::worktree_path(&t, "app/feat/y")).unwrap();
+        assert_eq!(existing_platform(&t, "app/feat/y"), Some(Platform::Windows));
+        register_wsl(&t, "app/feat/x", None).unwrap();
+        assert!(wsl_worktrees(&t).is_empty());
+        assert_eq!(unc_path("Ubuntu", "/home/dev/x"), r"\\wsl.localhost\Ubuntu\home\dev\x");
+        std::fs::remove_dir_all(&t).ok();
     }
 
     #[test]

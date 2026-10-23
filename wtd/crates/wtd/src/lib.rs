@@ -36,6 +36,7 @@ pub mod tray;
 pub mod tui;
 pub mod updater;
 pub mod win;
+pub mod wsl_backend;
 pub mod wt;
 
 use anyhow::Result;
@@ -47,7 +48,7 @@ const USAGE: &str = "\
 wtd — WorkTreeDev fleet tool
 
 Worktrees & sessions (also on PATH as plain `agent`, `archive`, … via ~/.local/bin shims)
-  wtd agent <slug> <name> [--from ref] [--account a] [--issue-file md] [--no-claude] [ref…]
+  wtd agent <slug> <name> [--from ref] [--account a] [--issue-file md] [--no-claude] [--platform p] [ref…]
                                      create-or-open a worktree and its agent session
   wtd agent ls|stop|rm|done|pr|wip … manage worktrees (`wtd agent` for details)
   wtd new [<slug>] [--in terminal|zed]
