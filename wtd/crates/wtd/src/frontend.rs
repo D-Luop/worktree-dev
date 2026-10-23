@@ -71,6 +71,11 @@ pub fn open(dev: &Path, id: &str, f: Frontend) -> Result<()> {
                 bail!("{id} has no worktree yet — open it in VS Code or a terminal first");
             }
             let zed = zed_exe().ok_or_else(|| anyhow!("Zed not found (install it, or put its `zed` CLI on PATH)"))?;
+            if let Some(r) = crate::repos::find(dev, slug) {
+                let _ = crate::repos::prepare(dev, &r); // keeps .zed/tasks.json out of `git status`
+            }
+            ensure_zed_task(&wt, slug, name)?;
+            ensure_zed_key();
             win::no_window(Command::new(zed).arg(&wt)).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
         }
         Frontend::Terminal => {
@@ -84,6 +89,62 @@ pub fn open(dev: &Path, id: &str, f: Frontend) -> Result<()> {
         }
     }
     Ok(())
+}
+
+pub const ZED_TASK: &str = "WorkTreeDev: session";
+pub const ZED_KEY: &str = "alt-shift-w";
+
+/// Zed won't run anything when a folder opens, so the session is a task in the worktree's
+/// `.zed/tasks.json` (upserted by label, other tasks kept) that ZED_KEY spawns in Zed's terminal.
+pub fn ensure_zed_task(wt: &Path, slug: &str, name: &str) -> Result<()> {
+    let path = wt.join(".zed").join("tasks.json");
+    let mut tasks: Vec<Value> = match std::fs::read_to_string(&path) {
+        Ok(s) => match serde_json::from_str(&s) {
+            Ok(Value::Array(a)) => a,
+            _ => bail!("{} isn't plain JSON; not touching it", path.display()),
+        },
+        Err(_) => Vec::new(),
+    };
+    let task = serde_json::json!({
+        "label": ZED_TASK,
+        "command": paths::wtd_exe().to_string_lossy().replace('\\', "/"),
+        "args": ["agent", slug, name],
+        "use_new_terminal": false,
+        "allow_concurrent_runs": false,
+        "reveal": "always",
+        "hide": "never",
+        "tags": ["wtd"],
+    });
+    match tasks.iter_mut().find(|t| t["label"] == ZED_TASK) {
+        Some(t) if *t == task => return Ok(()),
+        Some(t) => *t = task,
+        None => tasks.push(task),
+    }
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    std::fs::write(&path, serde_json::to_string_pretty(&tasks)? + "\n")?;
+    Ok(())
+}
+
+/// Bind ZED_KEY to the session task in Zed's user keymap, unless it's already bound or the keymap
+/// has comments (JSONC we can't rewrite without losing them).
+fn ensure_zed_key() {
+    let Some(p) = std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("Zed").join("keymap.json")) else { return };
+    let mut map: Vec<Value> = match std::fs::read_to_string(&p) {
+        Ok(s) if s.trim().is_empty() => Vec::new(),
+        Ok(s) => match serde_json::from_str(&s) {
+            Ok(Value::Array(a)) => a,
+            _ => return,
+        },
+        Err(_) => Vec::new(),
+    };
+    if map.iter().any(|b| b["bindings"].get(ZED_KEY).is_some()) {
+        return;
+    }
+    map.push(serde_json::json!({ "bindings": { ZED_KEY: ["task::Spawn", { "task_name": ZED_TASK }] } }));
+    if let (Some(dir), Ok(text)) = (p.parent(), serde_json::to_string_pretty(&map)) {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = std::fs::write(&p, text + "\n");
+    }
 }
 
 fn zed_exe() -> Option<PathBuf> {
@@ -134,6 +195,23 @@ mod tests {
     #[test]
     fn pct_encodes_slashes_and_spaces() {
         assert_eq!(pct("feat/big changes"), "feat%2Fbig%20changes");
+    }
+
+    #[test]
+    fn zed_task_upserts_and_keeps_other_tasks() {
+        let wt = std::env::temp_dir().join(format!("wtd-zed-{}", std::process::id()));
+        let tasks = wt.join(".zed").join("tasks.json");
+        std::fs::create_dir_all(tasks.parent().unwrap()).unwrap();
+        std::fs::write(&tasks, r#"[{"label":"theirs","command":"make"}]"#).unwrap();
+        ensure_zed_task(&wt, "luop", "feat/x").unwrap();
+        ensure_zed_task(&wt, "luop", "feat/x").unwrap();
+        let v: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(&tasks).unwrap()).unwrap();
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[1]["label"], ZED_TASK);
+        assert_eq!(v[1]["args"], serde_json::json!(["agent", "luop", "feat/x"]));
+        std::fs::write(&tasks, "// comment\n[]").unwrap();
+        assert!(ensure_zed_task(&wt, "luop", "feat/x").is_err());
+        let _ = std::fs::remove_dir_all(&wt);
     }
 
     #[test]
