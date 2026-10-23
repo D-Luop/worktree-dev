@@ -543,6 +543,9 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
         println!("worktree ready: {}", wtp.display());
         return Ok(0);
     }
+    if let Some(w) = acct.codex_home.as_deref().and_then(crate::codex::version_skew) {
+        eprintln!("{w}");
+    }
     if acct.label != "default" {
         println!("session '{session}' → account '{}'", acct.label);
     }
