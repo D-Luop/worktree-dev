@@ -10,7 +10,7 @@ const layerArgs = (m) => (m.repo ? ['--repo', m.repo] : []).concat(m.platform ? 
 const layerName = (m) => (m.repo ? 'every ' + m.repo + ' worktree' : 'every worktree') + (m.platform ? ' on ' + m.platform : '');
 
 class SettingsPanel {
-  // deps: { vscode, wtdExe(), media (Uri), daemon (DaemonClient|null), daemonInstalled(), toggleDaemon(want), log(msg) }
+  // deps: { vscode, wtdExe(), media (Uri), daemon (DaemonClient|null), daemonInstalled(), toggleDaemon(want), restartToUpdate(), log(msg) }
   constructor(deps) { this.d = deps; this.panel = null; this._logins = new Map(); }
 
   open() {
@@ -32,7 +32,7 @@ class SettingsPanel {
   post(m) { if (this.panel) this.panel.webview.postMessage(m); }
 
   // a daemon push (accounts/daemon state) → keep the page current while it's open
-  onDaemonChange() { if (this.panel) this.post({ type: 'live', daemon: this._daemonState(), usage: this._usage() }); }
+  onDaemonChange() { if (this.panel) this.post({ type: 'live', daemon: this._daemonState(), usage: this._usage(), update: this.d.daemon && this.d.daemon.update }); }
 
   _daemonState() { return { installed: this.d.daemonInstalled(), running: !!(this.d.daemon && this.d.daemon.running) }; }
   _usage() { return (this.d.daemon && this.d.daemon.accounts) || []; }
@@ -58,14 +58,15 @@ class SettingsPanel {
 
   async reload() {
     if (!this.panel) return;
-    const [repos, accounts, env, config, custom] = await Promise.all([
+    const [repos, accounts, env, config, custom, update] = await Promise.all([
       this.wtd(['repo', 'ls']).catch((e) => ({ error: e.message })),
       this.wtd(['account', 'ls']).catch((e) => ({ error: e.message })),
       this.wtd(['env']).catch((e) => ({ error: e.message })),
       this.wtd(['repo', 'config']).catch(() => ({})),
       this.wtd(['custom', 'ls']).catch(() => ({})),
+      this.wtd(['update', 'status']).catch(() => null),
     ]);
-    this.post({ type: 'data', repos, accounts, env, config, custom, daemon: this._daemonState(), usage: this._usage() });
+    this.post({ type: 'data', repos, accounts, env, config, custom, update, daemon: this._daemonState(), usage: this._usage() });
   }
 
   terminal(name, env, command, why) {
@@ -181,6 +182,11 @@ class SettingsPanel {
       case 'daemonToggle': this.d.toggleDaemon(m.want); return;
       case 'trayLogon': return run(['tray', '--logon', m.on ? 'on' : 'off']);
       case 'traySpawn': return run(['tray', '--spawn'], null, false);
+
+      // --- updates ---
+      case 'updConfig': return run(['update', 'config', m.flag, m.value]);
+      case 'updCheck': return run(['update']);
+      case 'updApply': this.d.restartToUpdate(); return;
     }
   }
 
@@ -287,6 +293,7 @@ function settingsHtml() {
     <a data-to="custom"><i class="codicon codicon-extensions"></i>Customizations</a>
     <a data-to="github"><i class="codicon codicon-github"></i>GitHub</a>
     <a data-to="daemon"><i class="codicon codicon-server-process"></i>Daemon &amp; tray</a>
+    <a data-to="updates"><i class="codicon codicon-cloud-download"></i>Updates</a>
   </nav>
   <main id="main"><div class="empty"><i class="codicon codicon-loading spin"></i> Loading…</div></main>
 </div>
@@ -577,6 +584,34 @@ function settingsHtml() {
       + '<div class="help">Only the icon starts — not the daemon. New icons land in the taskbar’s ^ overflow; drag it onto the taskbar to keep it visible.</div></div></div>';
   }
 
+  // ---------- Updates ----------
+  function updatesSection(){
+    const u=D.update;
+    if(!u) return '<div class="empty">Update status unavailable.</div>';
+    const v=esc(u.version||'?');
+    if(u.mode==='dev') return '<div class="card"><div class="hd"><div class="ico">'+ico('beaker')+'</div><div class="main"><div class="name">Dev build '+v+'</div>'
+      + '<div class="sub">This is a source checkout, so automatic updates are off. Update it with git and <span class="mono">install.sh</span>.</div></div></div></div>';
+    const s=u.settings||{}, p=u.progress, pct=p&&p.total?Math.floor(p.done*100/p.total):null;
+    const state = u.phase==='applying' ? 'Updating to '+esc(u.staged||u.latest||'')+'…'
+      : u.staged ? esc(u.staged)+' is ready to install'+(u.hosted_sessions?' — '+u.hosted_sessions+' live session'+(u.hosted_sessions===1?'':'s')+' in the daemon would end':'')
+      : u.phase==='downloading' ? 'Downloading '+esc(u.latest||'')+(pct!=null?' — '+pct+'%':'')
+      : u.phase==='checking' ? 'Checking…'
+      : u.error ? 'Last check failed: '+esc(u.error)
+      : 'Up to date'+(u.last_check?' · checked '+new Date(u.last_check*1000).toLocaleString():'');
+    const opt=(cur,list)=>list.map(([k,l])=>'<option value="'+k+'"'+(cur===k?' selected':'')+'>'+l+'</option>').join('');
+    return '<div class="card"><div class="hd"><div class="ico">'+ico('cloud-download')+'</div><div class="main"><div class="name">WorkTreeDev '+v+'</div>'
+      + '<div class="sub">'+state+'</div></div><div class="acts">'
+      + (u.staged&&u.phase!=='applying'?'<button class="primary" data-act="updApply">'+ico('debug-restart')+'Restart to update</button>':'')
+      + '<button class="secondary" data-act="updCheck"'+(u.phase==='checking'||u.phase==='downloading'?' disabled':'')+'>'+ico('refresh')+'Check now</button></div></div>'
+      + '<div class="body"><label class="toggle"><input type="checkbox" data-act="updAuto"'+(s.auto!==false?' checked':'')+'> Update automatically</label>'
+      + '<div class="help">Checks every 6 hours, downloads in the background, and installs when no agent session is running in the daemon (or at the next sign-in). The previous version is kept and restored if the new one doesn’t start.</div>'
+      + '<div class="row"><label class="k">Channel</label><div class="v"><select data-act="updChannel">'+opt(s.channel,[['stable','Stable'],['beta','Beta (prereleases)']])+'</select></div></div>'
+      + '<div class="row"><label class="k">While sessions are live</label><div class="v"><select data-act="updLive">'
+      + opt(s.restartWithLiveSessions,[['never','Wait until they end'],['ask','Ask me (Restart to update)'],['auto','Restart anyway']])+'</select></div></div>'
+      + ((u.failed||[]).length?'<div class="help">Skipped (failed to start, rolled back): '+u.failed.map(esc).join(', ')+'</div>':'')
+      + '</div></div>';
+  }
+
   function section(id,icon,title,lead,body){ return '<section id="'+id+'"><h2>'+ico(icon)+title+'</h2>'+(lead?'<p class="lead">'+lead+'</p>':'')+body+'</section>'; }
   function render(){
     if(!D) return;
@@ -591,7 +626,8 @@ function settingsHtml() {
       + section('accounts','account','Accounts','Claude and Codex logins. Usage and billing follow the account a session runs under.', accountsSection())
       + section('defaults','settings','Defaults','Which login each kind of work uses unless you choose otherwise.', defaultsSection())
       + section('github','github','GitHub','Used to list issues and project items in New Session.', githubSection())
-      + section('daemon','server-process','Daemon & tray','', daemonSection());
+      + section('daemon','server-process','Daemon & tray','', daemonSection())
+      + section('updates','cloud-download','Updates','', updatesSection());
     document.scrollingElement.scrollTop=scroll;
     if(focusId){ const el=document.getElementById(focusId); if(el){ el.focus(); if(el.setSelectionRange) el.setSelectionRange(el.value.length, el.value.length); } }
     spy();
@@ -618,6 +654,9 @@ function settingsHtml() {
     const t=e.target;
     if(t.dataset.act==='role') send({op:'roleSet', role:t.dataset.role, target:t.value});
     else if(t.dataset.act==='trayLogon') send({op:'trayLogon', on:t.checked});
+    else if(t.dataset.act==='updAuto') send({op:'updConfig', flag:'--auto', value:t.checked?'on':'off'});
+    else if(t.dataset.act==='updChannel') send({op:'updConfig', flag:'--channel', value:t.value});
+    else if(t.dataset.act==='updLive') send({op:'updConfig', flag:'--live', value:t.value});
     else if(t.dataset.act==='customAddRepo' && t.value) send({op:'customEdit', file:'CLAUDE.md', repo:t.value});
     else if(t.dataset.act==='customAddPlatform' && t.value) send({op:'customEdit', file:'CLAUDE.md', repo:t.dataset.repo||null, platform:t.value});
     else if(t.dataset.act==='customDisable' && t.value) send({op:'customToggle', on:false, item:t.value, repo:t.dataset.repo||null, platform:t.dataset.platform||null});
@@ -641,7 +680,7 @@ function settingsHtml() {
     const n=e.target.closest('[data-to]'); if(n){ document.getElementById(n.dataset.to).scrollIntoView({behavior:'smooth'}); return; }
     const b=e.target.closest('[data-act]'); if(!b||b.disabled) return;
     const a=b.dataset.act, k=b.dataset.k;
-    if(a==='role'||a==='trayLogon'||a==='customAddRepo'||a==='customAddPlatform'||a==='customDisable') return;   // handled on change
+    if(a==='role'||a==='trayLogon'||a==='updAuto'||a==='updChannel'||a==='updLive'||a==='customAddRepo'||a==='customAddPlatform'||a==='customDisable') return;   // handled on change
     if(a==='toggle'){ ui.open[k]=!ui.open[k]; render(); }
     else if(a==='kind'){ const f=ui.forms[k]; const v=b.dataset.v; const slug=k.slice(5); const r=D.repos.find(x=>x.slug===slug)||{};
       f.issueSource = v==='none'?null:(v==='repo'?{kind:'repo',repo:(f.repo||r.github_detected||''),labels:[],assignee:''}:{kind:'project'});
@@ -669,6 +708,8 @@ function settingsHtml() {
     else if(a==='reload') send({op:'reload'});
     else if(a==='daemon') send({op:'daemonToggle', want:b.dataset.v==='1'});
     else if(a==='traySpawn') send({op:'traySpawn'});
+    else if(a==='updCheck') send({op:'updCheck'});
+    else if(a==='updApply') send({op:'updApply'});
     else if(a==='reposDirPick') send({op:'reposDirPick'});
     else if(a==='reposDirClear') send({op:'reposDirClear'});
     else if(a==='grSave'){ delete ui.results[k]; send({op:'guardSave', key:k, slug:b.dataset.slug, value:grValue(ui.forms[k])}); }
@@ -681,7 +722,7 @@ function settingsHtml() {
   });
 
   // nav highlight follows scroll
-  function spy(){ const ids=['repos','guardrails','custom','accounts','defaults','github','daemon']; let cur=ids[0];
+  function spy(){ const ids=['repos','guardrails','custom','accounts','defaults','github','daemon','updates']; let cur=ids[0];
     for(const id of ids){ const s=document.getElementById(id); if(s && s.getBoundingClientRect().top<120) cur=id; }
     document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('on', a.dataset.to===cur)); }
   window.addEventListener('scroll', spy, {passive:true});
@@ -692,7 +733,7 @@ function settingsHtml() {
       // fresh server state for collapsed cards; an open form keeps its unsaved edits across reloads
       Object.keys(ui.forms).forEach(k=>{ if((k.startsWith('repo:') && k!=='repo:+' || k.startsWith('gr:')) && !ui.open[k]) delete ui.forms[k]; });
       render(); }
-    else if(m.type==='live'){ if(D){ D.daemon=m.daemon; D.usage=m.usage; render(); } }
+    else if(m.type==='live'){ if(D){ D.daemon=m.daemon; D.usage=m.usage; if(m.update) D.update=m.update; render(); } }
     else if(m.type==='log'){ (ui.logs[m.key]=ui.logs[m.key]||[]).push(m.line); if(ui.logs[m.key].length>200) ui.logs[m.key].shift();
       render(); }
     else if(m.type==='done'){

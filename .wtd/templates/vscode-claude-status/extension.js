@@ -179,6 +179,7 @@ class DaemonClient {
     this.metrics = null;
     this.groups = [];     // user-defined roster groups, in display order
     this.messages = [];   // agent messages still in flight (pending approval / queued)
+    this.update = null;   // `wtd update status` (installed builds: available / staged / applied)
     this._sock = null; this._buf = ''; this._pending = new Map(); this._next = 1; this._retry = null; this._stopped = false;
   }
   start() { this._stopped = false; this._connect(); }
@@ -193,6 +194,7 @@ class DaemonClient {
       this.running = true;
       this._send('hello', { client: 'vscode', protocol: 1 });
       this._send('subscribe', { metrics: true });
+      this.request('update.status').then((u) => { this.update = u; this.onChange('update'); }).catch(() => {});   // an older daemon has no updater
       this.onChange('daemon');
     });
     s.on('data', (d) => {
@@ -259,6 +261,7 @@ class DaemonClient {
       case 'metrics': this.metrics = m.metrics; this.onChange('metrics'); break;
       case 'groups': this.groups = m.groups || []; this.onChange('fleet'); break;
       case 'messages': this.messages = m.messages || []; this.onChange('messages'); break;
+      case 'update': this.update = m.update; this.onChange('update'); break;
       case 'shutdown': break;   // the pipe closes next → 'daemon' change
     }
   }
@@ -954,6 +957,10 @@ class DevSummaryProvider {
         if (this._postAll) this._postAll();
       } else if (m.cmd === 'jsError') {
         _dbg('webview script error: ' + m.msg);
+      } else if (m.cmd === 'restartToUpdate') {
+        this.restartToUpdate();
+      } else if (m.cmd === 'reloadWindow') {
+        vscode.commands.executeCommand('workbench.action.reloadWindow');
       } else if (m.cmd === 'open' && m.slug && m.name) {
         this.openOrFocus(m.slug, m.name, m.glyph);   // focus an existing tab instead of duplicating
       } else if (m.cmd === 'markunread' && m.slug && m.name) {
@@ -1069,7 +1076,8 @@ class DevSummaryProvider {
     };
     const postAll = () => { safe('daemon', () => this._postDaemon()); safe('limits', () => this._postLimits());
       safe('roster', () => this._postRoster());
-      safe('monitor', () => this._postMonitor()); safe('tests', () => this._postTests()); safe('bell', () => this._postBell()); };
+      safe('monitor', () => this._postMonitor()); safe('tests', () => this._postTests()); safe('bell', () => this._postBell());
+      safe('update', () => this._postUpdate()); };
     this._postAll = postAll;   // re-run on the webview's 'ready' handshake (initial posts can beat the script)
     postAll();
     // usage is polled by the daemon; re-post every 60s so the 'stale' age marker advances.
@@ -1239,6 +1247,59 @@ class DevSummaryProvider {
     this.view.webview.postMessage({ type: 'daemon', installed: daemonInstalled(), running: !!(this.daemon && this.daemon.running), busy: !!this._daemonBusy });
   }
 
+  // --- auto-update (installed builds): the panel banner, a toast when it needs the user, Reload window ---
+  _updateView() {
+    const u = this.daemon && this.daemon.update;
+    if (!u || u.mode !== 'installed') return null;
+    const a = u.last_apply;
+    // the daemon already runs the new build, but this window still has the old extension loaded
+    if (a && a.ok && a.vsix_changed && a.to === u.version && this._extVersion && this._extVersion !== a.to) return { kind: 'reload', version: a.to };
+    if (u.phase === 'applying') return { kind: 'applying', version: u.staged || u.latest };
+    if (u.staged) return { kind: 'ready', version: u.staged, hosted: u.hosted_sessions || 0, policy: u.settings && u.settings.restartWithLiveSessions };
+    if (u.phase === 'downloading') { const p = u.progress; return { kind: 'downloading', version: u.latest, pct: p && p.total ? Math.floor(p.done * 100 / p.total) : null }; }
+    return null;
+  }
+
+  _postUpdate() {
+    if (!this.view || !this.view.visible) return;
+    this.view.webview.postMessage({ type: 'update', u: this._updateView() });
+  }
+
+  _onUpdate() {
+    const v = this._updateView();
+    const u = this.daemon && this.daemon.update;
+    const a = u && u.last_apply;
+    // a build that failed its health check was rolled back: say so once (per machine)
+    if (a && !a.ok && (u.failed || []).includes(a.to) && this._state && this._state.get('wtd.rolledBack') !== a.to + '@' + a.at) {
+      this._state.update('wtd.rolledBack', a.to + '@' + a.at);
+      vscode.window.showWarningMessage('WorkTreeDev ' + a.to + ' didn’t start and was rolled back to ' + a.from + '. It won’t be retried.');
+    }
+    if (!v) return;
+    this._toasted = this._toasted || new Set();
+    const key = v.kind + ':' + v.version;
+    if (this._toasted.has(key)) return;
+    if (v.kind === 'reload') {
+      this._toasted.add(key);
+      vscode.window.showInformationMessage('WorkTreeDev updated to ' + v.version + ' — reload the window to load the new extension.', 'Reload window')
+        .then((c) => { if (c) vscode.commands.executeCommand('workbench.action.reloadWindow'); });
+    } else if (v.kind === 'ready' && v.hosted > 0 && v.policy !== 'auto') {
+      this._toasted.add(key);
+      vscode.window.showInformationMessage('WorkTreeDev ' + v.version + ' is ready. ' + (v.policy === 'never'
+        ? 'It installs once no agent session is running in the daemon.' : 'Restarting to update ends the agent sessions running in the daemon.'), 'Restart to update')
+        .then((c) => { if (c) this.restartToUpdate(); });
+    }
+  }
+
+  restartToUpdate() {
+    const u = this.daemon && this.daemon.update;
+    const hosted = (u && u.hosted_sessions) || 0;
+    const go = () => this.daemon.request('update.apply', { force: true }).catch((e) => vscode.window.showErrorMessage('Couldn’t start the update: ' + e.message));
+    if (!hosted) return go();
+    vscode.window.showWarningMessage('Restart to update?', { modal: true,
+      detail: hosted + ' agent session' + (hosted === 1 ? ' is' : 's are') + ' running in the daemon and will end. Their conversations can be resumed by reopening the worktrees.' }, 'Restart and end sessions')
+      .then((c) => { if (c) go(); });
+  }
+
   // Start/Stop toggle (panel button, palette commands). The daemon never auto-starts.
   toggleDaemon(want) {
     const running = !!(this.daemon && this.daemon.running);
@@ -1337,6 +1398,9 @@ class DevSummaryProvider {
   .daemonOff{display:flex;align-items:center;gap:8px;margin:2px 0 6px;padding:6px 8px;border-radius:4px;
              background:var(--vscode-inputValidation-warningBackground,rgba(210,160,0,.12));border:1px solid var(--vscode-inputValidation-warningBorder,transparent);}
   .daemonOff .msg{flex:1;color:var(--vscode-foreground);}
+  .updBanner{display:flex;align-items:center;gap:8px;margin:2px 0 6px;padding:6px 8px;border-radius:4px;
+             background:var(--vscode-inputValidation-infoBackground,rgba(0,122,204,.12));border:1px solid var(--vscode-inputValidation-infoBorder,transparent);}
+  .updBanner .msg{flex:1;color:var(--vscode-foreground);}
   #roster.dim .row.wt{opacity:.55;}
   .row{position:relative;display:flex;align-items:center;gap:6px;height:22px;padding:0 4px 0 6px;border-radius:3px;cursor:pointer;font-size:13px;}
   .row:hover{background:var(--vscode-list-hoverBackground);}
@@ -1403,6 +1467,7 @@ class DevSummaryProvider {
 </div>
 <div id="searchRow"><input id="q" type="text" placeholder="Search worktrees" spellcheck="false"></div>
 <div id="daemonOff"></div>
+<div id="updBanner"></div>
 <div class="pins" id="pins"></div>
 <div id="roster"></div>
 <div id="monwrap">
@@ -1659,9 +1724,22 @@ class DevSummaryProvider {
   document.getElementById('settings').onclick=()=>vsc.postMessage({cmd:'settings'});
   document.getElementById('add').onclick=()=>vsc.postMessage({cmd:'newAgent'});
 
+  let upd=null;
+  function renderUpd(){
+    const el=document.getElementById('updBanner'), u=upd;
+    if(!u){ el.innerHTML=''; return; }
+    const v=esc(u.version||'');
+    const txt={reload:'WorkTreeDev updated to '+v+' — reload to load the new extension.', ready:'WorkTreeDev '+v+' is ready to install.',
+      applying:'Updating to '+v+'…', downloading:'Downloading WorkTreeDev '+v+(u.pct!=null?' — '+u.pct+'%':'')+'…'}[u.kind]||'';
+    const btn=u.kind==='reload'?'<button class="tb primary" id="updBtn">'+ico('refresh')+'<span class="t">Reload window</span></button>'
+      :u.kind==='ready'?'<button class="tb primary" id="updBtn">'+ico('debug-restart')+'<span class="t">Restart to update</span></button>':'';
+    el.innerHTML='<div class="updBanner">'+ico(u.kind==='applying'||u.kind==='downloading'?'sync':'cloud-download')+'<span class="msg">'+txt+'</span>'+btn+'</div>';
+    const b=document.getElementById('updBtn'); if(b) b.onclick=()=>vsc.postMessage({cmd:u.kind==='reload'?'reloadWindow':'restartToUpdate'});
+  }
   window.addEventListener('message', e => {
     const m=e.data; if(!m) return;
-    if(m.type==='limits'){ accts=m.accounts||[]; renderLim(); }
+    if(m.type==='update'){ upd=m.u; renderUpd(); }
+    else if(m.type==='limits'){ accts=m.accounts||[]; renderLim(); }
     else if(m.type==='roster'){ ros=m.rows||[]; asstState=m.assistant||{}; termState=m.terminal||{}; multiAcct=!!m.multiAccount;
       groupsData=m.groups||null; canEditGroups=!!m.canEditGroups; renderRoster(); }
     else if(m.type==='monitor'){ mon=m.m; renderMonitor(); }
@@ -1953,6 +2031,8 @@ function activate(context) {
 
   const dev = new DevSummaryProvider();
   dev._extUri = context.extensionUri;
+  dev._extVersion = context.extension && context.extension.packageJSON && context.extension.packageJSON.version;
+  dev._state = context.globalState;
 
   // v2 daemon: one pipe subscription replaces the panel's scanning, polling and process spawning.
   // Pushes are coalesced per kind so a burst of agent activity costs one repaint.
@@ -1967,6 +2047,7 @@ function activate(context) {
       if (kinds.has('fleet') || kinds.has('daemon')) dev._postRoster();
       if (kinds.has('accounts')) dev._postLimits();
       if (kinds.has('metrics')) dev._postMonitor();
+      if (kinds.has('update')) dev._postUpdate();
     }, 150);
   };
   let settings = null;
@@ -1981,12 +2062,14 @@ function activate(context) {
     if (settings && (kind === 'daemon' || kind === 'accounts')) settings.onDaemonChange();
     if (kind === 'release' && wt) { dev.releaseWorktree(wt).catch(() => {}); return; }
     if (kind === 'messages') { dev._onMessages(); kick('fleet'); }
+    if (kind === 'update') { dev._onUpdate(); if (settings) settings.onDaemonChange(); }
     kick(kind);
   });
   settings = new SettingsPanel({
     vscode, wtdExe, daemonInstalled, daemon: dev.daemon, log: _dbg,
     media: vscode.Uri.joinPath(context.extensionUri, 'media'),
     toggleDaemon: (want) => dev.toggleDaemon(want),
+    restartToUpdate: () => dev.restartToUpdate(),
   });
   dev._openSettings = () => settings.open();
   context.subscriptions.push({ dispose: () => settings.dispose() });
