@@ -49,7 +49,7 @@ fn apply_status(dev: &Path, r: &paths::WtRef, ev: Event, word: &str) -> Result<w
         statusfile::write(dev, &r.id, &r.root, old, new)?;
     }
     if let Ok(Some(mut c)) = Client::connect() {
-        let _ = c.notify(method::HOOK, wtd_core::protocol::HookParams { dir: s(&r.root), event: word.into(), status: new.status, changed: new != old });
+        let _ = c.notify(method::HOOK, wtd_core::protocol::HookParams { dir: s(&r.root), event: word.into(), status: new.status, resets_at: new.resets_at, changed: new != old });
     }
     Ok(new.status)
 }
@@ -341,6 +341,33 @@ fn announce_refs(wtp: &Path, refs: &[(String, PathBuf)]) -> Result<()> {
     Ok(())
 }
 
+/// Check out branch `name` at `wtp`: the local branch, else origin's (tracking it), else a new branch off
+/// `from` (or the default branch). A new branch never tracks its base — a bare `git push` would target
+/// the base; `push.autoSetupRemote` (set by `repos::prepare`) gives it `origin/<name>` on the first push.
+fn add_worktree(bare: &Path, slug: &str, name: &str, wtp: &Path, from: Option<&str>) -> Result<()> {
+    let (bs, ws) = (s(bare), s(wtp));
+    if gitx::ref_exists(bare, &format!("refs/heads/{name}")) {
+        if from.is_some() {
+            println!("note: local branch '{name}' already exists; ignoring --from");
+        }
+        return gitx::run(&["-C", &bs, "worktree", "add", &ws, name]);
+    }
+    if gitx::ref_exists(bare, &format!("refs/remotes/origin/{name}")) {
+        if from.is_some() {
+            println!("note: origin/{name} already exists; ignoring --from");
+        }
+        return gitx::run(&["-C", &bs, "worktree", "add", "--track", "-b", name, &ws, &format!("origin/{name}")]);
+    }
+    let base = match from {
+        Some(f) if gitx::ref_exists(bare, &format!("refs/remotes/origin/{f}")) => format!("origin/{f}"),
+        Some(f) if gitx::ref_exists(bare, f) => f.to_string(),
+        Some(f) => bail!("--from ref '{f}' not found in '{slug}' (tried origin/{f} and {f})"),
+        None if gitx::has_origin(bare) => format!("origin/{}", gitx::default_branch(bare)),
+        None => gitx::default_branch(bare),
+    };
+    gitx::run(&["-C", &bs, "worktree", "add", "--no-track", &ws, "-b", name, &base])
+}
+
 fn launch(dev: &Path, args: &[String]) -> Result<i32> {
     let (mut from, mut account, mut issue, mut ticket) = (None::<String>, None::<String>, None::<PathBuf>, None::<String>);
     let mut launch_agent = std::env::var_os("AGENT_NO_CLAUDE").is_none();
@@ -416,27 +443,7 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
                 let _ = gitx::run(&["-C", &bs, "fetch", "origin"]);
             }
             std::fs::create_dir_all(wtp.parent().unwrap())?;
-            let ws = s(&wtp);
-            if gitx::ref_exists(b, &format!("refs/heads/{name}")) {
-                if from.is_some() {
-                    println!("note: local branch '{name}' already exists; ignoring --from");
-                }
-                gitx::run(&["-C", &bs, "worktree", "add", &ws, &name])?;
-            } else if gitx::ref_exists(b, &format!("refs/remotes/origin/{name}")) {
-                if from.is_some() {
-                    println!("note: origin/{name} already exists; ignoring --from");
-                }
-                gitx::run(&["-C", &bs, "worktree", "add", "--track", "-b", &name, &ws, &format!("origin/{name}")])?;
-            } else {
-                let base = match &from {
-                    Some(f) if gitx::ref_exists(b, &format!("refs/remotes/origin/{f}")) => format!("origin/{f}"),
-                    Some(f) if gitx::ref_exists(b, f) => f.clone(),
-                    Some(f) => bail!("--from ref '{f}' not found in '{slug}' (tried origin/{f} and {f})"),
-                    None if gitx::has_origin(b) => format!("origin/{}", gitx::default_branch(b)),
-                    None => gitx::default_branch(b),
-                };
-                gitx::run(&["-C", &bs, "worktree", "add", &ws, "-b", &name, &base])?;
-            }
+            add_worktree(b, &slug, &name, &wtp, from.as_deref())?;
         }
         std::fs::create_dir_all(wtp.join(".claude").join("plans"))?;
         if !wtp.join("CLAUDE.md").exists() {
@@ -535,6 +542,9 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
     if !launch_agent {
         println!("worktree ready: {}", wtp.display());
         return Ok(0);
+    }
+    if let Some(w) = acct.codex_home.as_deref().and_then(crate::codex::version_skew) {
+        eprintln!("{w}");
     }
     if acct.label != "default" {
         println!("session '{session}' → account '{}'", acct.label);
@@ -720,6 +730,30 @@ mod tests {
         assert_eq!(delegator_of(&t, Some(""), &del).as_deref(), Some("delegate/luop"));
         assert_eq!(delegator_of(&t, None, &wk), None);
         assert_eq!(delegator_of(&t, None, Path::new(r"C:\elsewhere")), None);
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn new_branch_does_not_track_its_base() {
+        let t = std::env::temp_dir().join(format!("wtd-notrack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        let (src, bare) = (t.join("src"), t.join("bare"));
+        let g = |args: &[&str]| gitx::run(args).unwrap();
+        g(&["init", "-q", "-b", "main", &s(&src)]);
+        g(&["-C", &s(&src), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]);
+        g(&["init", "-q", "--bare", &s(&bare)]);
+        g(&["-C", &s(&bare), "remote", "add", "origin", &s(&src)]);
+        g(&["-C", &s(&bare), "fetch", "-q", "origin"]);
+
+        add_worktree(&bare, "x", "fix/a", &t.join("a"), Some("main")).unwrap();
+        assert!(gitx::out(&["-C", &s(&bare), "config", "branch.fix/a.merge"]).is_err(), "new branch tracks its base");
+        assert_eq!(gitx::out(&["-C", &s(&t.join("a")), "branch", "--show-current"]).unwrap(), "fix/a");
+
+        // a branch that already exists on origin still tracks it
+        g(&["-C", &s(&src), "branch", "feat/b"]);
+        g(&["-C", &s(&bare), "fetch", "-q", "origin"]);
+        add_worktree(&bare, "x", "feat/b", &t.join("b"), None).unwrap();
+        assert_eq!(gitx::out(&["-C", &s(&bare), "config", "branch.feat/b.merge"]).unwrap(), "refs/heads/feat/b");
         std::fs::remove_dir_all(&t).ok();
     }
 

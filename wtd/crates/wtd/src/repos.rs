@@ -166,6 +166,11 @@ pub fn prepare(dev: &Path, repo: &Repo) -> Result<()> {
     if text.len() != before {
         std::fs::write(&excl, text)?;
     }
+    // new branches don't track their base, so the first bare `git push` creates and tracks origin/<branch>
+    let rp = crate::gitx::s(&repo.path);
+    if !crate::gitx::ok(&["-C", &rp, "config", "push.autoSetupRemote"]) {
+        let _ = crate::gitx::ok(&["-C", &rp, "config", "push.autoSetupRemote", "true"]);
+    }
     let hooks = repo.admin.join("hooks");
     std::fs::create_dir_all(&hooks)?;
     let wtd = dev.join(".wtd");
@@ -178,7 +183,7 @@ pub fn prepare(dev: &Path, repo: &Repo) -> Result<()> {
 
 /// Files every worktree keeps out of git.
 pub const WORKTREE_LOCAL: &[&str] =
-    &["CLAUDE.md", "pr-notes.md", ".claude-status", ".claude-status.resume", ".claude/issue.md", ".claude/skills/", ".claude-ticket.md",
+    &["CLAUDE.md", "pr-notes.md", ".claude-status", ".claude-status.resume", ".claude-status.limit", ".claude/issue.md", ".claude/skills/", ".claude-ticket.md",
       // ours too: the session's plans and the hooks we merge. info/exclude only hides UNTRACKED files, so a
       // repo that commits its own .claude/settings.json still sees its changes.
       ".claude/plans/", ".claude/settings.json", ".claude/settings.local.json", ".zed/tasks.json"];

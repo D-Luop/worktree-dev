@@ -147,7 +147,7 @@ fn watch(fleet: Arc<Mutex<(bool, BTreeMap<String, Worktree>, u64)>>) {
 
 fn rank(s: Status) -> u8 {
     match s {
-        Status::Input => 0,
+        Status::Input | Status::Limited => 0,
         Status::Working => 1,
         Status::Reviewing => 2,
         Status::Pr => 3,
@@ -160,6 +160,7 @@ fn glyph(w: &Worktree) -> (&'static str, Color) {
     match w.status {
         Status::Input => ("●", Color::Yellow),
         Status::Working => ("◐", ACCENT),
+        Status::Limited => ("⚠", Color::Rgb(0xff, 0x8c, 0x00)),
         Status::Reviewing => ("◆", Color::Magenta),
         Status::Pr => ("◇", Color::Cyan),
         Status::Done => ("✓", Color::Green),
@@ -475,7 +476,8 @@ impl App {
             let indent = if w.parent.is_some() { "  " } else { "" };
             ListItem::new(vec![
                 Line::from(vec![Span::raw(indent), Span::styled(format!("{g} "), Style::default().fg(col)), Span::styled(w.name.clone(), Style::default().add_modifier(if attached { Modifier::BOLD } else { Modifier::empty() }))]),
-                Line::from(Span::styled(format!("{indent}  {}{}{}", w.slug, if w.git.dirty { " ●" } else { "" }, if w.git.ahead > 0 { format!(" ↑{}", w.git.ahead) } else { String::new() }), Style::default().fg(Color::DarkGray))),
+                Line::from(Span::styled(format!("{indent}  {}{}{}{}", w.slug, if w.git.dirty { " ●" } else { "" }, if w.git.ahead > 0 { format!(" ↑{}", w.git.ahead) } else { String::new() },
+                    if w.status == Status::Limited { format!(" · {}", crate::limit::label_now(w.limit_resets_at)) } else { String::new() }), Style::default().fg(Color::DarkGray))),
             ])
         }).collect();
         let title = Line::from(vec![Span::styled(" WorkTreeDev ", Style::default().add_modifier(Modifier::BOLD)), Span::styled(if up { "" } else { "daemon down " }, Style::default().fg(Color::Red))]);

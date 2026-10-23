@@ -170,7 +170,10 @@ impl Daemon {
     }
 
     /// Insert/replace a worktree and push it if anything changed. Call with the lock held.
-    fn upsert(&self, inner: &mut Inner, wt: Worktree) {
+    fn upsert(&self, inner: &mut Inner, mut wt: Worktree) {
+        if wt.status == wtd_core::status::Status::Limited && wt.limit_resets_at == 0 {
+            wt.limit_resets_at = usage::limit_reset(&inner.accounts, wt.account.as_deref().unwrap_or("default"));
+        }
         if inner.worktrees.get(&wt.id) == Some(&wt) {
             return;
         }
@@ -277,6 +280,10 @@ async fn serve(dev: PathBuf) -> Result<()> {
     tokio::spawn(metrics_loop(d.clone()));
     tokio::spawn(jobs_loop(d.clone()));
     tokio::spawn(tickets_loop(d.clone()));
+    // a test daemon (own pipe) must not start the real tray
+    if std::env::var_os("WTD_PIPE").is_none() {
+        tokio::spawn(tray_loop());
+    }
 
     loop {
         server.connect().await?;
@@ -436,6 +443,7 @@ async fn dispatch(d: &Arc<Daemon>, conn: u64, req: &Request, out: &mpsc::Unbound
                 match inner.worktrees.get(&id).cloned() {
                     Some(mut wt) => {
                         wt.status = h.status;
+                        wt.limit_resets_at = h.resets_at;
                         wt.last_activity = now();
                         d.upsert(&mut inner, wt);
                         Daemon::schedule_git(&mut inner, &id, true);
@@ -902,6 +910,15 @@ async fn tickets_loop(d: Arc<Daemon>) {
     }
 }
 
+/// Watchdog: bring the tray icon back within seconds if it crashed or was killed.
+async fn tray_loop() {
+    let mut t = tokio::time::interval(Duration::from_secs(5));
+    loop {
+        t.tick().await;
+        let _ = tokio::task::spawn_blocking(crate::tray::ensure).await;
+    }
+}
+
 async fn jobs_loop(d: Arc<Daemon>) {
     let mut t = tokio::time::interval(Duration::from_secs(30));
     loop {
@@ -943,6 +960,15 @@ pub fn usage_fetch_dir(dir: &std::path::Path, _last: &mut HashMap<String, Accoun
 
 /// Unix seconds → local "Sun 14:05" (offset from the system clock; good enough for messages).
 pub fn fmt_local(epoch: i64) -> String {
+    let t = epoch + local_offset();
+    let days = t.div_euclid(86400);
+    let rem = t.rem_euclid(86400);
+    let wd = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"][days.rem_euclid(7) as usize];
+    format!("{wd} {:02}:{:02}", rem / 3600, (rem % 3600) / 60)
+}
+
+/// Seconds the local clock is ahead of UTC.
+pub fn local_offset() -> i64 {
     use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GetSystemTime};
     let (mut l, mut u) = unsafe { (std::mem::zeroed(), std::mem::zeroed()) };
     unsafe {
@@ -953,11 +979,7 @@ pub fn fmt_local(epoch: i64) -> String {
     let mut off = secs(&l) - secs(&u);
     if off > 14 * 3600 { off -= 86400 * ((off + 43200) / 86400); }   // month-boundary wrap
     if off < -14 * 3600 { off += 86400 * ((-off + 43200) / 86400); }
-    let t = epoch + off;
-    let days = t.div_euclid(86400);
-    let rem = t.rem_euclid(86400);
-    let wd = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"][days.rem_euclid(7) as usize];
-    format!("{wd} {:02}:{:02}", rem / 3600, (rem % 3600) / 60)
+    off
 }
 
 #[cfg(test)]

@@ -356,7 +356,9 @@ if [ ! -d "$wt" ]; then
         base="$(git -c safe.bareRepository=all -C "$bare" symbolic-ref --quiet HEAD 2>/dev/null | sed 's@^refs/heads/@@')"
         base="${base:-main}"
       fi
-      git -c safe.bareRepository=all -C "$bare" worktree add "$wt" -b "$name" "$base"            # new branch off "$base"
+      git -c safe.bareRepository=all -C "$bare" worktree add --no-track "$wt" -b "$name" "$base"  # new branch off "$base" (not tracking it)
+      # first bare `git push` creates and tracks origin/$name
+      git -c safe.bareRepository=all -C "$bare" config push.autoSetupRemote >/dev/null || git -c safe.bareRepository=all -C "$bare" config push.autoSetupRemote true
     fi
   fi
   # seed: stub CLAUDE.md + .claude scaffolding (plans dir); template skills are refreshed below on
@@ -393,7 +395,7 @@ if [ ! -d "$wt" ]; then
   if [ "$is_plan" = 1 ]; then exclude="$wt/.git/info/exclude"; else exclude="$bare/info/exclude"; fi
   mkdir -p "$(dirname "$exclude")"; [ -f "$exclude" ] || : > "$exclude"
   if [ -f "$exclude" ]; then
-    for ign in CLAUDE.md pr-notes.md .claude-status .claude-status.resume .claude/issue.md .claude/skills/; do
+    for ign in CLAUDE.md pr-notes.md .claude-status .claude-status.resume .claude-status.limit .claude/issue.md .claude/skills/; do
       grep -qxF "$ign" "$exclude" && continue
       [ -s "$exclude" ] && [ -n "$(tail -c1 "$exclude")" ] && printf '\n' >> "$exclude"
       printf '%s\n' "$ign" >> "$exclude"
@@ -543,8 +545,9 @@ if ! tmux has-session -t "=$session" 2>/dev/null; then
   if [ "$launch_claude" = 1 ]; then
     if command -v claude >/dev/null 2>&1; then
       cli="claude --permission-mode $(printf %q "$pmode")"
-      if [ -n "$ccdir" ]; then tmux send-keys -t "$main_pane" "CLAUDE_CONFIG_DIR=$(printf %q "$ccdir") $cli" C-m
-      else                     tmux send-keys -t "$main_pane" "$cli" C-m; fi
+      [ -n "$ccdir" ] && cli="CLAUDE_CONFIG_DIR=$(printf %q "$ccdir") $cli"
+      # the tmux server may have been started from inside a Claude session
+      tmux send-keys -t "$main_pane" "unset $WTD_SESSION_ENV_VARS; $cli" C-m
     else
       echo "note: 'claude' not on PATH; left a shell in the worktree"
     fi

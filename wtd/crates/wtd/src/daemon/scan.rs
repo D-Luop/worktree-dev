@@ -49,13 +49,15 @@ fn walk(dev: &Path, dir: &Path, slug: &str, rel: &str, kind: WorktreeKind, depth
 }
 
 fn facts(_dev: &Path, id: &str, kind: WorktreeKind, slug: &str, name: &str, dir: &Path) -> Worktree {
+    let st = statusfile::read(dir);
     Worktree {
         id: id.into(),
         kind,
         slug: slug.into(),
         name: name.into(),
         path: dir.to_string_lossy().into(),
-        status: statusfile::read(dir).status,
+        status: st.status,
+        limit_resets_at: st.resets_at,
         plan_title: plan_title(dir),
         ..Default::default()
     }

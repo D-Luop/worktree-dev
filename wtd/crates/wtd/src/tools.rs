@@ -185,7 +185,7 @@ pub fn tokens_main(args: &[String]) -> Result<i32> {
     let w = 38;
     println!("{:<w$}{:>8}{:>9}{:>9}{:>8}{:>7}{:>12}", "repo / worktree", "in", "cacheW", "cacheR", "out", "msgs", "est $");
     println!("{}", "-".repeat(w + 53));
-    let groups = [("working", "● working"), ("input", "● input (your turn)"), ("reviewing", "⋯ reviewing"), ("pr", "◆ pr (PR-ready)"), ("done", "✓ done"), ("stopped", "○ stopped"), ("none", "· not running")];
+    let groups = [("working", "● working"), ("input", "● input (your turn)"), ("limited", "⚠ limited (waiting for reset)"), ("reviewing", "⋯ reviewing"), ("pr", "◆ pr (PR-ready)"), ("done", "✓ done"), ("stopped", "○ stopped"), ("none", "· not running")];
     let mut grand = Row::default();
     for (st, title) in groups {
         let mut g: Vec<&Row> = rows.iter().filter(|r| r.status == st || (st == "none" && !groups.iter().any(|(s, _)| *s == r.status))).collect();
