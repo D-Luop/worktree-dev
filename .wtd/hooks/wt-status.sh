@@ -4,8 +4,9 @@
 # (@wt_status, shown in the VSCode terminal tab via set-titles). Called by Claude hooks and by
 # `agent done` / `agent wip`.
 #
-#   wt-status.sh working|tool|stop|sessionend|done|pr|wip|edit|reviewing|reviewed
-# States: working(🔵 busy) · input(🟠 your turn) · reviewing(🟣 waiting on review) · pr(🔹 PR-ready,
+#   wt-status.sh working|tool|limited|stop|sessionend|done|pr|wip|edit|reviewing|reviewed
+# States: working(🔵 busy) · input(🟠 your turn) · limited(⚠ waiting for a usage-limit reset; live like
+#         working, survives turn-end notifications) · reviewing(🟣 waiting on review) · pr(🔹 PR-ready,
 #         light blue) · done(🟢) · stopped(🔴 no session) · none(no status). pr & done are STICKY
 #         MILESTONES that don't freeze live activity: a new turn shows `working` while stashing the
 #         milestone in .claude-status.resume, then RESTORES it on a read-only turn, or drops it to
@@ -77,8 +78,14 @@ case "$ev" in
                  reviewing)  ;;                                          # review running → leave it
                  *)          put working ;;
                esac ;;
+  limited)     case "$cur" in                                         # turn died on a usage limit (StopFailure)
+                 done|pr)    printf '%s' "$cur" > "$rf"; put limited ;;
+                 reviewing)  ;;
+                 *)          put limited ;;
+               esac ;;
   stop|sessionend)
-               if [ -s "$rf" ]; then IFS= read -r m < "$rf" || true; put "$m"; rm -f "$rf"   # read-only turn → restore milestone
+               if [ "$ev" = stop ] && [ "$cur" = limited ]; then :     # idle notification → keep the limit visible
+               elif [ -s "$rf" ]; then IFS= read -r m < "$rf" || true; put "$m"; rm -f "$rf"   # read-only turn → restore milestone
                elif [ "$ev" = stop ]; then case "$cur" in reviewing|done|pr) ;; *) put input;; esac   # turn ended → your turn (unread)
                else case "$cur" in done|pr|reviewing) ;; *) put stopped;; esac; fi ;;              # session gone → red (sticky if idle milestone)
 esac
@@ -96,7 +103,7 @@ fi
 # from $d), so it's correct even when the caller's $TMUX points elsewhere or is unset (e.g. `agent
 # done` run from another pane). Session name = "<slug>-<name>" = the path under worktrees/ with the
 # first '/' turned into '-'.
-case "$final" in working) g=🔵;; input) g=🟡;; reviewing) g=🟣;; pr) g=🔹;; done) g=🟢;; stopped) g=🔴;; *) g="";; esac
+case "$final" in working) g=🔵;; input) g=🟡;; limited) g=⚠️;; reviewing) g=🟣;; pr) g=🔹;; done) g=🟢;; stopped) g=🔴;; *) g="";; esac
 sess=""
 case "$d" in */worktrees/*) rel="${d#*/worktrees/}"; sess="${rel/\//-}";; esac
 if [ -n "$sess" ] && tmux has-session -t "$sess" 2>/dev/null; then

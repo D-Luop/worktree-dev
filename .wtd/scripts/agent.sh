@@ -393,7 +393,7 @@ if [ ! -d "$wt" ]; then
   if [ "$is_plan" = 1 ]; then exclude="$wt/.git/info/exclude"; else exclude="$bare/info/exclude"; fi
   mkdir -p "$(dirname "$exclude")"; [ -f "$exclude" ] || : > "$exclude"
   if [ -f "$exclude" ]; then
-    for ign in CLAUDE.md pr-notes.md .claude-status .claude-status.resume .claude/issue.md .claude/skills/; do
+    for ign in CLAUDE.md pr-notes.md .claude-status .claude-status.resume .claude-status.limit .claude/issue.md .claude/skills/; do
       grep -qxF "$ign" "$exclude" && continue
       [ -s "$exclude" ] && [ -n "$(tail -c1 "$exclude")" ] && printf '\n' >> "$exclude"
       printf '%s\n' "$ign" >> "$exclude"

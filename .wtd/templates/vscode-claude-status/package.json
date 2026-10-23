@@ -2,7 +2,7 @@
   "name": "claude-status",
   "displayName": "Claude Status",
   "description": "WorkTreeDev: a fleet roster for parallel Claude/Codex worktrees driven by the wtd.exe daemon — session list with groups and search, New Session picker, usage limits, native commit/diff browser, and status-coloured worktree folders.",
-  "version": "0.0.103",
+  "version": "0.0.104",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -141,6 +141,15 @@
           "dark": "#ffd83d",
           "light": "#b58900",
           "highContrast": "#ffd83d"
+        }
+      },
+      {
+        "id": "claudeStatus.limited",
+        "description": "Waiting for a usage-limit reset",
+        "defaults": {
+          "dark": "#e8912d",
+          "light": "#bc4c00",
+          "highContrast": "#ffa657"
         }
       },
       {

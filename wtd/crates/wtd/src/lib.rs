@@ -15,6 +15,7 @@ pub mod guard;
 pub mod handoff;
 pub mod hook;
 pub mod issues;
+pub mod limit;
 pub mod mcp;
 pub mod new;
 pub mod paths;
