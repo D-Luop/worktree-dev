@@ -39,7 +39,7 @@ pub fn ask_main(args: &[String]) -> Result<i32> {
     Ok(st.code().unwrap_or(1))
 }
 
-// --- preview: stage an HTML mockup for the roster's preview panel ----------------------------------
+// --- preview: stage an HTML mockup as a tab of the Changes panel -----------------------------------
 
 pub fn preview_main(args: &[String]) -> Result<i32> {
     let dev = paths::dev_root()?;
@@ -56,7 +56,7 @@ pub fn preview_main(args: &[String]) -> Result<i32> {
     let dest = r.id.split('/').fold(paths::state_dir(&dev).join("previews"), |p, c| p.join(c)).join(format!("{label}.html"));
     std::fs::create_dir_all(dest.parent().unwrap())?;
     std::fs::copy(&src, &dest)?;
-    println!("preview '{label}' staged for {} → open the panel (🖼) and pick the '{label}' tab", r.id);
+    println!("preview '{label}' staged for {} → click 🖼 on its roster row (the Changes panel's '{label}' tab)", r.id);
     Ok(0)
 }
 
