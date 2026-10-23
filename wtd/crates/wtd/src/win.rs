@@ -426,4 +426,23 @@ mod tests {
         assert!(super::kill_processes_in(&dir.join("elsewhere")).is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn hkcu_values_round_trip() {
+        use super::reg;
+        let key = format!(r"Software\wtd-test-{}", std::process::id());
+        let sub = format!(r"{key}\Session");
+        assert!(reg::create(&key, false) && reg::create(&sub, true));
+        assert!(reg::set_sz(&sub, "s", "running — ok") && reg::set_dword(&key, "d", 7));
+        assert_eq!(reg::get_sz(&sub, "s").as_deref(), Some("running — ok"));
+        assert_eq!(reg::get_dword(&key, "d"), Some(7));
+        assert!(reg::exists(&key, "d") && !reg::exists(&key, "missing"));
+        assert_eq!(reg::subkeys(&key), vec!["Session".to_string()]);
+        reg::delete(&key, "d");
+        assert!(!reg::exists(&key, "d"));
+        unsafe {
+            use windows_sys::Win32::System::Registry::{RegDeleteTreeW, HKEY_CURRENT_USER};
+            RegDeleteTreeW(HKEY_CURRENT_USER, super::wide(&key).as_ptr());
+        }
+    }
 }

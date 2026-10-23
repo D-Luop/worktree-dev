@@ -13,7 +13,6 @@ use anyhow::{bail, Result};
 use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Registry::{RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ};
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::Shell::{Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
@@ -30,6 +29,7 @@ const RUN_VALUE: &str = "WorkTreeDev";
 const WTD_KEY: &str = r"Software\WorkTreeDev";
 /// volatile: Windows drops it at sign-out, so what it records lasts for this sign-in only
 const SESSION_KEY: &str = r"Software\WorkTreeDev\Session";
+const LOGON_OFF: &str = "TrayLogonOff";
 const CLASS: &str = "wtd-tray";
 
 #[derive(Clone, Copy, PartialEq, Default)]
@@ -62,7 +62,7 @@ pub(crate) fn hwnd() -> HWND {
     TRAY.lock().unwrap().as_ref().map(|t| t.hwnd).unwrap_or(std::ptr::null_mut())
 }
 
-/// `wtd tray [--spawn | --ensure | --open | --quit | --logon on|off]`
+/// `wtd tray [--spawn | --ensure | --open | --quit | --logon on|off|refresh]`
 pub fn main(args: &[String]) -> Result<i32> {
     match args.first().map(String::as_str) {
         // start detached (from install / a terminal) so it doesn't die with the caller
@@ -93,10 +93,14 @@ pub fn main(args: &[String]) -> Result<i32> {
             return Ok(0);
         },
         Some("--logon") => {
-            set_start_at_logon(args.get(1).map(String::as_str) != Some("off"));
+            match args.get(1).map(String::as_str) {
+                Some("off") => set_start_at_logon(false),
+                Some("refresh") => refresh_start_at_logon(),
+                _ => set_start_at_logon(true),
+            }
             return Ok(0);
         }
-        Some(a) => bail!("unknown option '{a}' (wtd tray [--spawn | --ensure | --open | --quit | --logon on|off])"),
+        Some(a) => bail!("unknown option '{a}' (wtd tray [--spawn | --ensure | --open | --quit | --logon on|off|refresh])"),
         None => {}
     }
     unsafe {
@@ -378,27 +382,34 @@ pub fn ensure() {
 }
 
 pub fn start_at_logon() -> bool {
-    unsafe {
-        let mut size: u32 = 0;
-        RegGetValueW(HKEY_CURRENT_USER, win::wide(RUN_KEY).as_ptr(), win::wide(RUN_VALUE).as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), std::ptr::null_mut(), &mut size) == 0
+    win::reg::exists(RUN_KEY, RUN_VALUE)
+}
+
+/// The user's choice (⚙ menu, settings, `--logon on|off`). Off is remembered so installs don't undo it.
+pub fn set_start_at_logon(on: bool) {
+    if on {
+        win::reg::delete(WTD_KEY, LOGON_OFF);
+        write_run_entry();
+    } else {
+        win::reg::set_dword(WTD_KEY, LOGON_OFF, 1);
+        win::reg::delete(RUN_KEY, RUN_VALUE);
     }
 }
 
-pub fn set_start_at_logon(on: bool) {
-    unsafe {
-        if on {
-            // the windowless wtd-tray.exe, so signing in never opens a console window for the tray
-            let cmdline = match paths::tray_exe() {
-                Some(t) => format!("\"{}\"", t.display()),
-                None => format!("\"{}\" tray", paths::wtd_exe().display()),
-            };
-            let cmdline = win::wide(&cmdline);
-            RegSetKeyValueW(HKEY_CURRENT_USER, win::wide(RUN_KEY).as_ptr(), win::wide(RUN_VALUE).as_ptr(), REG_SZ,
-                cmdline.as_ptr() as *const _, (cmdline.len() * 2) as u32);
-        } else {
-            RegDeleteKeyValueW(HKEY_CURRENT_USER, win::wide(RUN_KEY).as_ptr(), win::wide(RUN_VALUE).as_ptr());
-        }
+/// On install/update: start at logon by default, pointing at this install's exe, unless the user turned it off.
+pub fn refresh_start_at_logon() {
+    if !win::reg::exists(WTD_KEY, LOGON_OFF) {
+        write_run_entry();
     }
+}
+
+fn write_run_entry() {
+    // the windowless wtd-tray.exe, so signing in never opens a console window for the tray
+    let cmdline = match paths::tray_exe() {
+        Some(t) => format!("\"{}\"", t.display()),
+        None => format!("\"{}\" tray", paths::wtd_exe().display()),
+    };
+    win::reg::set_sz(RUN_KEY, RUN_VALUE, &cmdline);
 }
 
 // --- icon drawing: a 32×32 ring glyph, coloured by state -------------------------------------------
