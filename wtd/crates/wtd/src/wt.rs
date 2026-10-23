@@ -77,12 +77,12 @@ pub fn resolve_name(dev: &Path, slug: &str, name: &str) -> Result<String> {
 pub fn remove(dev: &Path, slug: &str, name: &str, force: bool, delete_branch: bool) -> Result<Vec<String>> {
     let mut log = vec![];
     let wt = paths::worktree_path(dev, &format!("{slug}/{name}"));
-    if slug == "plan" {
+    if paths::repo_less(slug) {
         if wt.is_dir() {
             crate::settings::remove_tree(&wt).with_context(|| format!("removing {} (close anything using it, then retry)", wt.display()))?;
             log.push(format!("removed {}", wt.display()));
         }
-        let _ = std::fs::remove_dir(dev.join("worktrees").join("plan"));
+        let _ = std::fs::remove_dir(dev.join("worktrees").join(slug));
         forget_worktree_state(dev, slug, name);
         return Ok(log);
     }

@@ -265,7 +265,7 @@ pub fn main(args: &[String]) -> Result<i32> {
             for r in crate::repos::all(&dev) {
                 let _ = crate::repos::prepare(&dev, &r); // keep what we write git-ignored
             }
-            for w in crate::daemon::scan::scan(&dev).into_iter().filter(|w| w.id != wtd_core::model::DEV_ID && w.slug != "plan") {
+            for w in crate::daemon::scan::scan(&dev).into_iter().filter(|w| w.id != wtd_core::model::DEV_ID && !crate::paths::repo_less(&w.slug)) {
                 match apply(&dev, &w.slug, Path::new(&w.path), false) {
                     Ok(_) => n += 1,
                     Err(e) => eprintln!("{}: {e:#}", w.id),

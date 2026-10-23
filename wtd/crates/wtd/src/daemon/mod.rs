@@ -844,7 +844,7 @@ async fn tickets_loop(d: Arc<Daemon>) {
     t.tick().await;
     loop {
         t.tick().await;
-        let live: Vec<String> = d.lock().worktrees.values().filter(|w| w.live && w.id != DEV_ID && w.slug != "plan").map(|w| w.id.clone()).collect();
+        let live: Vec<String> = d.lock().worktrees.values().filter(|w| w.live && w.id != DEV_ID && !paths::repo_less(&w.slug)).map(|w| w.id.clone()).collect();
         if live.is_empty() || crate::settings::which("gh").is_none() {
             continue;
         }

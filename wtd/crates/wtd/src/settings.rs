@@ -370,8 +370,8 @@ fn repo_add(dev: &Path, slug: &str, url: Option<&str>) -> Result<i32> {
     if !valid_name(slug) {
         bail!("slug must be letters, digits, - or _ (got '{slug}')");
     }
-    if slug == "plan" {
-        bail!("'plan' is reserved for repo-less planning agents");
+    if paths::repo_less(slug) {
+        bail!("'{slug}' is reserved (planning agents / delegators)");
     }
     let bare = dev.join("repos").join(slug).join(".bare");
     let bare_s = bare.to_string_lossy().to_string();

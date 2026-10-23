@@ -1210,7 +1210,7 @@ class DevSummaryProvider {
       if (w.kind === 'dev') continue;   // the assistant has its own pinned row
       const slug = w.slug, name = w.name;
       rows.push({ id: w.id, group: w.group || null, slug, name, status: w.status === 'none' ? '' : w.status, dirty: !!(w.git && w.git.dirty), ahead: (w.git && w.git.ahead) || 0,
-                  branch: (w.git && w.git.branch) || '', plan: w.plan_title || '', account: w.account || '', live: !!w.live, program: w.program || '', msgPending: pendingFrom[w.id] || 0 });
+                  branch: (w.git && w.git.branch) || '', plan: w.plan_title || '', account: w.account || '', live: !!w.live, kind: w.kind || '', program: w.program || '', msgPending: pendingFrom[w.id] || 0 });
       if (w.live) live.add(slug + '-' + name);
     }
     return { rows, live };
@@ -1536,11 +1536,12 @@ class DevSummaryProvider {
     const acctName = (w.account||'').replace(/^codex:/,'');
     const acct = (w.active && w.program==='codex') ? '<span class="badge" title="Codex session'+(acctName&&acctName!=='default'?' · account '+esc(acctName):'')+'">codex'+(acctName&&acctName!=='default'?' · '+esc(acctName):'')+'</span>'
       : (multiAcct && w.active && w.account && w.account!=='default') ? '<span class="badge" title="Claude account">'+esc(w.account)+'</span>' : '';
+    const role = w.kind==='delegate' ? '<span class="badge" title="Delegator for '+esc(w.name)+': keeps its docs and research, and starts worktrees">delegator</span>' : '';
     const tip = w.slug+'/'+w.name+' — '+s[1]+(w.active?' · live session':'')+(w.branch?' · '+w.branch:'')+(w.plan?'\\n'+w.plan:'')+'\\nclick to open';
     const drag = groupsData && canEditGroups;
     return '<div class="row wt'+(w.active?' live':'')+(w.unread?' unread':'')+(w.current?' current':'')+'" data-id="'+esc(w.id||'')+'" data-slug="'+esc(w.slug)+'" data-name="'+esc(w.name)+'" data-glyph="'+g+'" title="'+esc(tip)+'"'+(drag?' draggable="true"':'')+'>'
       +'<span class="st" style="color:'+s[3]+'">'+ico(s[2])+'</span>'
-      +'<span class="nm">'+esc(w.name)+'</span>'+(groupsData?'<span class="rb" title="repository">'+esc(w.slug)+'</span>':'')+acct
+      +'<span class="nm">'+esc(w.name)+'</span>'+(groupsData&&w.kind!=='delegate'?'<span class="rb" title="repository">'+esc(w.slug)+'</span>':'')+role+acct
       +(w.msgPending?'<i class="codicon codicon-comment-unresolved msgp" title="'+w.msgPending+' message'+(w.msgPending===1?'':'s')+' from this agent awaiting your approval — click to review"></i>':'')
       +'<span class="git">'+git+'</span>'
       +'<span class="acts">'
@@ -1826,6 +1827,7 @@ async function newSessionWizard(dev) {
     if (st.step === 3) {
       const slug = st.repo.slug;
       const base = [
+        { label: '$(organization) Delegator', description: 'long-lived home for ' + slug + ' docs and research; its agent starts worktrees for you', delegate: true },
         { label: '$(add) Blank session', description: 'start from ' + (st.repo.default_branch || 'the default branch'), blank: true },
         { label: '$(git-branch) Existing branch…', description: 'check out a branch that already exists', existing: true },
       ];
@@ -1846,6 +1848,8 @@ async function newSessionWizard(dev) {
       const it = await wizardPick({ title: T, step: 3, total: 4, placeholder: 'What will this session work on? (type to search issues)', items: loaded });
       if (!it) return; if (it === BACK) { st.step = 2; continue; }
       if (it.settings) { dev._openSettings && dev._openSettings(); return; }
+      st.delegate = !!it.delegate;
+      if (st.delegate) { st.item = null; st.branch = slug; st.existing = false; st.step = 5; continue; }
       if (it.existing) {
         const br = await pickBranch(dev, slug); if (br === BACK) continue; if (!br) return;
         st.item = null; st.branch = br; st.existing = true; st.step = 5; continue;
@@ -1871,7 +1875,7 @@ async function newSessionWizard(dev) {
       if (groups.length) {
         const items = [{ label: '$(circle-outline) Ungrouped', g: null }, ...groups.map((g) => ({ label: '$(folder) ' + g.name, g: g.id }))];
         const it = await wizardPick({ title: T, step: 5, total: 5, placeholder: 'Add it to a group?', items });
-        if (!it) return; if (it === BACK) { st.step = st.existing ? 3 : 4; continue; }
+        if (!it) return; if (it === BACK) { st.step = st.existing || st.delegate ? 3 : 4; continue; }
         st.group = it.g;
       }
       return launchSession(dev, st);
@@ -1896,7 +1900,7 @@ async function pickBranch(dev, slug) {
 }
 
 async function launchSession(dev, st) {
-  const slug = st.plan ? 'plan' : st.repo.slug, name = st.branch;
+  const slug = st.plan ? 'plan' : st.delegate ? 'delegate' : st.repo.slug, name = st.branch;
   const id = slug + '/' + name;
   if (dev.daemon && dev.daemon.wts.has(id)) { dev.openOrFocus(slug, name); return; }
   const args = [];

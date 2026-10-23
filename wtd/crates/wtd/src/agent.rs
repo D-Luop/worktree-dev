@@ -2,7 +2,9 @@
 //! `rm`, `done|pr|wip`; and `wtd close`, `wtd archive`, `wtd assistant`.
 //!
 //!   agent <slug> <name> [--from <ref>] [--account <a>|codex:<a>|default] [--issue-file <md>]
-//!                       [--no-claude] [--no-auto | --mode <m>] [ref-token…]
+//!                       [--no-claude] [--no-auto | --mode <m>] [--detach] [--prompt <text> | --prompt-file <md>]
+//!                       [ref-token…]
+//!   agent delegate <slug>                        the repo's delegator (docs/research home; spawns worktrees)
 //!   agent ls | agent stop [<slug> <name>] | agent rm <slug> <name> [--branch] [--force] [-y]
 //!   agent done | agent pr | agent wip            (inside a worktree)
 
@@ -86,7 +88,8 @@ pub fn main(args: &[String]) -> Result<i32> {
         Some("rm") => rm(&dev, &args[1..]),
         Some(_) => launch(&dev, args),
         None => {
-            println!("usage: agent <slug> <name> [--from <ref>] [--account <a>] [--issue-file <md>] [--no-claude] [ref…]");
+            println!("usage: agent <slug> <name> [--from <ref>] [--account <a>] [--issue-file <md>] [--no-claude] [--detach] [--prompt <text>] [ref…]");
+            println!("       agent delegate <slug>   (the repo's delegator: a docs/research folder whose agent starts worktrees)");
             println!("       agent ls | agent stop [<slug> <name>] | agent rm <slug> <name> [--branch] [--force] [-y]");
             println!("       agent done | agent pr | agent wip   (inside a worktree)");
             Ok(1)
@@ -342,6 +345,7 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
     let (mut from, mut account, mut issue, mut ticket) = (None::<String>, None::<String>, None::<PathBuf>, None::<String>);
     let mut launch_agent = std::env::var_os("AGENT_NO_CLAUDE").is_none();
     let mut pmode = std::env::var("AGENT_PERMISSION_MODE").unwrap_or_else(|_| "auto".into());
+    let (mut detach, mut prompt) = (false, None::<String>);
     let mut pos: Vec<String> = vec![];
     let mut i = 0;
     while i < args.len() {
@@ -355,6 +359,9 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
             "--mode" => { pmode = val(i)?; i += 2; }
             "--no-auto" => { pmode = "default".into(); i += 1; }
             "--no-claude" => { launch_agent = false; i += 1; }
+            "--detach" => { detach = true; i += 1; }
+            "--prompt" => { prompt = Some(val(i)?); i += 2; }
+            "--prompt-file" => { prompt = Some(std::fs::read_to_string(paths::normalize(&val(i)?))?); i += 2; }
             _ if a.starts_with("--from=") => { from = Some(a[7..].into()); i += 1; }
             _ if a.starts_with("--account=") => { account = Some(a[10..].into()); i += 1; }
             _ => { pos.push(a.to_string()); i += 1; }
@@ -362,8 +369,11 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
     }
     let (Some(slug), Some(name)) = (pos.first().cloned(), pos.get(1).cloned()) else { bail!("usage: agent <slug> <name> [options] [ref…]") };
     let ref_tokens = pos[2..].to_vec();
-    let is_plan = slug == "plan";
-    let repo = if is_plan { None } else { Some(crate::repos::require(dev, &slug)?) };
+    let is_delegate = slug == paths::DELEGATE;
+    let repo_less = paths::repo_less(&slug);
+    // a delegator's name is the repo it delegates for
+    let delegated = if is_delegate { Some(crate::repos::require(dev, &name)?) } else { None };
+    let repo = if repo_less { None } else { Some(crate::repos::require(dev, &slug)?) };
     let bare = repo.as_ref().map(|r| r.path.clone());
     let id = format!("{slug}/{name}");
     let wtp = paths::worktree_path(dev, &id);
@@ -373,7 +383,7 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
 
     // archived? offer to bring it back instead of creating a new one
     let arc = name.split('/').fold(dev.join("worktrees").join(&slug).join("archive"), |p, c| p.join(c));
-    if !is_plan && !wtp.exists() && arc.is_dir() {
+    if !repo_less && !wtp.exists() && arc.is_dir() {
         println!("An archived worktree for '{name}' exists at {}", arc.display());
         if !confirm("Reopen it (move it back into the active worktrees)?", true) {
             println!("left it archived.");
@@ -385,10 +395,18 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
 
     let created = !wtp.exists();
     if !wtp.exists() {
-        if is_plan {
+        if repo_less {
             std::fs::create_dir_all(&wtp)?;
             gitx::run(&["-C", &s(&wtp), "init", "-q"])?;
             let _ = gitx::ok(&["-C", &s(&wtp), "symbolic-ref", "HEAD", "refs/heads/main"]);
+            if is_delegate {
+                for d in ["docs", "research", "notes/tasks"] {
+                    std::fs::create_dir_all(wtp.join(d))?;
+                }
+                let tmpl = std::fs::read_to_string(dev.join(".wtd").join("templates").join("DELEGATOR.md"))
+                    .unwrap_or_else(|_| include_str!("../../../../.wtd/templates/DELEGATOR.md").to_string());
+                std::fs::write(wtp.join("CLAUDE.md"), tmpl.replace("__SLUG__", &name))?;
+            }
         } else {
             let b = bare.as_ref().unwrap();
             let bs = s(b);
@@ -431,7 +449,7 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
         if envsrc.is_dir() {
             seed_env(&envsrc, &envsrc, &wtp)?;
         }
-        if is_plan {
+        if repo_less {
             add_excludes(&wtp.join(".git").join("info").join("exclude"))?;
         }
     }
@@ -461,17 +479,25 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
     }
     // the linked ticket: link it (New Session passes the picked issue), then refresh
     // .claude-ticket.md in the background so the session doesn't wait on GitHub
-    if let (Some(spec), false) = (&ticket, is_plan) {
+    if let (Some(spec), false) = (&ticket, repo_less) {
         match crate::ticket::parse_spec(dev, &slug, spec) {
             Ok((repo, n)) => crate::ticket::link(dev, &id, &repo, n)?,
             Err(e) => eprintln!("warning: --ticket {spec}: {e:#}"),
         }
     }
-    if !is_plan && (crate::ticket::link_of(dev, &id).is_some() || crate::repos::github_repo(dev, &slug).is_some()) {
+    if !repo_less && (crate::ticket::link_of(dev, &id).is_some() || crate::repos::github_repo(dev, &slug).is_some()) {
         let (d, i) = (dev.to_path_buf(), id.clone());
         std::thread::spawn(move || { let _ = crate::ticket::sync(&d, &i); });
     }
-    if !is_plan && wt::merge_repo_hooks(dev, &slug, &wtp)? {
+    // the delegator reads the repo through a read-only checkout of its default branch, fresh each open
+    if let Some(r) = &delegated {
+        let br = gitx::default_branch(&r.path);
+        match gitx::ensure_ref(dev, &name, &br) {
+            Ok(p) => announce_refs(&wtp, &[(format!("{name}@{br}"), p)])?,
+            Err(e) => eprintln!("warning: read-only checkout of {name}@{br}: {e:#}"),
+        }
+    }
+    if !repo_less && wt::merge_repo_hooks(dev, &slug, &wtp)? {
         println!("wired repo hooks for '{slug}' into .claude/settings.json");
     }
     if !ref_tokens.is_empty() {
@@ -517,35 +543,44 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
     // an `account switch` that couldn't carry the conversation over: start fresh, seeded with its brief
     let handoff = wt::read_state(dev, crate::handoff::PENDING, &key).map(PathBuf::from).filter(|p| p.is_file());
     wt::forget_state(dev, crate::handoff::PENDING, &key);
-    let seed = handoff.as_ref().map(|p| crate::handoff::prompt(p));
+    let fresh = handoff.is_some();
+    // a worker started in the background by a delegator gets going on its brief without being asked
+    let prompt = prompt.or_else(|| (detach && issue.is_some()).then(|| WORKER_PROMPT.to_string()));
+    let seed = handoff.as_ref().map(|p| crate::handoff::prompt(p)).or(prompt);
     let host_args: Vec<String> = if acct.codex_home.is_some() {
         let mark = format!("{key}.codex");
         let resume = wt::read_state(dev, "session-ids", &mark).is_some() || wt::state(dev, "session-ids").join(&mark).exists();
         wt::write_state(dev, "session-ids", &mark, "codex")?;
         let mut v = vec!["codex".to_string()];
-        match seed {
-            Some(p) => v.push(p),
-            None if resume => v.extend(["resume".into(), "--last".into()]),
-            None => {}
+        if resume && !fresh {
+            v.extend(["resume".into(), "--last".into()]);
         }
+        v.extend(seed);
         v
     } else {
         let cfg = acct.claude_dir.clone().unwrap_or(paths::home_dir()?.join(".claude"));
         let mut v = vec!["claude".to_string(), "--permission-mode".into(), pmode];
-        match seed {
-            Some(p) => {
-                let id = uuid4();
-                wt::write_state(dev, "session-ids", &key, &id)?;
-                v.extend(["--session-id".into(), id, p]);
-            }
-            None => v.extend(claude_session_args(dev, &key, &wtp, &cfg)?),
+        if fresh {
+            let id = uuid4();
+            wt::write_state(dev, "session-ids", &key, &id)?;
+            v.extend(["--session-id".into(), id]);
+        } else {
+            v.extend(claude_session_args(dev, &key, &wtp, &cfg)?);
         }
+        v.extend(seed);
         v
     };
     let mut hargs = vec!["--kind".to_string(), "agent".into(), "--account".into(), acct.label.clone(), "--".into()];
     hargs.extend(host_args);
+    if detach {
+        crate::attach::host_detached(&hargs)?;
+        println!("started {id} in the background (open it from the roster, or `wtd attach {id}`)");
+        return Ok(0);
+    }
     crate::attach::host_main(&hargs)
 }
+
+const WORKER_PROMPT: &str = "Your task is in CLAUDE.md under Context / scope (also .claude/issue.md).     Write your active plan, then start the work.";
 
 fn seed_env(root: &Path, dir: &Path, wtp: &Path) -> Result<()> {
     for e in std::fs::read_dir(dir)?.flatten() {

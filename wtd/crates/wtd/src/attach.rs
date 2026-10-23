@@ -120,6 +120,29 @@ pub fn host_main(args: &[String]) -> Result<i32> {
     if Client::connect()?.is_none() {
         return crate::run::main(args); // no daemon: the session lives in this terminal, as before
     }
+    relay(method::SESSION_SPAWN, spawn_params(args)?)
+}
+
+/// Start (or find) the session in the daemon without attaching: it runs in the background until
+/// someone opens it from the roster.
+pub fn host_detached(args: &[String]) -> Result<Value> {
+    if Client::connect()?.is_none() {
+        bail!("the wtd daemon isn't running; start it to launch a background session");
+    }
+    let params = spawn_params(args)?;
+    tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
+        let (mut rd, _w) = request(method::SESSION_SPAWN, params).await?;
+        let mut line = String::new();
+        rd.read_line(&mut line).await?;
+        let resp: Value = serde_json::from_str(line.trim()).context("bad response from daemon")?;
+        match resp.get("error").and_then(Value::as_str) {
+            Some(e) => bail!("{e}"),
+            None => Ok(resp["result"].clone()),
+        }
+    })
+}
+
+fn spawn_params(args: &[String]) -> Result<Value> {
     let mut kind = "agent".to_string();
     let mut account = String::new();
     let mut i = 0;
@@ -147,7 +170,7 @@ pub fn host_main(args: &[String]) -> Result<i32> {
     // the hosted process gets this terminal's environment (CLAUDE_CONFIG_DIR / CODEX_HOME, PATH, …)
     let env: Vec<(String, String)> = std::env::vars_os().map(|(k, v)| (k.to_string_lossy().into(), v.to_string_lossy().into())).collect();
     let (cols, rows) = console_size().unwrap_or((120, 30));
-    relay(method::SESSION_SPAWN, json!({
+    Ok(json!({
         "dir": cwd.to_string_lossy(), "kind": kind, "account": account, "program": stem,
         "exe": exe.to_string_lossy(), "args": argv, "env": env, "cols": cols, "rows": rows,
     }))
@@ -171,7 +194,10 @@ fn relay(method: &str, params: Value) -> Result<i32> {
     rt.block_on(relay_async(method, params))
 }
 
-async fn relay_async(method: &str, params: Value) -> Result<i32> {
+type PipeRead = BufReader<tokio::io::ReadHalf<tokio::net::windows::named_pipe::NamedPipeClient>>;
+type PipeWrite = tokio::io::WriteHalf<tokio::net::windows::named_pipe::NamedPipeClient>;
+
+async fn request(method: &str, params: Value) -> Result<(PipeRead, PipeWrite)> {
     let name = paths::pipe_name();
     let pipe = loop {
         match ClientOptions::new().open(&name) {
@@ -181,10 +207,14 @@ async fn relay_async(method: &str, params: Value) -> Result<i32> {
         }
     };
     let (r, mut w) = tokio::io::split(pipe);
-    let mut rd = BufReader::new(r);
     let mut req = serde_json::to_vec(&json!({ "id": 1, "method": method, "params": params }))?;
     req.push(b'\n');
     w.write_all(&req).await?;
+    Ok((BufReader::new(r), w))
+}
+
+async fn relay_async(method: &str, params: Value) -> Result<i32> {
+    let (mut rd, mut w) = request(method, params).await?;
     let mut line = String::new();
     rd.read_line(&mut line).await?;
     let resp: Value = serde_json::from_str(line.trim()).context("bad response from daemon")?;

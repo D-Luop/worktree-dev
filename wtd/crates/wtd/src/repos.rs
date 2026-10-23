@@ -62,7 +62,7 @@ fn is_clone(d: &Path) -> bool {
 }
 
 fn valid_slug(s: &str) -> bool {
-    crate::settings::valid_name(s) && s != "archive" && s != "plan"
+    crate::settings::valid_name(s) && s != "archive" && !crate::paths::repo_less(s)
 }
 
 /// Clones found under the repos folder (two levels deep), first name wins.
