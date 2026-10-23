@@ -101,6 +101,23 @@ That means:
   session resumes its conversation when you reopen it.
 - With the daemon stopped, `agent` falls back to running the session directly in the terminal.
 
+### WSL worktrees
+
+A worktree can live inside a WSL distro instead, where everything for it runs: the agent, the shell
+under the chat, git, builds and tests. Each repo gets its own clone in the distro
+(`~/dev/worktree-dev/repos/<slug>/.bare`; change it with `wsl.<distro>.root` in `.wtd/config.json`).
+
+1. Once per distro: `wtd setup --wsl Ubuntu`. It points the distro's Claude Code and Codex hooks,
+   the `wtd` MCP server and the statusline at this `wtd.exe` (through WSL interop), and puts
+   `agent`, `wtd`, … in the distro's `~/.local/bin`. Log in to Claude inside the distro too:
+   its logins are separate (`~/.claude`, `~/.claude-accounts/<name>`).
+2. `agent <slug> <name> --platform wsl:Ubuntu`. Reopening it later needs no flag; `archive` and
+   `agent rm` work as usual.
+
+The roster reads a WSL worktree through `\\wsl.localhost\<distro>\…` and runs its git through
+`wsl.exe`. It doesn't start a stopped distro just to refresh a row. Open file uses Remote - WSL when
+it's installed.
+
 ### The tray icon
 
 Left-click opens the VS Code window on the dev root. Right-click gives:
