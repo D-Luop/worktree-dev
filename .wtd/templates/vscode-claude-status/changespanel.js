@@ -276,12 +276,7 @@ class ChangesPanel {
         if (this.dev.gitView) this.dev.gitView.testsToggled();
         break;
       }
-      case 'openFile': {
-        if (!t || !m.file) return;
-        const fp = path.join(t.wt, m.file.path);
-        if (fs.existsSync(fp)) await vscode.window.showTextDocument(vscode.Uri.file(fp), { viewColumn: this._col(), preview: true });
-        break;
-      }
+      case 'openFile': if (t && m.file) await this._openFile(m.sel, m.file); break;
       case 'openNative': {
         if (!t || !m.file) return;
         const s = this._sides(m.sel, m.file);
@@ -296,6 +291,21 @@ class ChangesPanel {
         else { this.dev.gitView.follow(t.slug, t.name); await this.dev.gitView._load(); const roots = await this.dev.gitView.getChildren(); const ch = roots.find((r) => r.kind === 'changes'); if (ch) await this.dev.gitView.openAll(ch); }
         break;
       }
+    }
+  }
+  // vscode.open lets VS Code pick the editor (text, image preview, binary placeholder) instead of
+  // showTextDocument's "seems to be binary" error. A file gone from disk opens read-only at its last revision.
+  async _openFile(sel, f) {
+    const wt = this.target.wt, fp = path.join(wt, f.path), opts = { viewColumn: this._col(), preview: true };
+    let uri = null;
+    if (f.status !== 'deleted' && fs.existsSync(fp)) uri = vscode.Uri.file(fp);
+    else if (f.status === 'deleted') uri = revUri(wt, f.path, sel === WORKING ? 'HEAD' : sel + '^');
+    else if (sel !== WORKING) uri = revUri(wt, f.path, sel);
+    if (!uri) { vscode.window.setStatusBarMessage('$(info) ' + f.path + ' is no longer on disk', 4000); return; }
+    try { await vscode.commands.executeCommand('vscode.open', uri, opts); }
+    catch {
+      if (uri.scheme === 'file') await vscode.commands.executeCommand('revealInExplorer', uri).then(undefined, () => {});
+      vscode.window.setStatusBarMessage('$(warning) Could not open ' + f.path, 4000);
     }
   }
   _sides(sel, f) {
