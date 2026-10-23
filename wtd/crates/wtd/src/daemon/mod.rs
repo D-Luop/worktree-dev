@@ -170,7 +170,10 @@ impl Daemon {
     }
 
     /// Insert/replace a worktree and push it if anything changed. Call with the lock held.
-    fn upsert(&self, inner: &mut Inner, wt: Worktree) {
+    fn upsert(&self, inner: &mut Inner, mut wt: Worktree) {
+        if wt.status == wtd_core::status::Status::Limited && wt.limit_resets_at == 0 {
+            wt.limit_resets_at = usage::limit_reset(&inner.accounts, wt.account.as_deref().unwrap_or("default"));
+        }
         if inner.worktrees.get(&wt.id) == Some(&wt) {
             return;
         }
@@ -440,6 +443,7 @@ async fn dispatch(d: &Arc<Daemon>, conn: u64, req: &Request, out: &mpsc::Unbound
                 match inner.worktrees.get(&id).cloned() {
                     Some(mut wt) => {
                         wt.status = h.status;
+                        wt.limit_resets_at = h.resets_at;
                         wt.last_activity = now();
                         d.upsert(&mut inner, wt);
                         Daemon::schedule_git(&mut inner, &id, true);
@@ -956,6 +960,15 @@ pub fn usage_fetch_dir(dir: &std::path::Path, _last: &mut HashMap<String, Accoun
 
 /// Unix seconds → local "Sun 14:05" (offset from the system clock; good enough for messages).
 pub fn fmt_local(epoch: i64) -> String {
+    let t = epoch + local_offset();
+    let days = t.div_euclid(86400);
+    let rem = t.rem_euclid(86400);
+    let wd = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"][days.rem_euclid(7) as usize];
+    format!("{wd} {:02}:{:02}", rem / 3600, (rem % 3600) / 60)
+}
+
+/// Seconds the local clock is ahead of UTC.
+pub fn local_offset() -> i64 {
     use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GetSystemTime};
     let (mut l, mut u) = unsafe { (std::mem::zeroed(), std::mem::zeroed()) };
     unsafe {
@@ -966,11 +979,7 @@ pub fn fmt_local(epoch: i64) -> String {
     let mut off = secs(&l) - secs(&u);
     if off > 14 * 3600 { off -= 86400 * ((off + 43200) / 86400); }   // month-boundary wrap
     if off < -14 * 3600 { off += 86400 * ((-off + 43200) / 86400); }
-    let t = epoch + off;
-    let days = t.div_euclid(86400);
-    let rem = t.rem_euclid(86400);
-    let wd = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"][days.rem_euclid(7) as usize];
-    format!("{wd} {:02}:{:02}", rem / 3600, (rem % 3600) / 60)
+    off
 }
 
 #[cfg(test)]

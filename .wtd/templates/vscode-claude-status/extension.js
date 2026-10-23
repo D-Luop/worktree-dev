@@ -250,6 +250,7 @@ class ClaudeStatusProvider {
 
     if (content === 'working')   return new vscode.FileDecoration('◐', 'Claude working',       new vscode.ThemeColor('claudeStatus.working'));
     if (content === 'input')     return new vscode.FileDecoration('!', 'Your turn',             new vscode.ThemeColor('claudeStatus.input'));
+    if (content === 'limited')   return new vscode.FileDecoration('⚠', 'Usage limit — waiting for reset', new vscode.ThemeColor('claudeStatus.limited'));
     if (content === 'reviewing') return new vscode.FileDecoration('⋯', 'Waiting on review',     new vscode.ThemeColor('claudeStatus.reviewing'));
     if (content === 'pr')        return new vscode.FileDecoration('◆', 'PR ready',              new vscode.ThemeColor('claudeStatus.pr'));
     if (content === 'done')      return new vscode.FileDecoration('✓', 'Done',                  new vscode.ThemeColor('claudeStatus.done'));
@@ -278,15 +279,6 @@ class DevSummaryProvider {
     this._asstTerm = null;        // the pinned assistant session's Terminal (focus instead of duplicate)
     this._term = null;            // the pinned plain terminal's Terminal (focus instead of duplicate)
     this._preview = {};           // roster key -> { label: staged-.html-path } (multiple previews/worktree)
-    this._pvPanel = null;         // the design-preview WebviewPanel (follows the focused worktree)
-    this._pvShownKey = null;      // roster key currently displayed in that panel
-    this._pvLabel = null;         // which preview label (tab) is currently rendered
-    this._pvLabelByKey = {};      // remembered tab selection per worktree key
-    this._pvFollow = false;       // true once the user engages a preview → panel tracks focus
-    this._pvAutoClosing = false;  // transient: distinguish a follow-driven close from a user close
-    this._pvTimer = null;         // poll so an open panel live-refreshes when its files change
-    this._pvSig = '';             // signature (labels+mtimes) of the last render, to detect changes
-    this._pvTabs = '';            // '|'-joined tab labels of the last render (commits tab re-render trigger)
   }
   _wtPath(slug, name) { return path.join(DEV, 'worktrees', slug, name); }
   _key(slug, name) { return slug + '' + name; }
@@ -556,115 +548,19 @@ class DevSummaryProvider {
   _previewLabels(previews) {
     return Object.keys(previews).sort((a, b) => (a === 'plan' ? -1 : b === 'plan' ? 1 : a.localeCompare(b)));
   }
-  _tabs(slug, name, previews) { return this._previewLabels(previews); }
-  // which tab to show: explicit request → remembered selection → 'plan' → first
-  _pickLabel(key, want, previews, labels) {
-    if (want && labels.includes(want)) return want;
-    const rem = this._pvLabelByKey[key];
-    if (rem && labels.includes(rem)) return rem;
-    if (previews.plan) return 'plan';
-    return labels[0] || null;
-  }
-  // does this worktree have a staged preview the panel can render?
+  // does this worktree have a staged preview?
   _hasPanelContent(key) { return Object.keys(this._preview[key] || {}).length > 0; }
-  _previewSig(previews) {
-    return this._previewLabels(previews).map((l) => {
-      let m = 0; try { m = fs.statSync(previews[l]).mtimeMs; } catch {} return l + ':' + m;
-    }).join('|');
-  }
-  _pvHtmlEsc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
 
-  // open (or refresh) the design preview for a worktree in an editor-side webview panel. The HTML is
-  // agent-authored, so it renders under a CSP: inline styles/scripts and data/https images only — no
-  // network fetch. Self-contained mockups (inline CSS, data-URI images) are the intended input.
-  showPreview(slug, name, label, reveal = true) {
+  // a worktree's staged previews are tabs in the Changes panel's bottom pane (sandboxed iframes there)
+  showPreview(slug, name, label) {
+    if (this.changes) this.changes.showPreview(slug, name, label).catch((e) => vscode.window.showErrorMessage('Preview: ' + e.message));
+  }
+
+  // A ▶ Start button in a worktree's living-plan preview was clicked: hand that step to the worktree.
+  // Send a prompt into its Claude session — open the session first if it isn't live yet (then wait for
+  // Claude to boot before typing).
+  startPlanItem(slug, name, id, title) {
     const key = this._key(slug, name);
-    const previews = this._scanPreviews(slug, name);
-    const labels = this._tabs(slug, name, previews);
-    if (!labels.length) { vscode.window.showInformationMessage('claude-status: nothing to show for ' + slug + ' ' + name); return; }
-    const chosen = this._pickLabel(key, label, previews, labels);
-    let raw;
-    try { raw = fs.readFileSync(previews[chosen], 'utf8'); } catch { return; }
-    this._pvFollow = true;   // engaging a preview → the panel now tracks the focused worktree
-    if (!this._pvPanel) {
-      this._pvPanel = vscode.window.createWebviewPanel('claudeStatus.preview', 'Design preview',
-        { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
-        { enableScripts: true, retainContextWhenHidden: true });
-      this._pvPanel.onDidDispose(() => {
-        this._pvPanel = null; this._pvShownKey = null;
-        if (this._pvTimer) { clearInterval(this._pvTimer); this._pvTimer = null; }   // stop the refresh poll
-        if (this._pvAutoClosing) this._pvAutoClosing = false;   // we closed it to follow focus → keep following
-        else this._pvFollow = false;                            // the user closed it → stop following
-      });
-      this._pvPanel.webview.onDidReceiveMessage((msg) => {
-        if (!msg) return;
-        if (msg.cmd === 'close' && this._pvPanel) this._pvPanel.dispose();
-        else if (msg.cmd === 'planAction' && msg.title) this.startPlanItem(msg.id || '', msg.title);
-        else if (msg.cmd === 'pvSwitch' && msg.label && this._pvShownKey) {   // switcher tab clicked
-          const j = this._pvShownKey.indexOf('\x01');
-          if (j >= 0) this.showPreview(this._pvShownKey.slice(0, j), this._pvShownKey.slice(j + 1), msg.label);
-        }
-      });
-    }
-    const csp = '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; '
-      + 'img-src data: https:; style-src \'unsafe-inline\' https:; font-src data: https:; script-src \'unsafe-inline\';">'
-      + '<style>body{padding-top:44px !important}</style>';   // clear the fixed switcher bar
-    // Fixed switcher bar at the very top: one button per preview this worktree has staged (living plan
-    // first), the active one highlighted, plus Close on the right. acquireVsCodeApi is one-shot per
-    // webview — grab it once and wire the tab switch, any ".go" (▶ Start) plan buttons, and Close.
-    const tab = (l) => '<button class="__wttab" data-label="' + this._pvHtmlEsc(l) + '" '
-      + 'style="cursor:pointer;white-space:nowrap;border-radius:6px;padding:3px 11px;font:600 12px system-ui;border:1px solid '
-      + (l === chosen ? '#2f81f7;background:#1f6feb;color:#fff' : '#30363d;background:#161b22;color:#adbac7') + ';">'
-      + this._pvHtmlEsc(l) + '</button>';
-    const bar = '<div id="__wtbar" style="position:fixed;top:0;left:0;right:0;z-index:2147483647;display:flex;align-items:center;'
-      + 'gap:6px;padding:6px 10px;background:#0d1117;border-bottom:1px solid #30363d;overflow-x:auto;">'
-      + labels.map(tab).join('') + '<span style="flex:1"></span>'
-      + '<div id="__wtclose" title="Close preview" style="cursor:pointer;white-space:nowrap;background:#21262d;color:#e6edf3;'
-      + 'border:1px solid #444c56;border-radius:6px;padding:3px 11px;font:600 12px system-ui;">✕ Close</div></div>'
-      + '<script>(function(){var v=window.__wtapi||(window.__wtapi=acquireVsCodeApi());'
-      + 'var b=document.getElementById("__wtclose");if(b)b.addEventListener("click",function(){v.postMessage({cmd:"close"});});'
-      + 'document.addEventListener("click",function(e){'
-      + 'var tb=e.target.closest&&e.target.closest(".__wttab");'
-      + 'if(tb){e.preventDefault();v.postMessage({cmd:"pvSwitch",label:tb.getAttribute("data-label")});return;}'
-      + 'var g=e.target.closest&&e.target.closest(".go");if(!g)return;e.preventDefault();e.stopPropagation();'
-      + 'var it=g.closest(".item");if(!it)return;var idn=it.querySelector(".id"),tn=it.querySelector(".ttl");'
-      + 'v.postMessage({cmd:"planAction",id:((idn&&idn.textContent)||"").trim(),title:((tn&&tn.textContent)||"").trim()});'
-      + 'g.classList.add("go-fired");setTimeout(function(){g.classList.remove("go-fired");},1200);});'
-      // preserve scroll position across live re-renders (setState survives an html swap on the same panel)
-      + 'window.addEventListener("scroll",function(){try{v.setState({y:window.scrollY});}catch(e){}},{passive:true});'
-      + 'try{var st=v.getState&&v.getState();if(st&&st.y)window.scrollTo(0,st.y);}catch(e){}'
-      + '})();</script>';
-    let html = /<head[^>]*>/i.test(raw) ? raw.replace(/<head[^>]*>/i, (m) => m + csp) : csp + raw;
-    html = /<\/body>/i.test(html) ? html.replace(/<\/body>/i, bar + '</body>') : html + bar;
-    this._pvPanel.title = slug + '/' + name + ' — ' + chosen;
-    this._pvPanel.webview.html = html;
-    this._pvShownKey = key; this._pvLabel = chosen; this._pvLabelByKey[key] = chosen;
-    this._pvSig = this._previewSig(previews);
-    this._pvTabs = labels.join('|');
-    // poll disk so an OPEN panel live-refreshes when files change (new tab / re-stage) — VSCode's file
-    // watcher misses the .wtd/state copy on Windows, so don't depend on it. Cleared on dispose.
-    if (!this._pvTimer) this._pvTimer = setInterval(() => this._pollPreview(), 1000);
-    if (reveal) this._pvPanel.reveal(vscode.ViewColumn.Beside, true);
-  }
-
-  // refresh poll: re-scan the shown worktree's preview dir; if a tab was added/removed or the shown
-  // file changed, re-render in place (no reveal → no focus steal; injected script restores scroll).
-  _pollPreview() {
-    if (!this._pvPanel || !this._pvShownKey) return;
-    const i = this._pvShownKey.indexOf('\x01'); if (i < 0) return;
-    const slug = this._pvShownKey.slice(0, i), name = this._pvShownKey.slice(i + 1);
-    const previews = this._scanPreviews(slug, name);
-    if (!Object.keys(previews).length) return;   // keep last content if the dir momentarily empties
-    if (this._previewSig(previews) !== this._pvSig) this.showPreview(slug, name, this._pvLabel, false);
-  }
-
-  // A ▶ Start button in the living-plan preview was clicked: hand that step to the worktree the panel
-  // is currently showing (_pvShownKey). Send a prompt into its Claude session — open the session first
-  // if it isn't live yet (then wait for Claude to boot before typing).
-  startPlanItem(id, title) {
-    const key = this._pvShownKey; if (!key) return;
-    const i = key.indexOf('\x01'); if (i < 0) return;
-    const slug = key.slice(0, i), name = key.slice(i + 1);
     const label = (id ? id + ': ' : '') + title;
     const prompt = 'Start plan item ' + label
       + ' — when it lands, tick it in .claude/plans/active-plan.html and re-run `preview` to refresh the plan.';
@@ -821,27 +717,11 @@ class DevSummaryProvider {
     return null;
   }
 
-  // header 🖼 button: open the panel for the worktree you're focused on (then it follows focus).
+  // ⋯ → Open design preview: the focused worktree's previews, in the Changes panel
   previewFocused() {
     const key = this._focusedWorktreeKey();
     if (key && this._hasPanelContent(key)) this._showPreviewByKey(key);
     else vscode.window.showInformationMessage(key ? 'No staged previews for this worktree — an agent stages one with `preview <file> [label]`.' : 'Focus a worktree session first.');
-  }
-
-  // Keep the preview panel reflecting the focused worktree: show that worktree's staged preview, hide
-  // when focus is on the assistant/terminal or a worktree without one, re-show on return. Only active
-  // once the user has engaged a preview (clicked a 🖼); driven by terminal-focus changes, not the poll
-  // (so clicking a 🖼 from another tab doesn't immediately close the preview it just opened).
-  _syncPreviewPanel(t) {
-    if (!this._pvFollow) return;
-    let want = null;
-    if (t && termName(t) !== ASST_NAME && termName(t) !== TERM_NAME) {
-      for (const [k, v] of this._terms) if (v === t && this._hasPanelContent(k)) { want = k; break; }
-      if (!want) for (const k of Object.keys(this._preview)) if (k.split('\x01')[1] === termName(t)) { want = k; break; }
-    }
-    if (want === this._pvShownKey) return;
-    if (want) this._showPreviewByKey(want);
-    else if (this._pvPanel) { this._pvAutoClosing = true; this._pvPanel.dispose(); }
   }
 
   onTermClosed(t) { const sk = this._shellKey(t); if (sk) { this._shells.delete(sk); if (this._shownShell === sk) this._shownShell = null; return; }
@@ -850,7 +730,6 @@ class DevSummaryProvider {
     if (!t) return;
     if (this._shellKey(t)) return;   // the bottom shell: the session above stays the selected one
     this._current = t; setTimeout(() => this._postRoster(), 0);   // mark the focused session as selected
-    this._syncPreviewPanel(t);   // make the design-preview panel follow the worktree you switched to
     const tk = this._terminalKey(t);   // …and the Changes tree
     if (tk) { const j = tk.indexOf('\x01'); const s = tk.slice(0, j), n = tk.slice(j + 1);
       if (this.gitView) this.gitView.follow(s, n);
@@ -1064,6 +943,8 @@ class DevSummaryProvider {
         this.openOrFocusAssistant();
       } else if (m.cmd === 'newTerminal') {
         this.openOrFocusTerminal();
+      } else if (m.cmd === 'preview' && m.slug) {
+        this.showPreview(m.slug, m.name);
       } else if (m.cmd === 'previewFocused') {
         this.previewFocused();
       } else if (m.cmd === 'ticket' && m.slug) {
@@ -1213,7 +1094,7 @@ class DevSummaryProvider {
       if (w.kind === 'dev') continue;   // the assistant has its own pinned row
       const slug = w.slug, name = w.name;
       rows.push({ id: w.id, group: w.group || null, parent: w.parent || null, slug, name, status: w.status === 'none' ? '' : w.status, dirty: !!(w.git && w.git.dirty), ahead: (w.git && w.git.ahead) || 0,
-                  branch: (w.git && w.git.branch) || '', plan: w.plan_title || '', account: w.account || '', live: !!w.live, kind: w.kind || '', program: w.program || '', msgPending: pendingFrom[w.id] || 0 });
+                  branch: (w.git && w.git.branch) || '', plan: w.plan_title || '', account: w.account || '', live: !!w.live, kind: w.kind || '', program: w.program || '', msgPending: pendingFrom[w.id] || 0, limitResetsAt: w.limit_resets_at || 0 });
       if (w.live) live.add(slug + '-' + name);
     }
     return { rows, live };
@@ -1237,6 +1118,7 @@ class DevSummaryProvider {
       if (w.status === 'input' && prev !== undefined && prev !== 'input' && key !== curKey) this._unread[key] = true;
       this._lastStatus[key] = w.status;
       w.unread = !!this._unread[key];
+      w.preview = this._hasPanelContent(key);   // staged previews → 🖼 on the row
       w.active = live.has(w.slug + '-' + w.name);   // has a live tmux session (vs. closed/inactive)
       w.current = !!cur && (curKey ? key === curKey : termName(cur) === w.name);   // focused session
     }
@@ -1393,6 +1275,8 @@ class DevSummaryProvider {
   .row.wt.child{padding-left:20px;}
   .msgp{flex:none;color:var(--vscode-editorWarning-foreground,#d2a000);padding:2px;border-radius:3px;}
   .msgp:hover{background:var(--vscode-toolbar-hoverBackground);}
+  .wt .pv{flex:none;cursor:pointer;padding:2px;border-radius:3px;opacity:.9;}
+  .wt .pv:hover{background:var(--vscode-toolbar-hoverBackground);opacity:1;}
   .row.wt:not(.live) .st{opacity:.55;} .row.wt:not(.live) .nm{color:var(--vscode-descriptionForeground);}
   .row.unread{box-shadow:inset 2px 0 0 var(--vscode-charts-yellow,#d2a000);background:rgba(255,216,61,.08);}
   .row.unread .nm{font-weight:600;color:var(--vscode-foreground);}
@@ -1448,9 +1332,10 @@ class DevSummaryProvider {
   let ungroupedCollapsed = !!saved.ungroupedCollapsed;
   function save(){ vsc.setState({activeOnly, query, searchOpen, statuses:[...statuses], ungroupedCollapsed}); }
 
-  const GLYPH={working:'🔵',input:'🟡',reviewing:'🟣',pr:'🔹',done:'🟢',stopped:'🔴'};   // editor tab name prefix (host side)
+  const GLYPH={working:'🔵',input:'🟡',limited:'⚠️',reviewing:'🟣',pr:'🔹',done:'🟢',stopped:'🔴'};   // editor tab name prefix (host side)
   const STATUS=[
     ['input','Your turn','bell-dot','var(--vscode-charts-yellow,#d2a000)'],
+    ['limited','Usage limit','warning','var(--vscode-charts-orange,#e8912d)'],
     ['working','Working','loading codicon-modifier-spin','var(--vscode-charts-blue,#4aa3ff)'],
     ['reviewing','Reviewing','eye','var(--vscode-charts-purple,#c586f0)'],
     ['pr','PR ready','git-pull-request','var(--vscode-charts-blue,#5cc8ff)'],
@@ -1458,10 +1343,12 @@ class DevSummaryProvider {
     ['stopped','Stopped','circle-large-outline','var(--vscode-descriptionForeground)'],
   ];
   const SMAP=Object.fromEntries(STATUS.map(s=>[s[0],s]));
-  const PRIO={input:0,reviewing:1,working:2,pr:3,done:4,stopped:5,'':6};
+  const PRIO={input:0,limited:0,reviewing:1,working:2,pr:3,done:4,stopped:5,'':6};
   function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
   function col(p){ return p>=90?'var(--vscode-charts-red,#e5534b)':p>=70?'var(--vscode-charts-yellow,#d2a000)':'var(--vscode-charts-green,#3fb950)'; }
   function rel(ts){ if(!ts) return ''; const s=ts-Math.floor(Date.now()/1000); if(s<=0) return 'resetting'; const h=Math.floor(s/3600),m=Math.floor((s%3600)/60); return h>0?(h+'h'+m+'m'):(m+'m'); }
+  function limTxt(ts){ if(!ts) return 'limit'; const s=ts-Math.floor(Date.now()/1000); if(s<=0) return 'limit · reset passed';
+    const d=new Date(ts*1000); return 'limit · resets '+(s>86400?d.toLocaleDateString([],{weekday:'short'})+' ':'')+d.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}); }
   function ago(ts){ if(!ts) return 0; return Math.max(0, Math.floor(Date.now()/1000)-ts); }
   function agoTxt(s){ const m=Math.floor(s/60); return m>=60?(Math.floor(m/60)+'h'+(m%60)+'m'):(m>0?(m+'m'):(s+'s')); }
   const ico=(name,extra)=>'<i class="codicon codicon-'+name+(extra?' '+extra:'')+'"></i>';
@@ -1541,12 +1428,15 @@ class DevSummaryProvider {
     const acct = (w.active && w.program==='codex') ? '<span class="badge" title="Codex session'+(acctName&&acctName!=='default'?' · account '+esc(acctName):'')+'">codex'+(acctName&&acctName!=='default'?' · '+esc(acctName):'')+'</span>'
       : (multiAcct && w.active && w.account && w.account!=='default') ? '<span class="badge" title="Claude account">'+esc(w.account)+'</span>' : '';
     const role = w.kind==='delegate' ? '<span class="badge" title="Delegator for '+esc(w.name)+': keeps its docs and research, and starts worktrees">delegator</span>' : '';
-    const tip = w.slug+'/'+w.name+' — '+s[1]+(w.active?' · live session':'')+(w.branch?' · '+w.branch:'')+(w.plan?'\\n'+w.plan:'')+'\\nclick to open';
+    const lim = w.status==='limited' ? limTxt(w.limitResetsAt) : '';
+    const tip = w.slug+'/'+w.name+' — '+s[1]+(lim?' · '+lim:'')+(w.active?' · live session':'')+(w.branch?' · '+w.branch:'')+(w.plan?'\\n'+w.plan:'')+'\\nclick to open';
     const drag = groupsData && canEditGroups;
     return '<div class="row wt'+(child?' child':'')+(w.active?' live':'')+(w.unread?' unread':'')+(w.current?' current':'')+'" data-id="'+esc(w.id||'')+'" data-slug="'+esc(w.slug)+'" data-name="'+esc(w.name)+'" data-glyph="'+g+'" title="'+esc(tip)+'"'+(drag?' draggable="true"':'')+'>'
       +'<span class="st" style="color:'+s[3]+'">'+ico(s[2])+'</span>'
       +'<span class="nm">'+esc(w.name)+'</span>'+(groupsData&&w.kind!=='delegate'?'<span class="rb" title="repository">'+esc(w.slug)+'</span>':'')+role+acct
+      +(lim?'<span class="badge" style="color:'+s[3]+'" title="'+esc(lim)+'">'+esc(lim.replace(/^limit · /,''))+'</span>':'')
       +(w.msgPending?'<i class="codicon codicon-comment-unresolved msgp" title="'+w.msgPending+' message'+(w.msgPending===1?'':'s')+' from this agent awaiting your approval — click to review"></i>':'')
+      +(w.preview?'<i class="codicon codicon-file-media pv" title="Staged previews: open them in the Changes panel"></i>':'')
       +'<span class="git">'+git+'</span>'
       +'<span class="acts">'
       +'<i class="codicon codicon-diff dif" title="Commits & diffs"></i>'
@@ -1606,7 +1496,7 @@ class DevSummaryProvider {
     }
     const on=(sel,cmd)=>el.querySelectorAll(sel).forEach(x=>x.onclick=(ev)=>{ ev.stopPropagation(); const p=x.closest('.wt'); vsc.postMessage({cmd,slug:p.dataset.slug,name:p.dataset.name}); });
     el.querySelectorAll('.wt').forEach(x=>x.onclick=()=>vsc.postMessage({cmd:'open',slug:x.dataset.slug,name:x.dataset.name,glyph:x.dataset.glyph}));
-    on('.arch','archive'); on('.del','delete'); on('.term','terminate'); on('.unr','markunread'); on('.acc','switchAccount'); on('.dif','openCommits'); on('.tkt','ticket');
+    on('.arch','archive'); on('.del','delete'); on('.term','terminate'); on('.unr','markunread'); on('.acc','switchAccount'); on('.dif','openCommits'); on('.tkt','ticket'); on('.pv','preview');
     el.querySelectorAll('.mv').forEach(x=>x.onclick=(ev)=>{ ev.stopPropagation(); vsc.postMessage({cmd:'groupMove', worktree:x.closest('.wt').dataset.id}); });
     el.querySelectorAll('.msgp').forEach(x=>x.onclick=(ev)=>{ ev.stopPropagation(); vsc.postMessage({cmd:'reviewMessages', worktree:x.closest('.wt').dataset.id}); });
   }
@@ -2078,11 +1968,8 @@ function activate(context) {
   const pvWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(pvDir, '**/*.html'));
   const pvChange = (uri) => {
     const k = dev._previewKey(uri.fsPath); if (!k) return;
-    const key = dev._key(k.slug, k.name);
     dev._scanPreviews(k.slug, k.name); dev._postRoster();   // refresh the worktree's tab set
-    // live-refresh the open panel in place when a preview it's showing changes (e.g. an agent re-stages
-    // its living plan, or adds a new tab) — no reveal, so focus isn't stolen. (Poll is the backstop.)
-    if (dev._pvPanel && dev._pvShownKey === key) dev.showPreview(k.slug, k.name, dev._pvLabel, false);
+    if (dev.changes) dev.changes._pollPreviews();   // the Changes panel's preview tabs (its poll is the backstop)
   };
   pvWatcher.onDidCreate(pvChange); pvWatcher.onDidChange(pvChange); pvWatcher.onDidDelete(pvChange);
   context.subscriptions.push(pvWatcher);

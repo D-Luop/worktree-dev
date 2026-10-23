@@ -39,7 +39,7 @@ pub fn ask_main(args: &[String]) -> Result<i32> {
     Ok(st.code().unwrap_or(1))
 }
 
-// --- preview: stage an HTML mockup for the roster's preview panel ----------------------------------
+// --- preview: stage an HTML mockup as a tab of the Changes panel -----------------------------------
 
 pub fn preview_main(args: &[String]) -> Result<i32> {
     let dev = paths::dev_root()?;
@@ -56,7 +56,7 @@ pub fn preview_main(args: &[String]) -> Result<i32> {
     let dest = r.id.split('/').fold(paths::state_dir(&dev).join("previews"), |p, c| p.join(c)).join(format!("{label}.html"));
     std::fs::create_dir_all(dest.parent().unwrap())?;
     std::fs::copy(&src, &dest)?;
-    println!("preview '{label}' staged for {} → open the panel (🖼) and pick the '{label}' tab", r.id);
+    println!("preview '{label}' staged for {} → click 🖼 on its roster row (the Changes panel's '{label}' tab)", r.id);
     Ok(0)
 }
 
@@ -185,7 +185,7 @@ pub fn tokens_main(args: &[String]) -> Result<i32> {
     let w = 38;
     println!("{:<w$}{:>8}{:>9}{:>9}{:>8}{:>7}{:>12}", "repo / worktree", "in", "cacheW", "cacheR", "out", "msgs", "est $");
     println!("{}", "-".repeat(w + 53));
-    let groups = [("working", "● working"), ("input", "● input (your turn)"), ("reviewing", "⋯ reviewing"), ("pr", "◆ pr (PR-ready)"), ("done", "✓ done"), ("stopped", "○ stopped"), ("none", "· not running")];
+    let groups = [("working", "● working"), ("input", "● input (your turn)"), ("limited", "⚠ limited (waiting for reset)"), ("reviewing", "⋯ reviewing"), ("pr", "◆ pr (PR-ready)"), ("done", "✓ done"), ("stopped", "○ stopped"), ("none", "· not running")];
     let mut grand = Row::default();
     for (st, title) in groups {
         let mut g: Vec<&Row> = rows.iter().filter(|r| r.status == st || (st == "none" && !groups.iter().any(|(s, _)| *s == r.status))).collect();

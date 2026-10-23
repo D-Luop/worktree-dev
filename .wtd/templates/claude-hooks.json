@@ -10,6 +10,26 @@
         ]
       }
     ],
+    "StopFailure": [
+      {
+        "matcher": "rate_limit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__DEV__/.wtd/hooks/wt-status.sh limited"
+          }
+        ]
+      },
+      {
+        "matcher": "overloaded|authentication_failed|oauth_org_not_allowed|account_on_hold|verification_required|billing_error|invalid_request|model_not_found|server_error|unknown|max_output_tokens|cloud_credential_error",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__DEV__/.wtd/hooks/wt-status.sh stop"
+          }
+        ]
+      }
+    ],
     "Notification": [
       {
         "hooks": [

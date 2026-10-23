@@ -6,7 +6,7 @@
    • an ITEM is done when its checkbox has `checked` — the script dims it and updates the counter,
      so marking a step done = add `checked` to that one <input> (nothing else to touch)
    • append a <li> to the Progress Log as you finish each step
-  Each item has a "▶ Start" button. When the plan is open in the roster preview panel, clicking it
+  Each item has a "▶ Start" button. When the plan is open in the Changes panel, clicking it
   tells THIS worktree's Claude session to begin that step (it does nothing when the file is opened
   outside the panel). Keep step TITLES self-contained — the title text is what the session is told to
   work on. Self-contained: all CSS/JS inline, no network. Re-run `preview .claude/plans/active-plan.html`
@@ -69,7 +69,7 @@
   .tag{font-size:10.5px;font-weight:600;padding:1px 7px;border-radius:5px;background:#1c2836;color:#9db3cc;border:1px solid var(--bd2)}
   .desc{color:#93a1b4;font-size:13px}
   .desc b{color:#c3cede;font-weight:600}
-  /* "start this step" button — wired by the preview panel; inert when the file is opened elsewhere */
+  /* "start this step" button — wired by the Changes panel; inert when the file is opened elsewhere */
   .go{flex:none;align-self:center;cursor:pointer;font:600 11.5px system-ui;color:#9cc7ff;background:#132131;
     border:1px solid #27405c;border-radius:7px;padding:5px 11px;white-space:nowrap;transition:.15s}
   .go:hover{background:#1b3350;color:#cfe4ff;border-color:#3a5c82}
@@ -173,7 +173,7 @@
 <script>
   // Purely cosmetic: reflect each checkbox into done-styling + the top counter. State of record is
   // the `checked` attributes in the HTML (which the agent edits); ticking in the panel is ephemeral.
-  // The ▶ Start buttons are wired by the preview panel host, not here.
+  // The ▶ Start buttons are wired by the Changes panel, not here.
   function sync(){
     var items = Array.prototype.slice.call(document.querySelectorAll('.item'));
     var done = 0;

@@ -73,7 +73,7 @@ fn tools() -> Value {
     json!([
         {
             "name": "fleet_list",
-            "description": "List every WorkTreeDev worktree: other agents working in parallel on other branches/repos. Shows id (slug/name), status (working | input = waiting on the user | reviewing | pr | done | stopped), whether a live agent session is attached, git state (branch, dirty, ahead/behind), and the title of its active plan. Your own worktree is marked self. Read-only.",
+            "description": "List every WorkTreeDev worktree: other agents working in parallel on other branches/repos. Shows id (slug/name), status (working | input = waiting on the user | limited = hit a usage limit, waiting for limit_resets_at | reviewing | pr | done | stopped), whether a live agent session is attached, git state (branch, dirty, ahead/behind), and the title of its active plan. Your own worktree is marked self. Read-only.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
             "annotations": { "readOnlyHint": true }
         },

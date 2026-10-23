@@ -105,6 +105,54 @@ fn ensure_hooks(codex_home: &Path, exe: &Path) -> Result<()> {
     Ok(())
 }
 
+type Version = [u64; 3];
+
+/// `0.163.0` out of `codex-cli 0.163.0` or a release dir name like `0.163.0-x86_64-pc-windows-msvc`.
+fn parse_version(s: &str) -> Option<Version> {
+    let tok = s.split_whitespace().find(|t| t.starts_with(|c: char| c.is_ascii_digit()))?;
+    let mut it = tok.split('-').next()?.split('.').map(|n| n.parse().ok());
+    Some([it.next()??, it.next()??, it.next()??])
+}
+
+/// The newest app-server daemon release installed under any of `homes`
+/// (`<home>/packages/app-server-daemon/releases/<ver>-<target>/`).
+fn newest_daemon(homes: &[PathBuf]) -> Option<Version> {
+    homes.iter()
+        .filter_map(|h| std::fs::read_dir(h.join("packages").join("app-server-daemon").join("releases")).ok())
+        .flat_map(|d| d.flatten())
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| parse_version(&e.file_name().to_string_lossy()))
+        .max()
+}
+
+fn cli_version() -> Option<Version> {
+    let (exe, pre) = crate::run::command_for("codex");
+    let mut c = std::process::Command::new(exe);
+    crate::win::no_window(c.args(pre).arg("--version"));
+    let o = c.stdin(std::process::Stdio::null()).output().ok()?;
+    parse_version(&String::from_utf8_lossy(&o.stdout))
+}
+
+fn fmt(v: Version) -> String {
+    format!("{}.{}.{}", v[0], v[1], v[2])
+}
+
+fn skew_warning(cli: Version, daemon: Version) -> Option<String> {
+    (cli < daemon).then(|| format!(
+        "warning: codex CLI {} is older than its background server {} (started by a newer Codex app) — sessions may stop on \
+\"incompatible feature settings\". Fix: npm i -g @openai/codex@latest",
+        fmt(cli), fmt(daemon)))
+}
+
+/// A one-line warning when the `codex` CLI is older than the newest app-server daemon a newer Codex
+/// client installed, which then refuses the CLI's sessions.
+pub fn version_skew(codex_home: &Path) -> Option<String> {
+    let mut homes = vec![codex_home.to_path_buf()];
+    homes.extend(crate::paths::home_dir().ok().map(|h| h.join(".codex")));
+    let daemon = newest_daemon(&homes)?;
+    skew_warning(cli_version()?, daemon)
+}
+
 /// The first file an `apply_patch` call touches (Codex's edit tool), from any string in its input.
 pub fn patched_path(tool_input: &Value) -> Option<String> {
     fn scan(v: &Value) -> Option<String> {
@@ -129,6 +177,33 @@ mod tests {
         let v = json!({ "input": "*** Begin Patch\n*** Update File: src/app.ts\n@@\n-a\n+b\n*** End Patch" });
         assert_eq!(patched_path(&v).as_deref(), Some("src/app.ts"));
         assert_eq!(patched_path(&json!({ "command": ["ls"] })), None);
+    }
+
+    #[test]
+    fn version_compare() {
+        assert_eq!(parse_version("codex-cli 0.160.0\n"), Some([0, 160, 0]));
+        assert_eq!(parse_version("0.163.0-x86_64-pc-windows-msvc"), Some([0, 163, 0]));
+        assert_eq!(parse_version("codex-cli"), None);
+        assert_eq!(parse_version("0.163"), None);
+        assert!(skew_warning([0, 160, 0], [0, 163, 0]).is_some_and(|w| w.contains("npm i -g @openai/codex@latest")));
+        assert!(skew_warning([0, 163, 0], [0, 163, 0]).is_none());
+        assert!(skew_warning([0, 164, 0], [0, 163, 0]).is_none());
+        assert!(skew_warning([0, 99, 0], [0, 100, 0]).is_some(), "numeric, not lexical");
+    }
+
+    #[test]
+    fn newest_daemon_release() {
+        let t = std::env::temp_dir().join(format!("wtd-codex-daemon-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        let rel = |home: &str, v: &str| std::fs::create_dir_all(t.join(home).join("packages/app-server-daemon/releases").join(v)).unwrap();
+        rel("a", "0.160.0-x86_64-pc-windows-msvc");
+        rel("a", "0.99.0-x86_64-pc-windows-msvc");
+        rel("b", "0.163.0-aarch64-apple-darwin");
+        std::fs::write(t.join("a/packages/app-server-daemon/releases/9.9.9.tmp"), "").unwrap(); // not a dir
+        assert_eq!(newest_daemon(&[t.join("a")]), Some([0, 160, 0]));
+        assert_eq!(newest_daemon(&[t.join("a"), t.join("b"), t.join("missing")]), Some([0, 163, 0]));
+        assert_eq!(newest_daemon(&[t.join("missing")]), None);
+        std::fs::remove_dir_all(&t).ok();
     }
 
     #[test]

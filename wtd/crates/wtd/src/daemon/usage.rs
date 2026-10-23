@@ -36,6 +36,20 @@ fn read_json(p: &Path) -> Option<Value> {
     serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()
 }
 
+/// When `account`'s exhausted window resets (the later one if both are), else its 5h reset; 0 = unknown.
+pub fn limit_reset(accounts: &[Account], account: &str) -> i64 {
+    let Some(a) = accounts.iter().find(|a| a.name == account) else { return 0 };
+    let windows = [a.five_hour.as_ref(), a.seven_day.as_ref()];
+    windows
+        .iter()
+        .flatten()
+        .filter(|l| l.used.is_some_and(|u| u >= 100.0))
+        .map(|l| l.resets_at)
+        .max()
+        .or(a.five_hour.as_ref().map(|l| l.resets_at))
+        .unwrap_or(0)
+}
+
 /// Fetch every account. `last` keeps the previous good result per account so a failed fetch (429,
 /// offline, expired token) shows the last known numbers (with their old `ts`) rather than nothing.
 pub fn fetch_all(home: &Path, last: &mut HashMap<String, Account>, now: i64) -> Vec<Account> {
@@ -211,7 +225,19 @@ pub fn parse_rfc3339(s: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{codex_limits, parse_rfc3339};
+    use super::{codex_limits, limit_reset, parse_rfc3339};
+    use wtd_core::model::{Account, Limit};
+
+    #[test]
+    fn limit_reset_prefers_the_exhausted_window() {
+        let lim = |used, resets_at| Some(Limit { used: Some(used), resets_at });
+        let acct = |five, seven| Account { name: "default".into(), five_hour: five, seven_day: seven, ..Default::default() };
+        assert_eq!(limit_reset(&[acct(lim(100.0, 10), lim(40.0, 99))], "default"), 10);
+        assert_eq!(limit_reset(&[acct(lim(60.0, 10), lim(100.0, 99))], "default"), 99);
+        assert_eq!(limit_reset(&[acct(lim(60.0, 10), lim(40.0, 99))], "default"), 10);
+        assert_eq!(limit_reset(&[acct(None, None)], "default"), 0);
+        assert_eq!(limit_reset(&[acct(lim(100.0, 10), None)], "other"), 0);
+    }
 
     #[test]
     fn codex_windows_map_to_5h_and_7d() {
