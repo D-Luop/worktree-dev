@@ -804,7 +804,7 @@ impl Setup {
         }
         if dunce(&self.exe_dir).zip(dunce(&prog)).is_some_and(|(e, p)| e.to_ascii_lowercase().starts_with(&p.to_ascii_lowercase())) {
             let mut c = Command::new("cmd");
-            c.arg("/c").arg(format!("ping -n 3 127.0.0.1 >nul & rmdir /s /q \"{}\"", prog.display()));
+            std::os::windows::process::CommandExt::raw_arg(&mut c, format!("/c ping -n 3 127.0.0.1 >nul & rmdir /s /q \"{}\"", prog.display()));
             c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
             win::spawn_detached(&mut c)?;
             println!("    {} will be removed once this exits", prog.display());

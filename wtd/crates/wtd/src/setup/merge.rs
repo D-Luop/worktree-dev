@@ -65,37 +65,54 @@ fn is_our_entry(entry: &Value) -> bool {
     })
 }
 
-/// Drop our entries from every event; events left empty go too, and `hooks` itself if it empties.
-fn strip_our_hooks(settings: &mut Value) {
-    let Some(hooks) = settings.get_mut("hooks").and_then(Value::as_object_mut) else { return };
-    hooks.retain(|_, entries| {
-        let Some(list) = entries.as_array_mut() else { return true };
+/// Drop our entries from every event, in place (keys keep their position); returns the events this emptied.
+fn strip_our_hooks(settings: &mut Value) -> Vec<String> {
+    let Some(hooks) = settings.get_mut("hooks").and_then(Value::as_object_mut) else { return vec![] };
+    let mut emptied = vec![];
+    for (event, entries) in hooks.iter_mut() {
+        let Some(list) = entries.as_array_mut() else { continue };
         let before = list.len();
         list.retain(|e| !is_our_entry(e));
-        !(list.is_empty() && before > 0)
-    });
+        if list.is_empty() && before > 0 {
+            emptied.push(event.clone());
+        }
+    }
+    emptied
+}
+
+/// Remove the given events if they're (still) empty, then `hooks` itself if nothing is left.
+fn drop_empty(settings: &mut Value, events: &[String]) {
+    let Some(hooks) = settings.get_mut("hooks").and_then(Value::as_object_mut) else { return };
+    for e in events {
+        if hooks.get(e).and_then(Value::as_array).is_some_and(Vec::is_empty) {
+            hooks.shift_remove(e);
+        }
+    }
     if hooks.is_empty() {
         obj(settings).shift_remove("hooks");
     }
 }
 
 /// Our status hooks in, replacing any earlier copy of ours; the user's own hooks (on the same events
-/// too) are kept ahead of ours.
+/// too) are kept ahead of ours, and events only an older version of ours used are removed.
 pub fn merge_hooks(settings: &mut Value, rendered: &Value) {
-    strip_our_hooks(settings);
-    let Some(tmpl) = rendered.get("hooks").and_then(Value::as_object) else { return };
-    let hooks = child_obj(settings, "hooks");
-    for (event, entries) in tmpl {
-        let list = hooks.entry(event.clone()).or_insert_with(|| json!([]));
-        if !list.is_array() {
-            *list = json!([]);
+    let emptied = strip_our_hooks(settings);
+    if let Some(tmpl) = rendered.get("hooks").and_then(Value::as_object) {
+        let hooks = child_obj(settings, "hooks");
+        for (event, entries) in tmpl {
+            let list = hooks.entry(event.clone()).or_insert_with(|| json!([]));
+            if !list.is_array() {
+                *list = json!([]);
+            }
+            list.as_array_mut().unwrap().extend(entries.as_array().cloned().unwrap_or_default());
         }
-        list.as_array_mut().unwrap().extend(entries.as_array().cloned().unwrap_or_default());
     }
+    drop_empty(settings, &emptied);
 }
 
 pub fn unmerge_hooks(settings: &mut Value) {
-    strip_our_hooks(settings);
+    let emptied = strip_our_hooks(settings);
+    drop_empty(settings, &emptied);
 }
 
 pub fn set_statusline(settings: &mut Value) {
@@ -251,11 +268,13 @@ mod tests {
 
     #[test]
     fn claude_settings_idempotent() {
-        let mut once = fixture("claude-settings.before.json");
-        install(&mut once);
-        let mut twice = once.clone();
-        install(&mut twice);
-        assert_eq!(to_text(&once, 2), to_text(&twice, 2));
+        for start in [fixture("claude-settings.before.json"), json!({})] {
+            let mut once = start;
+            install(&mut once);
+            let mut twice = once.clone();
+            install(&mut twice);
+            assert_eq!(to_text(&once, 2), to_text(&twice, 2), "same text, same key order");
+        }
     }
 
     #[test]
