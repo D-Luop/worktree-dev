@@ -30,6 +30,8 @@ const ID_TOGGLE: usize = 1;
 const ID_OPEN: usize = 2;
 const ID_LOGON: usize = 3;
 const ID_QUIT: usize = 4;
+/// "New session" items: ID_NEW_BASE + index into Frontend::ALL
+const ID_NEW_BASE: usize = 20;
 /// "Default frontend" radio items: ID_DEFAULT_BASE + index into Frontend::ALL
 const ID_DEFAULT_BASE: usize = 10;
 /// session rows: ID_ROW_BASE + row * ROW_STRIDE + action (0..3 = Frontend::ALL, ACT_STOP)
@@ -215,6 +217,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                         let _ = frontend::set_default_frontend(&dev, Frontend::ALL[id - ID_DEFAULT_BASE]);
                     }
                 }
+                id if (ID_NEW_BASE..ID_NEW_BASE + Frontend::ALL.len()).contains(&id) => {
+                    let f = Frontend::ALL[id - ID_NEW_BASE];
+                    std::thread::spawn(move || report(paths::dev_root().and_then(|dev| frontend::new_session(&dev, f)), &format!("start a session in {}", f.label())));
+                }
                 id if id >= ID_ROW_BASE => row_command(id - ID_ROW_BASE),
                 _ => {}
             }
@@ -291,6 +297,14 @@ unsafe fn show_menu(hwnd: HWND) {
         add(MF_STRING | MF_GRAYED, 0, "No worktrees yet");
     }
     *ROWS.lock().unwrap() = rows.into_iter().map(|w| w.id).collect();
+    let nsub = CreatePopupMenu();
+    for (i, f) in Frontend::ALL.iter().enumerate() {
+        AppendMenuW(nsub, MF_STRING, ID_NEW_BASE + i, win::wide(&format!("in {}", f.label())).as_ptr());
+        if *f == def {
+            SetMenuDefaultItem(nsub, (ID_NEW_BASE + i) as u32, 0);
+        }
+    }
+    AppendMenuW(m, MF_POPUP | if view.running { 0 } else { MF_GRAYED }, nsub as usize, win::wide("New session").as_ptr());
     AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
     let fsub = CreatePopupMenu();
     for (i, f) in Frontend::ALL.iter().enumerate() {
@@ -348,14 +362,14 @@ fn row_command(off: usize) {
     }
     let Some(&f) = Frontend::ALL.get(act) else { return };
     // off the UI thread: opening VS Code waits for `code` to focus the window first
-    std::thread::spawn(move || {
-        if let Err(e) = paths::dev_root().and_then(|dev| frontend::open(&dev, &id, f)) {
-            let text = win::wide(&format!("Couldn't open {id} in {}:
+    std::thread::spawn(move || report(paths::dev_root().and_then(|dev| frontend::open(&dev, &id, f)), &format!("open {id} in {}", f.label())));
+}
 
-{e:#}", f.label()));
-            unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), win::wide("WorkTreeDev").as_ptr(), MB_OK | MB_ICONWARNING) };
-        }
-    });
+fn report(r: Result<()>, what: &str) {
+    if let Err(e) = r {
+        let text = win::wide(&format!("Couldn't {what}:\n\n{e:#}"));
+        unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), win::wide("WorkTreeDev").as_ptr(), MB_OK | MB_ICONWARNING) };
+    }
 }
 
 fn spawn_hidden(cmd: &mut Command) {

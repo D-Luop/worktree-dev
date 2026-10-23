@@ -78,15 +78,31 @@ pub fn open(dev: &Path, id: &str, f: Frontend) -> Result<()> {
             ensure_zed_key();
             win::no_window(Command::new(zed).arg(&wt)).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
         }
-        Frontend::Terminal => {
-            let wtd = paths::wtd_exe();
-            // Windows Terminal when present (a tab titled after the worktree), else a classic console
-            let wt_tab = Command::new("wt.exe").args(["-w", "0", "nt", "--title", name, "-d"]).arg(dev)
-                .arg(&wtd).args(["agent", slug, name]).spawn();
-            if wt_tab.is_err() {
-                Command::new(&wtd).args(["agent", slug, name]).current_dir(dev).creation_flags(CREATE_NEW_CONSOLE).spawn()?;
-            }
-        }
+        Frontend::Terminal => console(dev, name, &["agent".into(), slug.into(), name.into()])?,
+    }
+    Ok(())
+}
+
+/// Start the New Session flow in `f`: VS Code's wizard, or `wtd new` in a console (Zed opens after).
+pub fn new_session(dev: &Path, f: Frontend) -> Result<()> {
+    if f == Frontend::VsCode {
+        let _ = win::no_window(Command::new("cmd").args(["/c", "code"]).arg(dev)).status();
+        win::no_window(Command::new("cmd").args(["/c", "code", "--open-url", "vscode://local.claude-status/new"])).spawn()?;
+        return Ok(());
+    }
+    let mut args = vec!["new".to_string()];
+    if f == Frontend::Zed {
+        args.extend(["--in".into(), "zed".into()]);
+    }
+    console(dev, "New session", &args)
+}
+
+/// Run `wtd <args>` in a Windows Terminal tab when present, else a classic console.
+fn console(dev: &Path, title: &str, args: &[String]) -> Result<()> {
+    let wtd = paths::wtd_exe();
+    let tab = Command::new("wt.exe").args(["-w", "0", "nt", "--title", title, "-d"]).arg(dev).arg(&wtd).args(args).spawn();
+    if tab.is_err() {
+        Command::new(&wtd).args(args).current_dir(dev).creation_flags(CREATE_NEW_CONSOLE).spawn()?;
     }
     Ok(())
 }

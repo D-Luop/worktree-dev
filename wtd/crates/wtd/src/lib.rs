@@ -13,6 +13,7 @@ pub mod guard;
 pub mod hook;
 pub mod issues;
 pub mod mcp;
+pub mod new;
 pub mod paths;
 pub mod repos;
 pub mod review;
@@ -37,6 +38,8 @@ Worktrees & sessions (also on PATH as plain `agent`, `archive`, … via ~/.local
   wtd agent <slug> <name> [--from ref] [--account a] [--issue-file md] [--no-claude] [ref…]
                                      create-or-open a worktree and its agent session
   wtd agent ls|stop|rm|done|pr|wip … manage worktrees (`wtd agent` for details)
+  wtd new [<slug>] [--in terminal|zed]
+                                     New Session wizard in the console (repo → branch)
   wtd archive <slug> <name>          park a worktree under worktrees/<slug>/archive (branch kept)
   wtd assistant                      the dev-root assistant session
   wtd close                          end the session this terminal belongs to
@@ -104,6 +107,7 @@ fn dispatch(cmd: &str, rest: &[String]) -> Result<i32> {
         "mcp" => mcp::main(),
         "tray" => tray::main(rest),
         "open" => frontend::open_main(rest),
+        "new" => new::main(rest),
         "frontend" => frontend::frontend_main(rest),
         "repo" => settings::repo_main(rest),
         "account" => settings::account_main(rest),
