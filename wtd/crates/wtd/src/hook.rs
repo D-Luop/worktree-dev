@@ -86,7 +86,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         .ok()
         .filter(|s| !s.is_empty())
         .or(input.cwd)
-        .map(|s| paths::normalize(&s))
+        .map(|s| crate::wsl_backend::path::host_path(&s, crate::wsl_backend::caller_distro().as_deref()))
         .unwrap_or(std::env::current_dir()?);
     let dev = paths::dev_root()?;
     let Some(wt) = paths::resolve_worktree(&dev, &dir) else { return Ok(()) }; // not ours

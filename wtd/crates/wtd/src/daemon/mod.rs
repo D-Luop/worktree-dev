@@ -687,6 +687,9 @@ async fn rescan(d: &Arc<Daemon>) {
                 wt.account = old.account.clone();
                 wt.hosted = old.hosted;
                 wt.program = old.program.clone();
+                if wt.wsl_path.is_some() && wt.plan_title.is_none() {
+                    wt.plan_title = old.plan_title.clone(); // its distro is stopped: not re-read
+                }
                 wt.last_activity = if wt.status != old.status { now() } else { old.last_activity };
             }
             None => {
@@ -707,7 +710,8 @@ async fn rescan(d: &Arc<Daemon>) {
         d.remove(&mut inner, id);
     }
     messages::expire_orphans(d, &mut inner);
-    let want: Vec<(String, PathBuf)> = inner.worktrees.values().filter(|w| w.id != DEV_ID).map(|w| (w.id.clone(), PathBuf::from(&w.path))).collect();
+    // WSL worktrees aren't watched (no change notifications over \\wsl.localhost): hooks and sweeps cover them
+    let want: Vec<(String, PathBuf)> = inner.worktrees.values().filter(|w| w.id != DEV_ID && w.wsl_path.is_none()).map(|w| (w.id.clone(), PathBuf::from(&w.path))).collect();
     drop(inner);
     for id in &gone {
         d.unwatch(id);

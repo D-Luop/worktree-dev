@@ -135,6 +135,29 @@ pub fn running_distros() -> Vec<String> {
     list(&["--running"])
 }
 
+/// Running distros, re-asked at most every 15 s (the daemon's scans and git sweeps both ask).
+pub fn running_cached() -> Vec<String> {
+    static CACHE: std::sync::Mutex<Option<(std::time::Instant, Vec<String>)>> = std::sync::Mutex::new(None);
+    let mut c = CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    match &*c {
+        Some((at, v)) if at.elapsed() < std::time::Duration::from_secs(15) => v.clone(),
+        _ => {
+            let v = running_distros();
+            *c = Some((std::time::Instant::now(), v.clone()));
+            v
+        }
+    }
+}
+
+/// The distro a `wtd.exe` started through WSL interop was called from: `WSL_DISTRO_NAME` (forwarded
+/// by the WSLENV our sessions set), else the `\\wsl.localhost\<distro>\…` cwd interop gives us.
+pub fn caller_distro() -> Option<String> {
+    std::env::var("WSL_DISTRO_NAME")
+        .ok()
+        .filter(|d| !d.is_empty())
+        .or_else(|| std::env::current_dir().ok().and_then(|c| path::from_unc(&c.to_string_lossy())).map(|(d, _)| d))
+}
+
 // --- per-distro dev root -----------------------------------------------------------------------------
 
 fn distro_setting(dev: &Path, distro: &str, key: &str) -> Option<String> {
