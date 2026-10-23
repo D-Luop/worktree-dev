@@ -500,7 +500,7 @@ function settingsHtml() {
   }
 
   // ---------- Accounts ----------
-  function usageFor(a){ if(a.provider!=='claude') return null; return (D.usage||[]).find(u=>u.name===a.name)||null; }
+  function usageFor(a){ const k=a.provider==='codex'?'codex:'+a.name:a.name; return (D.usage||[]).find(u=>u.name===k)||null; }
   function bar(l,v){ const p=typeof v==='number'?Math.round(v):null; return '<span class="bar">'+l+'<span class="track"><span class="fill" style="display:block;width:'+(p||0)+'%;background:'+col(p||0)+'"></span></span>'+(p==null?'--':p+'%')+'</span>'; }
   const ROLE_LABEL={dev:'Sessions',review:'Reviews',assistant:'Assistant'};
   function accountCard(a){

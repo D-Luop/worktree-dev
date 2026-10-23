@@ -1145,7 +1145,7 @@ class DevSummaryProvider {
     this._notified = this._notified || {};
     try {
       for (const a of list) {
-        if (!a || a.nologin) continue;
+        if (!a || a.nologin || a.provider === 'codex') continue;   // switching moves Claude sessions only
         const util = Math.max((a.five_hour && a.five_hour.used) || 0, (a.seven_day && a.seven_day.used) || 0);
         if (util < 95) continue;
         const rk = (a.five_hour && a.five_hour.resets_at) || (a.seven_day && a.seven_day.resets_at) || '';
@@ -1447,7 +1447,7 @@ class DevSummaryProvider {
     const el=document.getElementById('lim');
     if(!accts || !accts.length){ el.innerHTML='<div class="none">'+(daemon.installed&&!daemon.running?'usage paused — daemon stopped':'waiting for usage…')+'</div>'; return; }
     el.innerHTML = accts.map(a=>{
-      const label = a.email || a.name;
+      const label = (a.provider==='codex'?'Codex · ':'') + (a.email || a.name);
       const head = '<div class="acct" title="'+esc(label)+'">'+esc(label)+'</div>';
       if(a.nologin) return '<div class="acctblk">'+head+'<div class="none">not logged in</div></div>';
       const f=a.five_hour||{}, s=a.seven_day||{};
@@ -1775,7 +1775,7 @@ async function newSessionWizard(dev) {
         items.push({ label: prov === 'claude' ? 'Claude' : 'Codex', kind: vscode.QuickPickItemKind.Separator });
         for (const a of list) items.push({
           label: (prov === 'claude' ? '$(sparkle) ' : '$(symbol-misc) ') + a.name + (a.logged_in ? '' : ' $(circle-slash)'),
-          description: [a.email, a.plan, prov === 'claude' && a.logged_in ? usageText(usage.get(a.name)) : ''].filter(Boolean).join(' · '),
+          description: [a.email, a.plan, a.logged_in ? usageText(usage.get(prov === 'codex' ? 'codex:' + a.name : a.name)) : ''].filter(Boolean).join(' · '),
           detail: !a.logged_in ? 'Not logged in — log in from Settings → Accounts' : (a.roles || []).includes('dev') ? 'Default for new sessions' : undefined,
           acct: a,
         });
