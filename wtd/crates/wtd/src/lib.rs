@@ -65,6 +65,10 @@ Worktrees & sessions (also on PATH as plain `agent`, `archive`, … via ~/.local
                                      per platform and repo (.wtd/custom)
   wtd tokens                         token usage across sessions
   wtd ship                           package the toolkit for another machine
+  wtd update [--check] [--channel stable|beta] [--apply-now [--yes]]
+                                     check for / download / apply a new release (installed builds)
+  wtd update status|config …         update state as JSON; auto / channel / restart-with-live-sessions
+  wtd version                        version, channel, program dir, dev root (JSON)
 
 Fleet & daemon
   wtd daemon start|stop [--force]|status|run
@@ -147,6 +151,8 @@ fn dispatch(cmd: &str, rest: &[String]) -> Result<i32> {
         "preview" => tools::preview_main(rest),
         "tokens" => tools::tokens_main(rest),
         "ship" => tools::ship_main(rest),
+        "update" => updater::cli::main(rest),
+        "version" | "--version" | "-V" => updater::cli::version_main(),
         "stop" => {
             let id = rest.first().ok_or_else(|| anyhow::anyhow!("usage: wtd stop <slug/name>"))?;
             let r = client::Client::connect_required()?.request(method::SESSION_STOP, json!({ "id": id }))?;

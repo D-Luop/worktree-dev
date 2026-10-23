@@ -39,6 +39,13 @@ const MI_STOP: usize = 10;
 const MI_DEFAULT: usize = 20; // + index into Frontend::ALL
 const MI_LOGON: usize = 30;
 const MI_QUIT: usize = 31;
+const MI_UPD_APPLY: usize = 40;
+const MI_UPD_CHECK: usize = 41;
+const MI_UPD_AUTO: usize = 42;
+const MI_UPD_CHANNEL: usize = 43; // + index into CHANNELS
+const MI_UPD_LIVE: usize = 46; // + index into LIVE
+const CHANNELS: [(&str, &str); 2] = [("stable", "Stable"), ("beta", "Beta")];
+const LIVE: [(&str, &str); 3] = [("never", "Wait until they end"), ("ask", "Ask me"), ("auto", "Restart anyway")];
 
 #[derive(Clone, Copy)]
 struct Rgb(u8, u8, u8);
@@ -864,6 +871,8 @@ fn gear_menu(hwnd: HWND, def: Frontend) {
         AppendMenuW(m, MF_POPUP, sub as usize, win::wide("Open sessions in").as_ptr());
         AppendMenuW(m, MF_STRING | if tray::start_at_logon() { MF_CHECKED } else { MF_UNCHECKED }, MI_LOGON, win::wide("Start tray at logon").as_ptr());
         AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
+        update_items(m);
+        AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(m, MF_STRING, MI_QUIT, win::wide("Quit tray").as_ptr());
         popup(hwnd, m)
     };
@@ -874,7 +883,46 @@ fn gear_menu(hwnd: HWND, def: Frontend) {
             }
         }
         Some(MI_LOGON) => tray::set_start_at_logon(!tray::start_at_logon()),
+        Some(MI_UPD_APPLY) => tray::restart_to_update(hwnd),
+        Some(MI_UPD_CHECK) => tray::wtd_detached(&["update"]),
+        Some(MI_UPD_AUTO) => {
+            let on = !crate::updater::Settings::load().auto;
+            tray::wtd_detached(&["update", "config", "--auto", if on { "on" } else { "off" }]);
+        }
+        Some(c) if (MI_UPD_CHANNEL..MI_UPD_CHANNEL + CHANNELS.len()).contains(&c) => tray::wtd_detached(&["update", "config", "--channel", CHANNELS[c - MI_UPD_CHANNEL].0]),
+        Some(c) if (MI_UPD_LIVE..MI_UPD_LIVE + LIVE.len()).contains(&c) => tray::wtd_detached(&["update", "config", "--live", LIVE[c - MI_UPD_LIVE].0]),
         Some(MI_QUIT) => unsafe { PostQuitMessage(0) },
         _ => {}
     }
+}
+
+/// The ⚙ menu's update section: where the updater is at, "Restart to update", and its settings.
+unsafe fn update_items(m: HMENU) {
+    let u = tray::UPDATE.lock().unwrap().clone().unwrap_or_else(|| crate::updater::status_json("idle", None));
+    let ver = u["version"].as_str().unwrap_or("?");
+    let item = |flags: u32, id: usize, text: &str| AppendMenuW(m, flags, id, win::wide(text).as_ptr());
+    if u["mode"] == "dev" {
+        item(MF_STRING | MF_GRAYED, 0, &format!("Dev build {ver} — updates off"));
+        return;
+    }
+    let pct = u["progress"]["total"].as_u64().filter(|t| *t > 0).map(|t| u["progress"]["done"].as_u64().unwrap_or(0) * 100 / t);
+    match (u["phase"].as_str().unwrap_or(""), u["staged"].as_str()) {
+        ("applying", _) => item(MF_STRING | MF_GRAYED, 0, "Updating…"),
+        (_, Some(staged)) => item(MF_STRING, MI_UPD_APPLY, &format!("Restart to update ({ver} → {staged})")),
+        ("downloading", _) => item(MF_STRING | MF_GRAYED, 0, &format!("Downloading {}{}", u["latest"].as_str().unwrap_or(""), pct.map(|p| format!(" — {p}%")).unwrap_or_default())),
+        ("checking", _) => item(MF_STRING | MF_GRAYED, 0, "Checking for updates…"),
+        _ if !u["error"].is_null() => item(MF_STRING, MI_UPD_CHECK, &format!("WorkTreeDev {ver} — update check failed; retry")),
+        _ => item(MF_STRING, MI_UPD_CHECK, &format!("WorkTreeDev {ver} — check for updates")),
+    };
+    let s = &u["settings"];
+    item(MF_STRING | if s["auto"] == true { MF_CHECKED } else { MF_UNCHECKED }, MI_UPD_AUTO, "Automatic updates");
+    let sub = |opts: &[(&str, &str)], cur: &serde_json::Value, base: usize| {
+        let p = CreatePopupMenu();
+        for (i, (key, label)) in opts.iter().enumerate() {
+            AppendMenuW(p, MF_STRING | if cur == key { MF_CHECKED } else { MF_UNCHECKED }, base + i, win::wide(label).as_ptr());
+        }
+        p
+    };
+    AppendMenuW(m, MF_POPUP, sub(&CHANNELS, &s["channel"], MI_UPD_CHANNEL) as usize, win::wide("Update channel").as_ptr());
+    AppendMenuW(m, MF_POPUP, sub(&LIVE, &s["restartWithLiveSessions"], MI_UPD_LIVE) as usize, win::wide("Update while sessions are live").as_ptr());
 }

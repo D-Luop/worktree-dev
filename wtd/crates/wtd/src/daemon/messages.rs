@@ -195,7 +195,7 @@ mod tests {
             inner.worktrees.insert(id.to_string(), Worktree { id: id.to_string(), path: p.to_string_lossy().into(), ..Default::default() });
         }
         let (tx, _) = tokio::sync::broadcast::channel(64);
-        Arc::new(Daemon { dev, inner: Mutex::new(inner), tx, next_conn: AtomicU64::new(1), watchers: Mutex::new(HashMap::new()) })
+        Arc::new(Daemon { dev, inner: Mutex::new(inner), tx, next_conn: AtomicU64::new(1), watchers: Mutex::new(HashMap::new()), updates: Default::default() })
     }
 
     fn send_from(d: &Arc<Daemon>, from: &str, to: &str) -> u64 {

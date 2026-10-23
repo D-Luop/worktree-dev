@@ -6,6 +6,7 @@
 //! A source checkout (dev mode) never updates itself.
 
 pub mod apply;
+pub mod cli;
 pub mod fetch;
 mod sign;
 
@@ -450,6 +451,22 @@ pub fn check_and_stage(l: &Layout, channel: Channel, progress: &dyn Fn(u64, u64)
     let err = res.as_ref().err().map(|e| format!("{e:#}"));
     let _ = State::update(l, |s| s.error = err);
     res
+}
+
+/// Whether a staged update may be applied without asking: restarting ends hosted sessions.
+pub fn safe_to_apply(s: &Settings, hosted: usize) -> bool {
+    s.auto && (hosted == 0 || s.live == LivePolicy::Auto)
+}
+
+/// At tray start (sign-in): apply an update that was waiting, if that ends no hosted session.
+pub fn apply_at_tray_start() {
+    let Some(l) = installed_layout() else { return };
+    let Some(ver) = l.staged() else { return };
+    if safe_to_apply(&Settings::load(), cli::hosted_sessions()) {
+        if let Err(e) = apply::spawn_helper(&l, &ver, false) {
+            l.log(&format!("tray start: applying {ver}: {e:#}"));
+        }
+    }
 }
 
 /// Everything a UI needs: mode, settings, what's available / staged, and the last apply.

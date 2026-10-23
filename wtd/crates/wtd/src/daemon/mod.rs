@@ -9,6 +9,7 @@ mod host;
 mod messages;
 mod pty;
 mod store;
+mod update;
 mod watch;
 mod usage;
 
@@ -162,6 +163,7 @@ struct Daemon {
     next_conn: AtomicU64,
     /// worktree id → its file watcher (dropping it releases the directory handles)
     watchers: Mutex<HashMap<String, notify::RecommendedWatcher>>,
+    updates: update::Updates,
 }
 
 impl Daemon {
@@ -270,7 +272,7 @@ async fn serve(dev: PathBuf) -> Result<()> {
 
     let (tx, _) = broadcast::channel(1024);
     let inner = Inner { store: store::Store::load(&dev), ..Default::default() };
-    let d = Arc::new(Daemon { dev: dev.clone(), inner: Mutex::new(inner), tx, next_conn: AtomicU64::new(1), watchers: Mutex::new(HashMap::new()) });
+    let d = Arc::new(Daemon { dev: dev.clone(), inner: Mutex::new(inner), tx, next_conn: AtomicU64::new(1), watchers: Mutex::new(HashMap::new()), updates: Default::default() });
     eprintln!("[{}] wtd daemon {} up: pid {}, dev {}", now(), env!("CARGO_PKG_VERSION"), std::process::id(), dev.display());
 
     rescan(&d).await;
@@ -280,6 +282,7 @@ async fn serve(dev: PathBuf) -> Result<()> {
     tokio::spawn(metrics_loop(d.clone()));
     tokio::spawn(jobs_loop(d.clone()));
     tokio::spawn(tickets_loop(d.clone()));
+    tokio::spawn(update::update_loop(d.clone()));
     // a test daemon (own pipe) must not start the real tray
     if std::env::var_os("WTD_PIPE").is_none() {
         tokio::spawn(tray_loop());
@@ -621,6 +624,17 @@ async fn dispatch(d: &Arc<Daemon>, conn: u64, req: &Request, out: &mpsc::Unbound
         method::MESSAGE_SEND => messages::send(d, p),
         method::MESSAGE_DECIDE => messages::decide(d, p),
         method::MESSAGE_LIST => messages::list(d, p),
+        method::UPDATE_STATUS => Ok(update::broadcast(d)),
+        method::UPDATE_CHECK => {
+            if p.get("wait").and_then(Value::as_bool).unwrap_or(false) {
+                update::check(d).await
+            } else {
+                let bg = d.clone();
+                tokio::spawn(async move { update::check(&bg).await });
+                Ok(update::status(d))
+            }
+        }
+        method::UPDATE_APPLY => update::apply_now(d, p.get("force").and_then(Value::as_bool).unwrap_or(false)),
         method::JOB_SCHEDULE => {
             let kind = p.get("kind").and_then(Value::as_str).context("missing kind")?.to_string();
             if kind != "review" {
