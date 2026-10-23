@@ -1972,6 +1972,11 @@ function activate(context) {
   });
   { const k = dev._terminalKey(vscode.window.activeTerminal);
     if (k) { const j = k.indexOf('\x01'); dev.gitView.follow(k.slice(0, j), k.slice(j + 1)); dev.changes.follow(k.slice(0, j), k.slice(j + 1)); } }
+  // `wtd open <id> --in vscode` (the tray's session list) → vscode://local.claude-status/open?slug=&name=
+  context.subscriptions.push(vscode.window.registerUriHandler({ handleUri(uri) {
+    const q = new URLSearchParams(uri.query), slug = q.get('slug'), name = q.get('name');
+    if (uri.path === '/open' && slug && name) dev.openOrFocus(slug, name);
+  } }));
   // ctrl+v in a focused session → image-aware paste (see DevSummaryProvider.smartPaste)
   context.subscriptions.push(vscode.commands.registerCommand('claudeStatus.smartPaste', () => dev.smartPaste()));
   // a terminal swallows ctrl+v (sends it to the shell) unless the bound command is in commandsToSkipShell

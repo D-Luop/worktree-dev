@@ -166,6 +166,7 @@ On Windows: `wtd help`. Each command below also works as a bare name through its
 | `wtd repo set-dir <folder>\|--clear` · `wtd repo set-guardrails <slug>\|* <json>` | The repos folder, and guardrails for one repo or the defaults (`*`). |
 | `tokens` | Token usage and estimated cost per worktree. |
 | `ship [out]` | Package the toolkit (no secrets, worktrees or repos) for another machine. |
+| `wtd open <slug>/<name> [--in vscode\|zed\|terminal]` · `wtd frontend [vscode\|zed\|terminal]` | Show a session in VS Code, Zed or a terminal (Windows Terminal tab when available) · show or set the default. Zed opens the worktree folder; the session keeps running in the daemon. |
 | `wtd daemon start\|stop\|status` · `wtd tray` · `wtd ls` | Daemon control, tray icon, and a fleet listing. |
 
 **In-session skills:**

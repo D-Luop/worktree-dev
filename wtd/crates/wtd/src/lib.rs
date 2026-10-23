@@ -7,6 +7,7 @@ pub mod client;
 pub mod codex;
 pub mod custom;
 pub mod daemon;
+pub mod frontend;
 pub mod gitx;
 pub mod guard;
 pub mod hook;
@@ -55,12 +56,15 @@ Fleet & daemon
   wtd daemon start|stop [--force]|status|run
                                      control the background daemon (--force: also end hosted sessions)
   wtd ls [--json]                    list worktrees (status, git, live session)
+  wtd open <slug/name> [--in vscode|zed|terminal]
+                                     show a worktree's session (default: `wtd frontend`)
+  wtd frontend [vscode|zed|terminal] show or set the default frontend
   wtd stop <slug/name>               end a worktree's live session (kills its process tree)
   wtd refresh [slug/name]            rescan worktrees and re-check git now
   wtd hook <event>                   Claude Code hook handler (reads hook JSON on stdin)
   wtd mcp                            stdio MCP server: read-only fleet tools for agents
   wtd tray [--spawn|--quit|--logon on|off]
-                                     notification-area icon: start/stop the daemon, open VS Code
+                                     notification-area icon: sessions, new session, start/stop the daemon
   wtd repo ls|add|rm|fetch|set-github … repos (JSON output; see `wtd repo`)
   wtd account ls|add|rm|use …        Claude / Codex logins and role defaults (JSON output)
   wtd env                            installed CLIs, GitHub login + scopes, tray-at-logon
@@ -99,6 +103,8 @@ fn dispatch(cmd: &str, rest: &[String]) -> Result<i32> {
         "attach" => attach::attach_main(rest),
         "mcp" => mcp::main(),
         "tray" => tray::main(rest),
+        "open" => frontend::open_main(rest),
+        "frontend" => frontend::frontend_main(rest),
         "repo" => settings::repo_main(rest),
         "account" => settings::account_main(rest),
         "env" => settings::env_main(rest),

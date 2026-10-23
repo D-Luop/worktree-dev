@@ -75,6 +75,9 @@ That means:
 
 Left-click opens the VS Code window on the dev root. Right-click gives:
 
+- Your sessions, needs-you first. Each row opens in VS Code, Zed or a terminal (the default one is
+  bold); a live row can also be stopped.
+- Open sessions in ▸ VS Code / Zed / Terminal: the default (same as `wtd frontend <name>`)
 - Start / Stop daemon
 - Open VS Code
 - Start tray at logon

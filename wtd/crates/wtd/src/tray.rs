@@ -1,4 +1,5 @@
-//! `wtd tray`: notification-area icon that starts/stops the daemon and opens the dev-root window.
+//! `wtd tray`: notification-area icon that lists sessions (open each in VS Code / Zed / a terminal),
+//! starts/stops the daemon and opens the dev-root window.
 //!
 //! A separate process from the daemon on purpose: if the daemon owned the icon, stopping it would
 //! remove the only button that can start it again. Holds one daemon subscription (on its own thread)
@@ -16,10 +17,11 @@ use windows_sys::Win32::System::Registry::{RegDeleteKeyValueW, RegGetValueW, Reg
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::Shell::{Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
-use wtd_core::model::Worktree;
+use wtd_core::model::{Worktree, WorktreeKind};
 use wtd_core::protocol::{method, Push, ServerLine};
 use wtd_core::status::Status;
 
+use crate::frontend::{self, Frontend};
 use crate::{client::Client, paths, win};
 
 const WM_TRAY: u32 = WM_APP + 1;
@@ -28,6 +30,13 @@ const ID_TOGGLE: usize = 1;
 const ID_OPEN: usize = 2;
 const ID_LOGON: usize = 3;
 const ID_QUIT: usize = 4;
+/// "Default frontend" radio items: ID_DEFAULT_BASE + index into Frontend::ALL
+const ID_DEFAULT_BASE: usize = 10;
+/// session rows: ID_ROW_BASE + row * ROW_STRIDE + action (0..3 = Frontend::ALL, ACT_STOP)
+const ID_ROW_BASE: usize = 1000;
+const ROW_STRIDE: usize = 8;
+const ACT_STOP: usize = 3;
+const MAX_ROWS: usize = 40;
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "WorkTreeDev";
 
@@ -49,6 +58,10 @@ struct Tray {
 unsafe impl Send for Tray {}
 
 static TRAY: Mutex<Option<Tray>> = Mutex::new(None);
+/// the daemon's worktrees, kept by the watcher thread for the menu
+static FLEET: Mutex<Vec<Worktree>> = Mutex::new(Vec::new());
+/// worktree ids of the rows in the menu last shown (WM_COMMAND arrives after it closes)
+static ROWS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// `wtd tray [--spawn | --quit | --logon on|off]`
 pub fn main(args: &[String]) -> Result<i32> {
@@ -148,6 +161,7 @@ fn watch_daemon(hwnd: isize) {
                                 Push::Shutdown => break,
                                 _ => continue,
                             }
+                            *FLEET.lock().unwrap() = wts.values().cloned().collect();
                             post(summarize(&wts, approvals));
                         }
                         Ok(Some(_)) => continue,
@@ -156,6 +170,7 @@ fn watch_daemon(hwnd: isize) {
                 }
             }
         }
+        FLEET.lock().unwrap().clear();
         post(View::default());
         std::thread::sleep(Duration::from_secs(2));
     }
@@ -195,6 +210,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 ID_OPEN => open_vscode(),
                 ID_LOGON => set_start_at_logon(!start_at_logon()),
                 ID_QUIT => PostQuitMessage(0),
+                id if (ID_DEFAULT_BASE..ID_DEFAULT_BASE + Frontend::ALL.len()).contains(&id) => {
+                    if let Ok(dev) = paths::dev_root() {
+                        let _ = frontend::set_default_frontend(&dev, Frontend::ALL[id - ID_DEFAULT_BASE]);
+                    }
+                }
+                id if id >= ID_ROW_BASE => row_command(id - ID_ROW_BASE),
                 _ => {}
             }
             0
@@ -249,6 +270,33 @@ unsafe fn show_menu(hwnd: HWND) {
     };
     add(MF_STRING | MF_GRAYED, 0, &tooltip(view));
     AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
+    let def = paths::dev_root().map(|d| frontend::default_frontend(&d)).unwrap_or(Frontend::VsCode);
+    let rows = session_rows();
+    for (i, w) in rows.iter().enumerate() {
+        let sub = CreatePopupMenu();
+        let base = ID_ROW_BASE + i * ROW_STRIDE;
+        for (a, f) in Frontend::ALL.iter().enumerate() {
+            AppendMenuW(sub, MF_STRING, base + a, win::wide(&format!("Open in {}", f.label())).as_ptr());
+            if *f == def {
+                SetMenuDefaultItem(sub, (base + a) as u32, 0);
+            }
+        }
+        if w.live {
+            AppendMenuW(sub, MF_SEPARATOR, 0, std::ptr::null());
+            AppendMenuW(sub, MF_STRING, base + ACT_STOP, win::wide("Stop session").as_ptr());
+        }
+        AppendMenuW(m, MF_POPUP, sub as usize, win::wide(&row_label(w)).as_ptr());
+    }
+    if rows.is_empty() && view.running {
+        add(MF_STRING | MF_GRAYED, 0, "No worktrees yet");
+    }
+    *ROWS.lock().unwrap() = rows.into_iter().map(|w| w.id).collect();
+    AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
+    let fsub = CreatePopupMenu();
+    for (i, f) in Frontend::ALL.iter().enumerate() {
+        AppendMenuW(fsub, MF_STRING | if *f == def { MF_CHECKED } else { MF_UNCHECKED }, ID_DEFAULT_BASE + i, win::wide(f.label()).as_ptr());
+    }
+    AppendMenuW(m, MF_POPUP, fsub as usize, win::wide("Open sessions in").as_ptr());
     add(MF_STRING, ID_TOGGLE, if view.running { "Stop daemon" } else { "Start daemon" });
     add(MF_STRING, ID_OPEN, "Open VS Code");
     AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
@@ -260,6 +308,54 @@ unsafe fn show_menu(hwnd: HWND) {
     TrackPopupMenu(m, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, pt.x, pt.y, 0, hwnd, std::ptr::null());
     PostMessageW(hwnd, WM_NULL, 0, 0);
     DestroyMenu(m);
+}
+
+/// Worktrees for the menu: needs-you first, then by activity rank, then name; the dev base excluded.
+fn session_rows() -> Vec<Worktree> {
+    let rank = |s: Status| match s {
+        Status::Input => 0,
+        Status::Working => 1,
+        Status::Reviewing => 2,
+        Status::Pr => 3,
+        Status::None | Status::Stopped => 4,
+        Status::Done => 5,
+    };
+    let mut v: Vec<Worktree> = FLEET.lock().unwrap().iter().filter(|w| w.kind != WorktreeKind::Dev).cloned().collect();
+    v.sort_by(|a, b| (rank(a.status), !a.live, &a.id).cmp(&(rank(b.status), !b.live, &b.id)));
+    v.truncate(MAX_ROWS);
+    v
+}
+
+fn row_label(w: &Worktree) -> String {
+    let glyph = match w.status {
+        Status::Input => "●",
+        Status::Working => "◐",
+        Status::Reviewing => "◆",
+        Status::Pr => "◇",
+        Status::Done => "✓",
+        Status::None | Status::Stopped => if w.live { "○" } else { "·" },
+    };
+    // `&` is a menu mnemonic marker; `	` right-aligns the repo
+    format!("{glyph}  {}	{}", w.name.replace('&', "&&"), w.slug.replace('&', "&&"))
+}
+
+fn row_command(off: usize) {
+    let Some(id) = ROWS.lock().unwrap().get(off / ROW_STRIDE).cloned() else { return };
+    let act = off % ROW_STRIDE;
+    if act == ACT_STOP {
+        spawn_hidden(Command::new(paths::wtd_exe()).args(["stop", &id]));
+        return;
+    }
+    let Some(&f) = Frontend::ALL.get(act) else { return };
+    // off the UI thread: opening VS Code waits for `code` to focus the window first
+    std::thread::spawn(move || {
+        if let Err(e) = paths::dev_root().and_then(|dev| frontend::open(&dev, &id, f)) {
+            let text = win::wide(&format!("Couldn't open {id} in {}:
+
+{e:#}", f.label()));
+            unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), win::wide("WorkTreeDev").as_ptr(), MB_OK | MB_ICONWARNING) };
+        }
+    });
 }
 
 fn spawn_hidden(cmd: &mut Command) {
