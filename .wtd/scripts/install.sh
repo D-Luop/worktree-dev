@@ -5,8 +5,7 @@ BASE="$(dirname "$WTD")"                                                  # ~/de
 BASHRC="$HOME/.bashrc"
 SETTINGS="$HOME/.claude/settings.json"
 HOOKS_TMPL="$WTD/templates/claude-hooks.json"
-# newest built .vsix (build-vsix.py names them claude-status-<version>.vsix)
-VSIX="$(ls -1v "$WTD"/templates/vscode-claude-status/claude-status-*.vsix 2>/dev/null | tail -1)"
+EXT_DIR="$WTD/templates/vscode-claude-status"
 # Shipped templates carry __DEV__/__USER__/__DISTRO__ placeholders so they're machine-agnostic;
 # render them to this host's real values at install time.
 WTD_USER="$(id -un)"
@@ -162,14 +161,29 @@ fi
 rm -f "$HOOKS_RENDERED"
 
 echo "==> D. install VSCode claude-status extension"
-# Pin the dev base for the extension. The .vsix ships prebuilt (can't be __DEV__-rendered), so the
+# Pin the dev base for the extension. The .vsix is not __DEV__-rendered, so the
 # extension reads this file to find the real root regardless of which folder VSCode has open. Store a
 # NATIVE path (cygpath -w on Windows) — the extension resolves it with node's fs, not an MSYS path.
 DEV_ROOT_PIN="$HOME/.config/wtd/dev-root"
 mkdir -p "$(dirname "$DEV_ROOT_PIN")"
 if command -v cygpath >/dev/null 2>&1; then cygpath -w "$BASE" > "$DEV_ROOT_PIN"; else printf '%s\n' "$BASE" > "$DEV_ROOT_PIN"; fi
 echo "    pinned dev root -> $(cat "$DEV_ROOT_PIN")  ($DEV_ROOT_PIN)"
-if ! command -v code >/dev/null 2>&1; then
+# Built from source every install (build-vsix.py derives the version from git, so a source change
+# always yields a new version). A prebuilt vsix already in the folder (e.g. from a `wtd ship` tarball)
+# is the fallback when python is missing or the build fails.
+PY=""
+for p in python3 python "py -3"; do
+  if $p -c 'import sys; sys.exit(sys.version_info < (3, 6))' >/dev/null 2>&1; then PY="$p"; break; fi
+done
+if [ -n "$PY" ] && $PY "$EXT_DIR/build-vsix.py"; then
+  echo "    built from source"
+else
+  echo "    WARN: could not build the vsix (${PY:-no python 3 found}); using a prebuilt one if present"
+fi
+VSIX="$(ls -1v "$EXT_DIR"/claude-status-*.vsix 2>/dev/null | tail -1)"
+if [ -z "$VSIX" ]; then
+  echo "    SKIPPED: no vsix — install python 3 and re-run"
+elif ! command -v code >/dev/null 2>&1; then
   echo "    SKIPPED: 'code' not on PATH"
 elif code --install-extension "$VSIX" --force 2>/dev/null; then
   echo "    installed via --force"

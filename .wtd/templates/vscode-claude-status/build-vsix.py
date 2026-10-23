@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Package this extension into a .vsix (a zip with the VSCode extension layout) using only the
-stdlib — no vsce/npm needed. Run after editing extension.js / package.json:
+stdlib — no vsce/npm needed. install.sh runs it and installs the result; run it by hand to test:
 
     python build-vsix.py
 
-It reads the version from package.json, emits the two metadata files, and writes
-claude-status-<version>.vsix next to this script. install.sh installs that file via
-`code --install-extension`."""
+The version is derived: package.json's version with its patch raised by the number of commits that
+touched this folder, so it moves whenever the source does. Don't bump package.json by hand, and
+don't commit the .vsix (it's gitignored). Writes claude-status-<version>.vsix next to this script,
+replacing any older build."""
 import json
 import os
 import subprocess
@@ -21,7 +22,20 @@ if subprocess.call(["node", os.path.join(HERE, "check-webview.js")]) != 0:
     sys.exit("ABORT: webview script parse check failed — not building the vsix")
 
 pkg = json.load(open(os.path.join(HERE, "package.json"), encoding="utf-8"))
-VERSION = pkg["version"]
+
+
+def derived_version(base):
+    try:
+        n = int(subprocess.check_output(["git", "rev-list", "--count", "HEAD", "--", "."], cwd=HERE,
+                                        stderr=subprocess.DEVNULL, text=True).strip())
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        return base
+    major, minor, patch = base.split(".")
+    return f"{major}.{minor}.{int(patch) + n}"
+
+
+VERSION = derived_version(pkg["version"])
+pkg["version"] = VERSION
 NAME, PUBLISHER = pkg["name"], pkg["publisher"]
 
 CONTENT_TYPES = (
@@ -50,10 +64,14 @@ MANIFEST = (
 )
 
 out = os.path.join(HERE, f"{NAME}-{VERSION}.vsix")
+for f in os.listdir(HERE):
+    if f.startswith(f"{NAME}-") and f.endswith(".vsix"):
+        os.remove(os.path.join(HERE, f))
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
     z.writestr("[Content_Types].xml", CONTENT_TYPES)
     z.writestr("extension.vsixmanifest", MANIFEST)
-    for f in ("package.json", "extension.js", "gitview.js", "gitparse.js", "changespanel.js", "changes.html", "settings.js", "README.md", "LICENSE"):
+    z.writestr("extension/package.json", json.dumps(pkg, indent=2, ensure_ascii=False) + "\n")
+    for f in ("extension.js", "gitview.js", "gitparse.js", "changespanel.js", "changes.html", "settings.js", "README.md", "LICENSE"):
         z.write(os.path.join(HERE, f), f"extension/{f}")
     # bundled codicons (toolbar / row icons) + their licenses
     for f in sorted(os.listdir(os.path.join(HERE, "media"))):
