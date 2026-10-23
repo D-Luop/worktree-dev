@@ -26,7 +26,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::sync::{broadcast, mpsc, Semaphore};
-use wtd_core::model::{Account, Group, Metrics, Snapshot, Worktree, DEV_ID};
+use wtd_core::model::{Account, GitState, Group, Metrics, Snapshot, Worktree, DEV_ID};
 use wtd_core::protocol::{method, HookParams, Push, Request, Response, ServerLine, SessionParams, PROTOCOL_VERSION};
 
 use crate::{client::Client, paths, win};
@@ -735,50 +735,91 @@ async fn scan_loop(d: Arc<Daemon>) {
     }
 }
 
+/// A due `git status`: a Windows worktree's folder, or a WSL worktree's distro + Linux path.
+enum GitTarget {
+    Local(PathBuf),
+    Wsl(String, String),
+}
+
 async fn git_loop(d: Arc<Daemon>) {
     let sem = Arc::new(Semaphore::new(GIT_CONCURRENCY));
     let mut t = tokio::time::interval(Duration::from_millis(500));
     loop {
         t.tick().await;
-        let ready: Vec<(String, PathBuf)> = {
+        let ready: Vec<(String, GitTarget)> = {
             let mut inner = d.lock();
             let now_i = Instant::now();
-            let ids: Vec<String> = inner
-                .git_due
-                .iter()
-                .filter(|(id, g)| g.due <= now_i && !inner.git_running.contains_key(*id))
-                .map(|(id, _)| id.clone())
-                .take(sem.available_permits())
-                .collect();
-            ids.into_iter()
-                .filter_map(|id| {
+            let mut local_slots = sem.available_permits();
+            let due: Vec<String> = inner.git_due.iter().filter(|(id, g)| g.due <= now_i && !inner.git_running.contains_key(*id)).map(|(id, _)| id.clone()).collect();
+            let mut ready = vec![];
+            for id in due {
+                let Some(w) = inner.worktrees.get(&id) else {
                     inner.git_due.remove(&id);
-                    let path = PathBuf::from(&inner.worktrees.get(&id)?.path);
-                    inner.git_running.insert(id.clone(), ());
-                    Some((id, path))
-                })
-                .collect()
+                    continue;
+                };
+                let target = match (w.platform.distro(), &w.wsl_path) {
+                    (Some(distro), Some(p)) => GitTarget::Wsl(distro.to_string(), p.clone()),
+                    _ if local_slots == 0 => continue,
+                    _ => {
+                        local_slots -= 1;
+                        GitTarget::Local(PathBuf::from(&w.path))
+                    }
+                };
+                inner.git_due.remove(&id);
+                inner.git_running.insert(id.clone(), ());
+                ready.push((id, target));
+            }
+            ready
         };
-        for (id, path) in ready {
+        // WSL worktrees: one wsl.exe per distro for all of its due worktrees
+        let mut batches: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+        for (id, target) in ready {
+            match target {
+                GitTarget::Wsl(distro, p) => batches.entry(distro).or_default().push((id, p)),
+                GitTarget::Local(path) => {
+                    let Ok(permit) = sem.clone().acquire_owned().await else { return };
+                    let d = d.clone();
+                    tokio::spawn(async move {
+                        let res = tokio::task::spawn_blocking(move || git::status(&path, now())).await.ok().flatten();
+                        git_done(&d, id, res);
+                        drop(permit);
+                    });
+                }
+            }
+        }
+        for (distro, items) in batches {
             let Ok(permit) = sem.clone().acquire_owned().await else { return };
             let d = d.clone();
             tokio::spawn(async move {
-                let res = tokio::task::spawn_blocking(move || git::status(&path, now())).await.ok().flatten();
-                let mut inner = d.lock();
-                inner.git_running.remove(&id);
-                if let Some(mut wt) = inner.worktrees.get(&id).cloned() {
-                    if let Some(g) = res {
-                        wt.git = g;
-                    }
-                    let live = wt.live;
-                    d.upsert(&mut inner, wt);
-                    // background sweep: next check later unless activity schedules one sooner
-                    let next = Instant::now() + if live { GIT_SWEEP_LIVE } else { GIT_SWEEP_IDLE };
-                    inner.git_due.entry(id).or_insert(GitDue { due: next, first: next });
+                let paths: Vec<String> = items.iter().map(|(_, p)| p.clone()).collect();
+                let res = tokio::task::spawn_blocking(move || {
+                    // a stopped distro stays stopped: keep the last known state until it runs again
+                    let up = crate::wsl_backend::running_cached().iter().any(|r| r.eq_ignore_ascii_case(&distro));
+                    if up { git::status_wsl(&distro, &paths, now()) } else { vec![None; paths.len()] }
+                })
+                .await
+                .unwrap_or_default();
+                for (i, (id, _)) in items.into_iter().enumerate() {
+                    git_done(&d, id, res.get(i).cloned().flatten());
                 }
                 drop(permit);
             });
         }
+    }
+}
+
+fn git_done(d: &Arc<Daemon>, id: String, res: Option<GitState>) {
+    let mut inner = d.lock();
+    inner.git_running.remove(&id);
+    if let Some(mut wt) = inner.worktrees.get(&id).cloned() {
+        if let Some(g) = res {
+            wt.git = g;
+        }
+        let live = wt.live;
+        d.upsert(&mut inner, wt);
+        // background sweep: next check later unless activity schedules one sooner
+        let next = Instant::now() + if live { GIT_SWEEP_LIVE } else { GIT_SWEEP_IDLE };
+        inner.git_due.entry(id).or_insert(GitDue { due: next, first: next });
     }
 }
 
