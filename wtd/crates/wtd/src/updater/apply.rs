@@ -59,11 +59,16 @@ pub fn apply(l: &Layout, ver: &str, host: &mut dyn Host) -> Result<Outcome> {
         record(l, &from, ver, false, false, &format!("{e:#}"), false)?;
         return Err(e);
     }
-    if vsix_changed {
-        if let Err(e) = host.install_vsix(&l.current().join(VSIX)) {
+    // `vsix_changed` from here on means "reinstalled": a reload only helps if the install worked
+    let mut note = String::new();
+    let vsix_changed = vsix_changed && match host.install_vsix(&l.current().join(VSIX)) {
+        Ok(()) => true,
+        Err(e) => {
             l.log(&format!("vsix install failed: {e:#}"));
+            note = format!("VS Code extension not reinstalled: {e:#}");
+            false
         }
-    }
+    };
     let started = host.start(l, was);
     let reason = match started {
         Ok(()) if host.healthy(l, ver) => None,
@@ -72,7 +77,7 @@ pub fn apply(l: &Layout, ver: &str, host: &mut dyn Host) -> Result<Outcome> {
     };
     match reason {
         None => {
-            record(l, &from, ver, true, vsix_changed, "", false)?;
+            record(l, &from, ver, true, vsix_changed, &note, false)?;
             tidy(l, &from, ver);
             l.log(&format!("applied {ver}"));
             Ok(Outcome::Applied { from, to: ver.into(), vsix_changed })
@@ -314,6 +319,7 @@ pub(crate) mod tests {
     #[derive(Default)]
     struct Fake {
         healthy: bool,
+        vsix_fails: bool,
         log: Vec<String>,
     }
 
@@ -332,6 +338,9 @@ pub(crate) mod tests {
         }
         fn install_vsix(&mut self, vsix: &Path) -> Result<()> {
             self.log.push(std::fs::read_to_string(vsix).unwrap());
+            if self.vsix_fails {
+                bail!("no code");
+            }
             Ok(())
         }
     }
@@ -360,6 +369,18 @@ pub(crate) mod tests {
         assert_eq!(st.staged, None);
         assert!(st.last_apply.as_ref().is_some_and(|a| a.ok && a.vsix_changed && a.to == "1.1.0"));
         assert!(!l.root.join("update.lock").exists());
+        std::fs::remove_dir_all(&l.root).ok();
+    }
+
+    #[test]
+    fn a_failed_vsix_install_is_not_reported_as_reinstalled() {
+        let l = installed("vsix-fail");
+        version(&l, "1.1.0");
+        let mut h = Fake { healthy: true, vsix_fails: true, ..Default::default() };
+        let o = apply(&l, "1.1.0", &mut h).unwrap();
+        assert_eq!(o, Outcome::Applied { from: "1.0.0".into(), to: "1.1.0".into(), vsix_changed: false });
+        let a = State::load(&l).last_apply.unwrap();
+        assert!(a.ok && !a.vsix_changed && a.message.contains("no code"), "{a:?}");
         std::fs::remove_dir_all(&l.root).ok();
     }
 
