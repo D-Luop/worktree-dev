@@ -411,8 +411,7 @@ class DevSummaryProvider {
       t.show();
     }
     this._terms.set(key, t);
-    this._current = t;            // the just-opened session is now the selected one
-    this._showShell(slug, name, t).catch((e) => _dbg('shell: ' + e.message));
+    this.onTermActive(t);         // select it + dock its shell and Changes (no event fires if it was already active)
     this.clearUnread(key);
     _dbg(`  -> branch=${branch} tname=${JSON.stringify(t && t.name)} exit=${t && t.exitStatus}`);
     setTimeout(() => this._postRoster(), 1500);
@@ -835,6 +834,7 @@ class DevSummaryProvider {
     if (tk) { const j = tk.indexOf('\x01'); const s = tk.slice(0, j), n = tk.slice(j + 1);
       if (this.gitView) this.gitView.follow(s, n);
       if (this.changes) this.changes.follow(s, n);
+      if (!this._terms.has(tk) && t.exitStatus === undefined) this._terms.set(tk, t);   // adopt a reload-revived session
       if (this._terms.get(tk) === t) this._showShell(s, n, t).catch(() => {}); }
     for (const [k, v] of this._terms) if (v === t) { this.clearUnread(k); return; }
     // also match a reload-revived terminal by name
@@ -1936,6 +1936,9 @@ function activate(context) {
     if (kind === 'fleet' && wt && (!prev || prev.status !== wt.status)) provider.refresh(vscode.Uri.file(wt.path));
     if (kind === 'fleet' && wt && dev.gitView) dev.gitView.onWorktree(wt, prev);
     if (kind === 'fleet' && wt && dev.changes) dev.changes.onWorktree(wt, prev);
+    // after a reload the restored session terminal is active before the fleet is known, so nothing
+    // could match it to a worktree then; dock its shell + Changes once the first snapshot lands
+    if (kind === 'fleet' && !wt && !dev._dockedOnce && vscode.window.activeTerminal) { dev._dockedOnce = true; dev.onTermActive(vscode.window.activeTerminal); }
     if (settings && (kind === 'daemon' || kind === 'accounts')) settings.onDaemonChange();
     if (kind === 'release' && wt) { dev.releaseWorktree(wt).catch(() => {}); return; }
     if (kind === 'messages') { dev._onMessages(); kick('fleet'); }
@@ -1979,6 +1982,11 @@ function activate(context) {
     if (!cur.includes('claudeStatus.smartPaste'))
       tcfg.update('commandsToSkipShell', cur.concat('claudeStatus.smartPaste'), vscode.ConfigurationTarget.Global).then(undefined, () => {});
   }
+  // the chat / shell / Changes split needs visible dividers; the default group border is near-invisible
+  { const wcfg = vscode.workspace.getConfiguration('workbench');
+    const cc = (wcfg.inspect('colorCustomizations') || {}).globalValue || {};
+    if (!cc['editorGroup.border'])
+      wcfg.update('colorCustomizations', Object.assign({}, cc, { 'editorGroup.border': '#6e7681' }), vscode.ConfigurationTarget.Global).then(undefined, () => {}); }
 
   // agents publish design mockups via the `preview` command (→ .wtd/state/previews/<slug>/<name>.html);
   // watch that tree so a 🖼 appears on the worktree's roster row, and clears when the file is removed.
