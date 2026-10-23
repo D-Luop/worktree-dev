@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::platform::Platform;
 use crate::status::Status;
 
 /// Id of the dev-base pseudo-worktree that hosts the fleet assistant.
@@ -69,6 +70,11 @@ pub struct Worktree {
     /// Agent program of the live session: `claude` | `codex`.
     #[serde(default)]
     pub program: Option<String>,
+    #[serde(default)]
+    pub platform: Platform,
+    /// For a WSL worktree: its path inside the distro (`path` is then its `\\wsl.localhost\…` view).
+    #[serde(default)]
+    pub wsl_path: Option<String>,
 }
 
 /// A user-defined roster group (replaces grouping by repo). Order = position in the list.
