@@ -73,7 +73,7 @@ pub fn step(st: &mut State, session: &str, path: &str, plan_exists: bool) -> Opt
         return (!std::mem::replace(&mut st.warned, true)).then(|| NO_PLAN.to_string());
     }
     st.edits += 1;
-    (st.edits % STALE_EVERY == 0).then(|| stale(st.edits))
+    st.edits.is_multiple_of(STALE_EVERY).then(|| stale(st.edits))
 }
 
 /// Hook output: shown to the user (`systemMessage`) and added to the agent's context.
