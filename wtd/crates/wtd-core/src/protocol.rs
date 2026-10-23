@@ -124,7 +124,8 @@ pub mod method {
     // --- agent messaging (Phase 2) ---
     /// `{from_dir, to, body}` → `{id, state}`. Always created `pending`: only the user releases it.
     pub const MESSAGE_SEND: &str = "message.send";
-    /// `{id, approve: bool, body?}` → `{}` (from the UI, on the user's decision)
+    /// `{id, approve: bool, body?}` or `{ids: [..], approve: bool}` (bulk; non-pending ids skipped)
+    /// → `{decided: [ids]}` (from the UI, on the user's decision)
     pub const MESSAGE_DECIDE: &str = "message.decide";
     /// `{worktree?}` → `[Message]` (sent and received, most recent first)
     pub const MESSAGE_LIST: &str = "message.list";
