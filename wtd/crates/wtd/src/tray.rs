@@ -82,13 +82,10 @@ pub fn main(args: &[String]) -> Result<i32> {
             return Ok(0);
         }
         // close a running tray (e.g. before replacing wtd.exe)
-        Some("--quit") => unsafe {
-            let hwnd = FindWindowW(win::wide(CLASS).as_ptr(), std::ptr::null());
-            if !hwnd.is_null() {
-                PostMessageW(hwnd, WM_CLOSE, 0, 0);
-            }
+        Some("--quit") => {
+            quit();
             return Ok(0);
-        },
+        }
         // open the running tray's flyout, as a click on its icon would
         Some("--open") => unsafe {
             let hwnd = FindWindowW(win::wide(CLASS).as_ptr(), std::ptr::null());
@@ -435,6 +432,20 @@ fn set_session_state(s: SessionState) {
 
 fn tray_alive() -> bool {
     unsafe { !FindWindowW(win::wide(CLASS).as_ptr(), std::ptr::null()).is_null() }
+}
+
+pub(crate) fn is_running() -> bool {
+    tray_alive()
+}
+
+/// Close a running tray (e.g. before replacing wtd.exe).
+pub(crate) fn quit() {
+    unsafe {
+        let hwnd = FindWindowW(win::wide(CLASS).as_ptr(), std::ptr::null());
+        if !hwnd.is_null() {
+            PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        }
+    }
 }
 
 /// No state yet this sign-in means it never started (e.g. the Run entry was disabled in Task

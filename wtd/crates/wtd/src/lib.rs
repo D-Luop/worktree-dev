@@ -31,6 +31,7 @@ pub mod ticket;
 pub mod tools;
 pub mod tray;
 pub mod tui;
+pub mod updater;
 pub mod win;
 pub mod wt;
 

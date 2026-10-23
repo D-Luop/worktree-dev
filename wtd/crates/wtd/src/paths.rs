@@ -35,6 +35,16 @@ pub fn dev_root() -> Result<PathBuf> {
     bail!("can't find the worktree-dev root (set WTD_DEV, or run install.sh)")
 }
 
+/// The installed program: `current\` (the active version), `versions\<ver>\`, `pending\<ver>\`.
+/// `WTD_PROGRAM_DIR` overrides `%LOCALAPPDATA%\WorkTreeDev` (tests, side-by-side installs).
+pub fn program_dir() -> Result<PathBuf> {
+    if let Some(p) = std::env::var_os("WTD_PROGRAM_DIR").filter(|p| !p.is_empty()) {
+        return Ok(PathBuf::from(p));
+    }
+    let local = std::env::var_os("LOCALAPPDATA").context("no LOCALAPPDATA")?;
+    Ok(PathBuf::from(local).join("WorkTreeDev"))
+}
+
 /// A sibling program next to the running one (`wtd.exe` / `wtd-tray.exe` live side by side).
 pub fn sibling_exe(name: &str) -> PathBuf {
     std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(name))).unwrap_or_else(|| PathBuf::from(name))
