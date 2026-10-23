@@ -20,6 +20,7 @@ pub mod mcp;
 pub mod new;
 pub mod nudge;
 pub mod paths;
+pub mod platforms;
 pub mod program;
 pub mod proposal;
 pub mod repos;
@@ -35,6 +36,7 @@ pub mod tray;
 pub mod tui;
 pub mod updater;
 pub mod win;
+pub mod wsl_backend;
 pub mod wt;
 
 use anyhow::Result;
@@ -46,7 +48,7 @@ const USAGE: &str = "\
 wtd — WorkTreeDev fleet tool
 
 Worktrees & sessions (also on PATH as plain `agent`, `archive`, … via ~/.local/bin shims)
-  wtd agent <slug> <name> [--from ref] [--account a] [--issue-file md] [--no-claude] [ref…]
+  wtd agent <slug> <name> [--from ref] [--account a] [--issue-file md] [--no-claude] [--platform p] [ref…]
                                      create-or-open a worktree and its agent session
   wtd agent ls|stop|rm|done|pr|wip … manage worktrees (`wtd agent` for details)
   wtd new [<slug>] [--in terminal|zed]
@@ -79,6 +81,9 @@ Fleet & daemon
   wtd daemon start|stop [--force]|status|run
                                      control the background daemon (--force: also end hosted sessions)
   wtd ls [--json]                    list worktrees (status, git, live session)
+  wtd platforms [--refresh]          where worktrees can run: windows + WSL distros and their tools (JSON)
+  wtd config platform [--repo <slug>] [windows|wsl:<distro>|--clear]
+                                     the default platform for new worktrees (global, or one repo's)
   wtd open <slug/name> [--in vscode|zed|terminal]
                                      show a worktree's session (default: `wtd frontend`)
   wtd frontend [vscode|zed|terminal] show or set the default frontend
@@ -140,6 +145,8 @@ fn dispatch(cmd: &str, rest: &[String]) -> Result<i32> {
         "repo" => settings::repo_main(rest),
         "account" => settings::account_main(rest),
         "env" => settings::env_main(rest),
+        "platforms" => platforms::main(rest),
+        "config" => platforms::config_main(rest),
         "ls" => ls_cmd(rest.iter().any(|a| a == "--json")),
         "agent" => agent::main(rest),
         "archive" => agent::archive_main(rest),

@@ -3,7 +3,7 @@
 //!
 //!   agent <slug> <name> [--from <ref>] [--account <a>|codex:<a>|default] [--issue-file <md>]
 //!                       [--no-claude] [--no-auto | --mode <m>] [--detach] [--prompt <text> | --prompt-file <md>]
-//!                       [--parent <delegate-id|none>] [ref-token…]
+//!                       [--parent <delegate-id|none>] [--platform windows|wsl:<distro>] [ref-token…]
 //!   agent delegate <slug>                        the repo's delegator (docs/research home; spawns worktrees)
 //!   agent ls | agent stop [<slug> <name>] | agent rm <slug> <name> [--branch] [--force] [-y]
 //!   agent done | agent pr | agent wip            (inside a worktree)
@@ -13,13 +13,14 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use serde_json::json;
+use wtd_core::model::Platform;
 use wtd_core::protocol::method;
 use wtd_core::status::{apply, Event};
 
 use crate::client::Client;
 use crate::gitx::{self, s};
 use crate::wt::{self, session_key, session_name};
-use crate::{paths, statusfile};
+use crate::{paths, platforms, statusfile, wsl_backend};
 
 fn confirm(question: &str, default_yes: bool) -> bool {
     if !std::io::stdin().is_terminal() {
@@ -88,7 +89,7 @@ pub fn main(args: &[String]) -> Result<i32> {
         Some("rm") => rm(&dev, &args[1..]),
         Some(_) => launch(&dev, args),
         None => {
-            println!("usage: agent <slug> <name> [--from <ref>] [--account <a>] [--issue-file <md>] [--no-claude] [--detach] [--prompt <text>] [--parent <delegate-id|none>] [ref…]");
+            println!("usage: agent <slug> <name> [--from <ref>] [--account <a>] [--issue-file <md>] [--no-claude] [--detach] [--prompt <text>] [--parent <delegate-id|none>] [--platform windows|wsl:<distro>] [ref…]");
             println!("       agent delegate <slug>   (the repo's delegator: a docs/research folder whose agent starts worktrees)");
             println!("       agent ls | agent stop [<slug> <name>] | agent rm <slug> <name> [--branch] [--force] [-y]");
             println!("       agent done | agent pr | agent wip   (inside a worktree)");
@@ -368,11 +369,16 @@ fn add_worktree(bare: &Path, slug: &str, name: &str, wtp: &Path, from: Option<&s
     gitx::run(&["-C", &bs, "worktree", "add", "--no-track", &ws, "-b", name, &base])
 }
 
+fn parse_platform(s: &str) -> Result<Platform> {
+    s.parse().map_err(|e: String| anyhow::anyhow!("--platform {e}"))
+}
+
 fn launch(dev: &Path, args: &[String]) -> Result<i32> {
     let (mut from, mut account, mut issue, mut ticket) = (None::<String>, None::<String>, None::<PathBuf>, None::<String>);
     let mut launch_agent = std::env::var_os("AGENT_NO_CLAUDE").is_none();
     let mut pmode = std::env::var("AGENT_PERMISSION_MODE").unwrap_or_else(|_| "auto".into());
     let (mut detach, mut prompt, mut parent) = (false, None::<String>, None::<String>);
+    let mut platform = None::<Platform>;
     let mut pos: Vec<String> = vec![];
     let mut i = 0;
     while i < args.len() {
@@ -389,6 +395,8 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
             "--detach" => { detach = true; i += 1; }
             "--prompt" => { prompt = Some(val(i)?); i += 2; }
             "--parent" => { parent = Some(val(i)?); i += 2; }
+            "--platform" => { platform = Some(parse_platform(&val(i)?)?); i += 2; }
+            _ if a.starts_with("--platform=") => { platform = Some(parse_platform(&a[11..])?); i += 1; }
             "--prompt-file" => { prompt = Some(std::fs::read_to_string(paths::normalize(&val(i)?))?); i += 2; }
             _ if a.starts_with("--from=") => { from = Some(a[7..].into()); i += 1; }
             _ if a.starts_with("--account=") => { account = Some(a[10..].into()); i += 1; }
@@ -406,6 +414,43 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
     let bare = repo.as_ref().map(|r| r.path.clone());
     let id = format!("{slug}/{name}");
     let wtp = paths::worktree_path(dev, &id);
+    let platform = platforms::choose(platforms::existing_platform(dev, &id), platform, &id, || platforms::resolve_for(dev, &slug, None))?;
+    if let Platform::Wsl(distro) = &platform {
+        if repo_less {
+            bail!("planning agents and delegators run on Windows (drop --platform {platform})");
+        }
+        if !ref_tokens.is_empty() || ticket.is_some() {
+            eprintln!("note: reference checkouts and --ticket aren't wired up for WSL worktrees yet; ignoring them");
+        }
+        let r = repo.as_ref().unwrap();
+        let wsl_path = match platforms::wsl_worktrees(dev).remove(&id) {
+            Some(w) => w.wsl_path,
+            None => {
+                let req = wsl_backend::CreateWorktree { distro, slug: &slug, name: &name, url: &r.url, from: from.as_deref(), issue: issue.as_deref().filter(|f| f.is_file()) };
+                let c = wsl_backend::create_worktree(dev, &req)?;
+                platforms::register_wsl(dev, &id, Some(platforms::WslWorktree { platform: platform.clone(), wsl_path: c.wsl_path.clone() }))?;
+                if let (None, Some(p)) = (&parent, &started_from) {
+                    record_parent(&id, Some(p));
+                }
+                c.wsl_path
+            }
+        };
+        if let Some(p) = parent.as_deref() {
+            record_parent(&id, (p != "none").then_some(p));
+        }
+        if !launch_agent {
+            println!("worktree ready: {wsl_path} (in {distro})");
+            return Ok(0);
+        }
+        let account = account.unwrap_or_else(|| "default".into());
+        let (program, acct_name) = match account.strip_prefix("codex:") {
+            Some(n) => ("codex", n),
+            None => ("claude", account.strip_prefix("claude:").unwrap_or(&account)),
+        };
+        let prompt = prompt.or_else(|| (detach && issue.is_some()).then(|| WORKER_PROMPT.to_string()));
+        let req = wsl_backend::Host { distro, wsl_path: &wsl_path, id: &id, program, account: acct_name, permission_mode: &pmode, prompt: prompt.as_deref(), detach };
+        return wsl_backend::host(dev, &req);
+    }
     let session = session_name(&slug, &name);
     let key = session_key(&session);
     let acct = resolve_account(dev, account.as_deref(), &session)?;

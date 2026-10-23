@@ -164,6 +164,7 @@ struct Daemon {
     /// worktree id → its file watcher (dropping it releases the directory handles)
     watchers: Mutex<HashMap<String, notify::RecommendedWatcher>>,
     updates: update::Updates,
+    platforms: Mutex<crate::platforms::Cache>,
 }
 
 impl Daemon {
@@ -241,6 +242,10 @@ impl Daemon {
     }
 
     fn schedule_git(inner: &mut Inner, id: &str, debounced: bool) {
+        // Windows git through \\wsl.localhost is slow and unreliable; WSL rows need git via wsl.exe
+        if inner.worktrees.get(id).is_some_and(|w| w.platform.is_wsl()) {
+            return;
+        }
         let now = Instant::now();
         let e = inner.git_due.entry(id.to_string()).or_insert(GitDue { due: now, first: now });
         if debounced {
@@ -272,7 +277,7 @@ async fn serve(dev: PathBuf) -> Result<()> {
 
     let (tx, _) = broadcast::channel(1024);
     let inner = Inner { store: store::Store::load(&dev), ..Default::default() };
-    let d = Arc::new(Daemon { dev: dev.clone(), inner: Mutex::new(inner), tx, next_conn: AtomicU64::new(1), watchers: Mutex::new(HashMap::new()), updates: Default::default() });
+    let d = Arc::new(Daemon { dev: dev.clone(), inner: Mutex::new(inner), tx, next_conn: AtomicU64::new(1), watchers: Mutex::new(HashMap::new()), updates: Default::default(), platforms: Default::default() });
     eprintln!("[{}] wtd daemon {} up: pid {}, dev {}", now(), env!("CARGO_PKG_VERSION"), std::process::id(), dev.display());
 
     rescan(&d).await;
@@ -624,6 +629,15 @@ async fn dispatch(d: &Arc<Daemon>, conn: u64, req: &Request, out: &mpsc::Unbound
         method::MESSAGE_SEND => messages::send(d, p),
         method::MESSAGE_DECIDE => messages::decide(d, p),
         method::MESSAGE_LIST => messages::list(d, p),
+        method::PLATFORMS_LIST => {
+            let refresh = p.get("refresh").and_then(Value::as_bool).unwrap_or(false);
+            if let Some(v) = d.platforms.lock().unwrap_or_else(|p| p.into_inner()).fresh().filter(|_| !refresh) {
+                return Ok(v);
+            }
+            let v = serde_json::to_value(tokio::task::spawn_blocking(crate::platforms::detect).await?)?;
+            d.platforms.lock().unwrap_or_else(|p| p.into_inner()).store(v.clone());
+            Ok(v)
+        }
         method::UPDATE_STATUS => Ok(update::broadcast(d)),
         method::UPDATE_CHECK => {
             if p.get("wait").and_then(Value::as_bool).unwrap_or(false) {
@@ -690,7 +704,7 @@ async fn rescan(d: &Arc<Daemon>) {
                 wt.last_activity = if wt.status != old.status { now() } else { old.last_activity };
             }
             None => {
-                if wt.id != DEV_ID {
+                if wt.id != DEV_ID && !wt.platform.is_wsl() {
                     Daemon::schedule_git(&mut inner, &wt.id, false);
                 }
             }
@@ -707,7 +721,7 @@ async fn rescan(d: &Arc<Daemon>) {
         d.remove(&mut inner, id);
     }
     messages::expire_orphans(d, &mut inner);
-    let want: Vec<(String, PathBuf)> = inner.worktrees.values().filter(|w| w.id != DEV_ID).map(|w| (w.id.clone(), PathBuf::from(&w.path))).collect();
+    let want: Vec<(String, PathBuf)> = inner.worktrees.values().filter(|w| w.id != DEV_ID && !w.platform.is_wsl()).map(|w| (w.id.clone(), PathBuf::from(&w.path))).collect();
     drop(inner);
     for id in &gone {
         d.unwatch(id);

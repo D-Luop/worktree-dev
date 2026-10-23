@@ -12,8 +12,8 @@ use crate::statusfile;
 pub fn scan(dev: &Path) -> Vec<Worktree> {
     let mut out = vec![facts(dev, DEV_ID, WorktreeKind::Dev, "", "assistant", dev)];
     let root = dev.join("worktrees");
-    let Ok(slugs) = std::fs::read_dir(&root) else { return out };
-    for slug in slugs.flatten().filter(|e| e.path().is_dir()) {
+    let slugs = std::fs::read_dir(&root).into_iter().flatten().flatten();
+    for slug in slugs.filter(|e| e.path().is_dir()) {
         let slug_name = slug.file_name().to_string_lossy().to_string();
         let kind = match slug_name.as_str() {
             "plan" => WorktreeKind::Plan,
@@ -21,6 +21,17 @@ pub fn scan(dev: &Path) -> Vec<Worktree> {
             _ => WorktreeKind::Repo,
         };
         walk(dev, &slug.path(), &slug_name, "", kind, 0, &mut out);
+    }
+    for (id, w) in crate::platforms::wsl_worktrees(dev) {
+        let (Some(distro), Some((slug, name))) = (w.platform.distro(), id.split_once('/')) else { continue };
+        if out.iter().any(|x| x.id == id) {
+            continue;
+        }
+        let unc = crate::platforms::unc_path(distro, &w.wsl_path);
+        let mut wt = facts(dev, &id, WorktreeKind::Repo, slug, name, Path::new(&unc));
+        wt.platform = w.platform;
+        wt.wsl_path = Some(w.wsl_path);
+        out.push(wt);
     }
     out
 }
@@ -87,6 +98,20 @@ mod tests {
         assert_eq!(kinds["delegate/luop"], WorktreeKind::Delegate);
         assert_eq!(kinds["plan/app"], WorktreeKind::Plan);
         assert_eq!(kinds["luop/feat/x"], WorktreeKind::Repo);
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn wsl_worktrees_join_the_scan() {
+        use wtd_core::model::Platform;
+        let t = std::env::temp_dir().join(format!("wtd-scan-wsl-{}", std::process::id()));
+        let wsl = crate::platforms::WslWorktree { platform: Platform::Wsl("Ubuntu".into()), wsl_path: "/home/dev/wt/app/feat/y".into() };
+        crate::platforms::register_wsl(&t, "app/feat/y", Some(wsl)).unwrap();
+        let w = scan(&t).into_iter().find(|w| w.id == "app/feat/y").expect("registered WSL worktree is listed");
+        assert_eq!((w.slug.as_str(), w.name.as_str(), w.kind), ("app", "feat/y", WorktreeKind::Repo));
+        assert_eq!(w.platform, Platform::Wsl("Ubuntu".into()));
+        assert_eq!(w.wsl_path.as_deref(), Some("/home/dev/wt/app/feat/y"));
+        assert_eq!(w.path, r"\\wsl.localhost\Ubuntu\home\dev\wt\app\feat\y");
         std::fs::remove_dir_all(&t).ok();
     }
 }

@@ -142,6 +142,11 @@ pub mod method {
     /// `{force?: bool}` → `{}`: apply the staged update now (restarts the daemon). Without `force`,
     /// refused while hosted sessions are live.
     pub const UPDATE_APPLY: &str = "update.apply";
+
+    // --- platforms ---
+    /// `{refresh?: bool}` → `[PlatformInfo]` (`wtd platforms`): windows plus each WSL distro and its
+    /// tools. Cached for 60s; `refresh` re-detects.
+    pub const PLATFORMS_LIST: &str = "platforms.list";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
