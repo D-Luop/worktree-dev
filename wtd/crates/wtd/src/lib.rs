@@ -7,6 +7,7 @@ pub mod changes;
 pub mod client;
 pub mod codex;
 pub mod custom;
+pub mod flyout;
 pub mod daemon;
 pub mod frontend;
 pub mod gitx;
