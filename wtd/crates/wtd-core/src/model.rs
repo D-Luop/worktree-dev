@@ -15,6 +15,9 @@ pub enum WorktreeKind {
     Repo,
     /// A repo-less planning agent: `worktrees/plan/<name>`.
     Plan,
+    /// A repo's delegator: `worktrees/delegate/<slug>`, a docs/research folder whose agent spawns
+    /// worktrees of that repo.
+    Delegate,
     /// The dev base itself (the assistant session).
     Dev,
 }

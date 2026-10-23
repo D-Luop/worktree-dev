@@ -77,12 +77,15 @@ pub fn resolve_name(dev: &Path, slug: &str, name: &str) -> Result<String> {
 pub fn remove(dev: &Path, slug: &str, name: &str, force: bool, delete_branch: bool) -> Result<Vec<String>> {
     let mut log = vec![];
     let wt = paths::worktree_path(dev, &format!("{slug}/{name}"));
-    if slug == "plan" {
+    if wt.is_dir() {
+        release_folder(&wt);
+    }
+    if paths::repo_less(slug) {
         if wt.is_dir() {
             crate::settings::remove_tree(&wt).with_context(|| format!("removing {} (close anything using it, then retry)", wt.display()))?;
             log.push(format!("removed {}", wt.display()));
         }
-        let _ = std::fs::remove_dir(dev.join("worktrees").join("plan"));
+        let _ = std::fs::remove_dir(dev.join("worktrees").join(slug));
         forget_worktree_state(dev, slug, name);
         return Ok(log);
     }
@@ -148,6 +151,31 @@ fn prune_empty_parents(dev: &Path, from: &Path) {
 }
 
 /// Move a worktree to `worktrees/<slug>/archive/<name>` (still a valid worktree; branch kept).
+/// Close whatever still has its working directory in the worktree (a stray shell, an orphaned terminal
+/// from an editor reload): Windows refuses to move or delete a folder something is "in".
+fn release_folder(wt: &Path) {
+    let killed = crate::win::kill_processes_in(wt);
+    if !killed.is_empty() {
+        eprintln!("closed {} process(es) still working in {}", killed.len(), wt.display());
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
+/// A handle can outlive its process by a moment on Windows: retry a few times while the error says
+/// something still holds the folder.
+fn retry_while_busy<T>(mut f: impl FnMut() -> Result<T>) -> Result<T> {
+    let mut tries = 0;
+    loop {
+        match f() {
+            Err(e) if tries < 4 && { let m = format!("{e:#}"); m.contains("Permission denied") || m.contains("used by another process") } => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            r => return r,
+        }
+    }
+}
+
 pub fn archive(dev: &Path, slug: &str, name: &str) -> Result<PathBuf> {
     let bare = gitx::require_repo(dev, slug)?;
     let wt = paths::worktree_path(dev, &format!("{slug}/{name}"));
@@ -159,7 +187,8 @@ pub fn archive(dev: &Path, slug: &str, name: &str) -> Result<PathBuf> {
         bail!("archive target already exists: {}", arc.display());
     }
     std::fs::create_dir_all(arc.parent().unwrap())?;
-    gitx::out(&["-C", &s(&bare), "worktree", "move", &s(&wt), &s(&arc)])
+    release_folder(&wt);
+    retry_while_busy(|| gitx::out(&["-C", &s(&bare), "worktree", "move", &s(&wt), &s(&arc)]))
         .context("git worktree move failed (worktree locked, or a process is using it?)")?;
     crate::wt::forget_state(dev, "status", &format!("{slug}__{}", name.replace('/', "__")));
     prune_empty_parents(dev, &wt);

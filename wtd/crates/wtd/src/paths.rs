@@ -122,6 +122,14 @@ pub fn resolve_worktree(dev: &Path, dir: &Path) -> Option<WtRef> {
     None
 }
 
+/// `worktrees/delegate/<repo slug>`: a repo's long-lived delegator, which spawns worktrees for it.
+pub const DELEGATE: &str = "delegate";
+
+/// Slugs under `worktrees/` that hold plain folders (their own `git init`), not checkouts of a repo.
+pub fn repo_less(slug: &str) -> bool {
+    slug == "plan" || slug == DELEGATE
+}
+
 pub fn worktree_path(dev: &Path, id: &str) -> PathBuf {
     if id == DEV_ID {
         return dev.to_path_buf();

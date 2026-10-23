@@ -15,7 +15,11 @@ pub fn scan(dev: &Path) -> Vec<Worktree> {
     let Ok(slugs) = std::fs::read_dir(&root) else { return out };
     for slug in slugs.flatten().filter(|e| e.path().is_dir()) {
         let slug_name = slug.file_name().to_string_lossy().to_string();
-        let kind = if slug_name == "plan" { WorktreeKind::Plan } else { WorktreeKind::Repo };
+        let kind = match slug_name.as_str() {
+            "plan" => WorktreeKind::Plan,
+            crate::paths::DELEGATE => WorktreeKind::Delegate,
+            _ => WorktreeKind::Repo,
+        };
         walk(dev, &slug.path(), &slug_name, "", kind, 0, &mut out);
     }
     out
@@ -63,4 +67,24 @@ fn plan_title(dir: &Path) -> Option<String> {
         .find_map(|l| l.strip_prefix("# "))
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kinds_by_slug() {
+        let t = std::env::temp_dir().join(format!("wtd-scan-{}", std::process::id()));
+        for (slug, name) in [("delegate", "luop"), ("plan", "app"), ("luop", "feat/x")] {
+            let p = name.split('/').fold(t.join("worktrees").join(slug), |p, c| p.join(c));
+            std::fs::create_dir_all(&p).unwrap();
+            std::fs::write(p.join(".git"), "").unwrap();
+        }
+        let kinds: std::collections::HashMap<String, WorktreeKind> = scan(&t).into_iter().map(|w| (w.id, w.kind)).collect();
+        assert_eq!(kinds["delegate/luop"], WorktreeKind::Delegate);
+        assert_eq!(kinds["plan/app"], WorktreeKind::Plan);
+        assert_eq!(kinds["luop/feat/x"], WorktreeKind::Repo);
+        std::fs::remove_dir_all(&t).ok();
+    }
 }
