@@ -5,6 +5,10 @@
 
 const cp = require('child_process');
 
+// a customization layer from a webview message: { repo?, platform? }
+const layerArgs = (m) => (m.repo ? ['--repo', m.repo] : []).concat(m.platform ? ['--platform', m.platform] : []);
+const layerName = (m) => (m.repo ? 'every ' + m.repo + ' worktree' : 'every worktree') + (m.platform ? ' on ' + m.platform : '');
+
 class SettingsPanel {
   // deps: { vscode, wtdExe(), media (Uri), daemon (DaemonClient|null), daemonInstalled(), toggleDaemon(want), log(msg) }
   constructor(deps) { this.d = deps; this.panel = null; this._logins = new Map(); }
@@ -139,27 +143,35 @@ class SettingsPanel {
       // --- guardrails ---
       case 'guardSave': return run(['repo', 'set-guardrails', m.slug, JSON.stringify(m.value)]);
 
-      // --- customizations ---
+      // --- customizations (a layer = global | --repo s, optionally --platform os) ---
       case 'customOpen': {
-        const r = await this.wtd(['custom', 'dir'].concat(m.repo ? ['--repo', m.repo] : []));
+        const r = await this.wtd(['custom', 'dir'].concat(layerArgs(m)));
         if (r && r.path) await vscode.env.openExternal(vscode.Uri.file(r.path));
         return;
       }
-      case 'customNewSkill': {
-        const name = await vscode.window.showInputBox({ title: 'New skill' + (m.repo ? ' for ' + m.repo : ' (every repo)'), prompt: 'Its /name — letters, digits, - or _',
-          placeHolder: 'e.g. deploy-check', validateInput: (v) => (/^[A-Za-z0-9_-]{1,64}$/.test(v) ? null : 'Letters, digits, - or _') });
+      case 'customNew': {   // skill | agent | command | rule
+        const name = await vscode.window.showInputBox({ title: 'New ' + m.kind + ' — ' + layerName(m), prompt: 'Its name — letters, digits, - or _',
+          placeHolder: m.kind === 'skill' ? 'e.g. deploy-check' : m.kind === 'agent' ? 'e.g. db-expert' : m.kind === 'command' ? 'e.g. fix-lint' : 'e.g. sql-style',
+          validateInput: (v) => (/^[A-Za-z0-9_-]{1,64}$/.test(v) ? null : 'Letters, digits, - or _') });
         if (!name) return;
-        const r = await this.wtd(['custom', 'new-skill', name].concat(m.repo ? ['--repo', m.repo] : [])).catch((e) => { vscode.window.showErrorMessage(e.message); return null; });
+        const r = await this.wtd(['custom', 'new', m.kind, name].concat(layerArgs(m))).catch((e) => { vscode.window.showErrorMessage(e.message); return null; });
         if (r && r.path) await vscode.window.showTextDocument(vscode.Uri.file(r.path), { preview: false });
         return this.reload();
       }
-      case 'customEdit': {   // CLAUDE.md additions or hooks.json, created on first edit
-        const r = await this.wtd(['custom', 'dir'].concat(m.repo ? ['--repo', m.repo] : []));
+      case 'customToggle': {   // disable / re-enable an item (e.g. a built-in skill) in this layer
+        await this.wtd(['custom', m.on ? 'enable' : 'disable', m.item].concat(layerArgs(m))).catch((e) => vscode.window.showErrorMessage(e.message));
+        return this.reload();
+      }
+      case 'customEdit': {   // CLAUDE.md / AGENTS.md additions or hooks.json, created on first edit
+        const r = await this.wtd(['custom', 'dir'].concat(layerArgs(m)));
         if (!r || !r.path) return;
         const fp = require('path').join(r.path, m.file), fs = require('fs');
+        const who = layerName(m);
         if (!fs.existsSync(fp)) fs.writeFileSync(fp, m.file === 'hooks.json'
           ? '{\n  "hooks": {\n  }\n}\n'
-          : '<!-- Added to the CLAUDE.md of ' + (m.repo ? 'every ' + m.repo + ' worktree' : 'every worktree') + '. Re-applied on each open. -->\n\n');
+          : m.file === 'AGENTS.md'
+            ? '<!-- Codex instructions for ' + who + ' (added to AGENTS.override.md). Re-applied on each open. -->\n\n'
+            : '<!-- Added to the CLAUDE.md of ' + who + '. Re-applied on each open. -->\n\n');
         await vscode.window.showTextDocument(vscode.Uri.file(fp), { preview: false });
         return this.reload();
       }
@@ -434,28 +446,53 @@ function settingsHtml() {
 
   // ---------- Customizations ----------
   function chips(list, icon){ return list.length?list.map(x=>'<span class="chip">'+ico(icon)+esc(x)+'</span>').join(' '):'<span class="muted">none</span>'; }
-  function layerCard(title, sub, info, repo){
-    const r=repo?' data-repo="'+esc(repo)+'"':'';
-    return '<div class="card"><div class="hd"><div class="ico">'+ico(repo?'repo':'globe')+'</div><div class="main"><div class="name">'+esc(title)+'</div><div class="sub">'+sub+'</div></div>'
-      + '<div class="acts"><button class="icon" title="Open the folder" data-act="customOpen"'+r+'>'+ico('folder-opened')+'</button></div></div><div class="body">'
-      + '<div class="row"><label class="k">Skills</label><div class="v">'+chips(info.skills||[],'symbol-event')+' <a data-act="customNewSkill"'+r+'>'+ico('add')+' New skill</a>'
-      + '<div class="help">Folders with a <span class="mono">SKILL.md</span>; copied into each worktree’s <span class="mono">.claude/skills</span>.</div></div></div>'
+  function la(repo, os){ return (repo?' data-repo="'+esc(repo)+'"':'')+(os?' data-platform="'+esc(os)+'"':''); }
+  function kindRow(label, kind, list, icon, help, a){
+    return '<div class="row"><label class="k">'+label+'</label><div class="v">'+chips(list||[],icon)+' <a data-act="customNew" data-kind="'+kind+'"'+a+'>'+ico('add')+' New</a>'
+      + '<div class="help">'+help+'</div></div></div>';
+  }
+  function editRow(label, file, has, addTxt, help, a){
+    return '<div class="row"><label class="k">'+label+'</label><div class="v"><a data-act="customEdit" data-file="'+file+'"'+a+'>'+ico(has?'edit':'add')+' '+(has?'Edit':addTxt)+'</a>'
+      + '<div class="help">'+help+'</div></div></div>';
+  }
+  function layerCard(title, sub, info, repo, os){
+    const a=la(repo,os), c=D.custom||{}, off=info.disabled||[];
+    const builtin=((c.builtin||{}).skills||[]).map(n=>'skills/'+n).filter(i=>!off.includes(i));
+    return '<div class="card"><div class="hd"><div class="ico">'+ico(os?'device-desktop':repo?'repo':'globe')+'</div><div class="main"><div class="name">'+esc(title)+'</div><div class="sub">'+sub+'</div></div>'
+      + '<div class="acts"><button class="icon" title="Open the folder" data-act="customOpen"'+a+'>'+ico('folder-opened')+'</button></div></div><div class="body">'
+      + kindRow('Skills','skill',info.skills,'symbol-event','Folders with a <span class="mono">SKILL.md</span>, for Claude (<span class="mono">.claude/skills</span>) and Codex (<span class="mono">.agents/skills</span>). The same name as a built-in skill replaces it.',a)
+      + kindRow('Subagents','agent',info.agents,'hubot','<span class="mono">agents/&lt;name&gt;.md</span> go to <span class="mono">.claude/agents</span>.',a)
+      + kindRow('Commands','command',info.commands,'terminal','<span class="mono">commands/&lt;name&gt;.md</span> become slash commands in <span class="mono">.claude/commands</span>.',a)
+      + kindRow('Rules','rule',info.rules,'law','<span class="mono">rules/&lt;name&gt;.md</span> go to <span class="mono">.claude/rules</span> (optionally scoped by <span class="mono">paths</span>).',a)
       + '<div class="row"><label class="k">Tools</label><div class="v">'+chips(info.tools||[],'tools')
-      + '<div class="help">Files in <span class="mono">tools/</span> are on PATH in the session and its shell — e.g. a build or db script.</div></div></div>'
-      + '<div class="row"><label class="k">CLAUDE.md</label><div class="v"><a data-act="customEdit" data-file="CLAUDE.md"'+r+'>'+ico(info.claudeMd?'edit':'add')+' '+(info.claudeMd?'Edit additions':'Add instructions')+'</a>'
-      + '<div class="help">Appended to each worktree’s CLAUDE.md as its own section, kept in sync.</div></div></div>'
-      + '<div class="row"><label class="k">Claude hooks</label><div class="v"><a data-act="customEdit" data-file="hooks.json"'+r+'>'+ico(info.hooks?'edit':'add')+' '+(info.hooks?'Edit hooks.json':'Add hooks')+'</a>'
-      + '<div class="help">A <span class="mono">{"hooks": {…}}</span> fragment merged into each worktree’s <span class="mono">.claude/settings.json</span>; <span class="mono">__DEV__</span> becomes the dev root.</div></div></div>'
-      + (repo?'<div class="row"><label class="k">Env files</label><div class="v">'+(info.env?info.env+' item(s)':'<span class="muted">none</span>')+'<div class="help">Files in <span class="mono">env/</span> are copied into new worktrees when absent (e.g. <span class="mono">.env</span>).</div></div></div>':'')
+      + '<div class="help">Files in <span class="mono">tools/</span> are on PATH in the session and its shell, e.g. a build or db script.</div></div></div>'
+      + editRow('CLAUDE.md','CLAUDE.md',info.claudeMd,'Add instructions','Appended to each worktree’s CLAUDE.md as its own section, kept in sync.',a)
+      + editRow('AGENTS.md','AGENTS.md',info.agentsMd,'Add Codex instructions','For Codex: written to <span class="mono">AGENTS.override.md</span> with the repo’s own AGENTS.md and a pointer to CLAUDE.md.',a)
+      + editRow('Claude hooks','hooks.json',info.hooks,'Add hooks','A <span class="mono">{"hooks": {…}}</span> fragment merged into each worktree’s <span class="mono">.claude/settings.json</span>; <span class="mono">__DEV__</span> becomes the dev root.',a)
+      + '<div class="row"><label class="k">Disabled</label><div class="v">'
+      + (off.length?off.map(i=>'<span class="chip">'+ico('circle-slash')+esc(i)+' <a title="Enable again" data-act="customToggle" data-on="1" data-item="'+esc(i)+'"'+a+'>'+ico('close')+'</a></span>').join(' '):'<span class="muted">none</span>')
+      + (builtin.length?' <select data-act="customDisable"'+a+'><option value="">Disable a built-in…</option>'+builtin.map(i=>'<option>'+esc(i)+'</option>').join('')+'</select>':'')
+      + '<div class="help">Items this scope should not get, e.g. a shipped skill.</div></div></div>'
+      + (repo&&!os?'<div class="row"><label class="k">Env files</label><div class="v">'+(info.env?info.env+' item(s)':'<span class="muted">none</span>')+'<div class="help">Files in <span class="mono">env/</span> are copied into new worktrees when absent (e.g. <span class="mono">.env</span>).</div></div></div>':'')
       + '</div></div>';
+  }
+  function platformCards(platforms, repo){
+    const c=D.custom||{}, have=Object.keys(platforms||{}), all=c.platforms_all||['windows','wsl','linux','mac'];
+    let h='';
+    for(const os of have) h+=layerCard((repo?repo+' on ':'Every repo on ')+os, 'Only on '+esc(os)+(os===c.platform?' (this machine)':'')+', on top of '+(repo?esc(repo):'every repo')+'.', platforms[os], repo, os);
+    const rest=all.filter(o=>!have.includes(o));
+    if(rest.length) h+='<div class="row" style="margin:-4px 0 12px"><label class="k"></label><div class="v"><select data-act="customAddPlatform"'+la(repo,null)+'><option value="">Add for a platform'+(repo?' ('+esc(repo)+')':'')+'…</option>'
+      + rest.map(o=>'<option value="'+o+'">'+o+(o===c.platform?' (this machine)':'')+'</option>').join('')+'</select></div></div>';
+    return h;
   }
   function customSection(){
     const c=D.custom||{}, repos=(Array.isArray(D.repos)?D.repos:[]).map(r=>r.slug), have=Object.keys(c.repos||{});
     let h='<div style="display:flex;gap:6px;margin-bottom:10px"><button class="secondary" data-act="customApply"'+(busy('custom:apply')?' disabled':'')+'>'
       + ico(busy('custom:apply')?'loading':'sync',busy('custom:apply')?'spin':'')+'Apply to open worktrees</button>'
-      + '<span class="help" style="margin:4px 0 0">New sessions pick changes up automatically.</span></div>';
-    h+=layerCard('Every repo','Applies to all worktrees.', c.global||{}, null);
-    for(const slug of have) h+=layerCard(slug,'Only '+esc(slug)+' worktrees, on top of the above.', c.repos[slug], slug);
+      + '<span class="help" style="margin:4px 0 0">New sessions pick changes up automatically. Layers stack built-in, every repo, platform, repo, repo on a platform; a later item with the same name wins.</span></div>';
+    h+=layerCard('Every repo','Applies to all worktrees.', c.global||{}, null, null);
+    h+=platformCards(c.platforms, null);
+    for(const slug of have){ h+=layerCard(slug,'Only '+esc(slug)+' worktrees, on top of the above.', c.repos[slug], slug, null); h+=platformCards(c.repos[slug].platforms, slug); }
     const rest=repos.filter(s=>!have.includes(s));
     if(rest.length) h+='<div class="row" style="margin-top:6px"><label class="k">Add for a repo</label><div class="v"><select data-act="customAddRepo"><option value="">Choose a repo…</option>'
       + rest.map(s=>'<option>'+esc(s)+'</option>').join('')+'</select><div class="help">e.g. a <span class="mono">/proto</span> skill and a <span class="mono">build</span> tool that only make sense in one repo.</div></div></div>';
@@ -463,7 +500,7 @@ function settingsHtml() {
   }
 
   // ---------- Accounts ----------
-  function usageFor(a){ if(a.provider!=='claude') return null; return (D.usage||[]).find(u=>u.name===a.name)||null; }
+  function usageFor(a){ const k=a.provider==='codex'?'codex:'+a.name:a.name; return (D.usage||[]).find(u=>u.name===k)||null; }
   function bar(l,v){ const p=typeof v==='number'?Math.round(v):null; return '<span class="bar">'+l+'<span class="track"><span class="fill" style="display:block;width:'+(p||0)+'%;background:'+col(p||0)+'"></span></span>'+(p==null?'--':p+'%')+'</span>'; }
   const ROLE_LABEL={dev:'Sessions',review:'Reviews',assistant:'Assistant'};
   function accountCard(a){
@@ -550,7 +587,7 @@ function settingsHtml() {
         section('repos','repo','Repositories','Each repo is cloned once; worktrees branch off it. Link a repo to GitHub to pick issues when starting a session.',
           (D.repos&&D.repos.error?'<div class="note err">'+esc(D.repos.error)+'</div>':'')+reposDirCard()+(repos.length?repos.map(repoCard).join(''):'<div class="empty">No repositories yet.</div>')+addRepoCard())
       + section('guardrails','shield','PR guardrails','Checks a worktree must pass before it can be marked PR-ready (<span class="mono">agent pr</span> / <span class="mono">/pr</span>), and branches nothing may push. Enforced by wtd and a git pre-push hook — not just instructions to the agent.', guardrailsSection())
-      + section('custom','extensions','Customizations','Your own skills, tools, CLAUDE.md additions and Claude hooks — for every worktree, or just one repo’s. Kept in <span class="mono">.wtd/custom</span> (yours, not in git) and applied each time a session opens.', customSection())
+      + section('custom','extensions','Customizations','Presets for Claude and Codex (skills, subagents, commands, rules, tools, CLAUDE.md / AGENTS.md and hooks) for every worktree, one repo’s, or one platform’s. Kept in <span class="mono">.wtd/custom</span> (yours, not in git) and applied each time a session opens.', customSection())
       + section('accounts','account','Accounts','Claude and Codex logins. Usage and billing follow the account a session runs under.', accountsSection())
       + section('defaults','settings','Defaults','Which login each kind of work uses unless you choose otherwise.', defaultsSection())
       + section('github','github','GitHub','Used to list issues and project items in New Session.', githubSection())
@@ -582,6 +619,8 @@ function settingsHtml() {
     if(t.dataset.act==='role') send({op:'roleSet', role:t.dataset.role, target:t.value});
     else if(t.dataset.act==='trayLogon') send({op:'trayLogon', on:t.checked});
     else if(t.dataset.act==='customAddRepo' && t.value) send({op:'customEdit', file:'CLAUDE.md', repo:t.value});
+    else if(t.dataset.act==='customAddPlatform' && t.value) send({op:'customEdit', file:'CLAUDE.md', repo:t.dataset.repo||null, platform:t.value});
+    else if(t.dataset.act==='customDisable' && t.value) send({op:'customToggle', on:false, item:t.value, repo:t.dataset.repo||null, platform:t.dataset.platform||null});
     else if(t.dataset.f==='src.onStart'||t.dataset.f==='src.statusField'){ const f=ui.forms[t.dataset.k]; setPath(f,'issueSource.'+t.dataset.f.slice(4),t.value); }
   });
   function parseProjectUrl(f){
@@ -602,7 +641,7 @@ function settingsHtml() {
     const n=e.target.closest('[data-to]'); if(n){ document.getElementById(n.dataset.to).scrollIntoView({behavior:'smooth'}); return; }
     const b=e.target.closest('[data-act]'); if(!b||b.disabled) return;
     const a=b.dataset.act, k=b.dataset.k;
-    if(a==='role'||a==='trayLogon'||a==='customAddRepo') return;   // handled on change
+    if(a==='role'||a==='trayLogon'||a==='customAddRepo'||a==='customAddPlatform'||a==='customDisable') return;   // handled on change
     if(a==='toggle'){ ui.open[k]=!ui.open[k]; render(); }
     else if(a==='kind'){ const f=ui.forms[k]; const v=b.dataset.v; const slug=k.slice(5); const r=D.repos.find(x=>x.slug===slug)||{};
       f.issueSource = v==='none'?null:(v==='repo'?{kind:'repo',repo:(f.repo||r.github_detected||''),labels:[],assignee:''}:{kind:'project'});
@@ -634,9 +673,10 @@ function settingsHtml() {
     else if(a==='reposDirClear') send({op:'reposDirClear'});
     else if(a==='grSave'){ delete ui.results[k]; send({op:'guardSave', key:k, slug:b.dataset.slug, value:grValue(ui.forms[k])}); }
     else if(a==='grReset'){ delete ui.forms[k]; delete ui.results[k]; send({op:'guardSave', key:k, slug:b.dataset.slug, value:null}); }
-    else if(a==='customOpen') send({op:'customOpen', repo:b.dataset.repo||null});
-    else if(a==='customNewSkill') send({op:'customNewSkill', repo:b.dataset.repo||null});
-    else if(a==='customEdit') send({op:'customEdit', file:b.dataset.file, repo:b.dataset.repo||null});
+    else if(a==='customOpen') send({op:'customOpen', repo:b.dataset.repo||null, platform:b.dataset.platform||null});
+    else if(a==='customNew') send({op:'customNew', kind:b.dataset.kind, repo:b.dataset.repo||null, platform:b.dataset.platform||null});
+    else if(a==='customEdit') send({op:'customEdit', file:b.dataset.file, repo:b.dataset.repo||null, platform:b.dataset.platform||null});
+    else if(a==='customToggle') send({op:'customToggle', on:b.dataset.on==='1', item:b.dataset.item, repo:b.dataset.repo||null, platform:b.dataset.platform||null});
     else if(a==='customApply'){ ui.busy['custom:apply']=true; render(); send({op:'customApply', key:'custom:apply'}); }
   });
 

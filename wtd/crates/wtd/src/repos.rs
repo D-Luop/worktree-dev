@@ -181,7 +181,7 @@ pub const WORKTREE_LOCAL: &[&str] =
     &["CLAUDE.md", "pr-notes.md", ".claude-status", ".claude-status.resume", ".claude/issue.md", ".claude/skills/", ".claude-ticket.md",
       // ours too: the session's plans and the hooks we merge. info/exclude only hides UNTRACKED files, so a
       // repo that commits its own .claude/settings.json still sees its changes.
-      ".claude/plans/", ".claude/settings.json", ".claude/settings.local.json"];
+      ".claude/plans/", ".claude/settings.json", ".claude/settings.local.json", ".zed/tasks.json"];
 
 fn install_hook(p: &Path, body: &str) -> Result<()> {
     match std::fs::read_to_string(p) {

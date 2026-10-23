@@ -322,7 +322,9 @@ if [ "$is_plan" != 1 ] && [ ! -d "$wt" ] && [ -d "$arc" ]; then
 fi
 
 # --- create worktree on first call ---
+fresh=""
 if [ ! -d "$wt" ]; then
+  fresh="--fresh"
   if [ "$is_plan" = 1 ]; then
     # planning agent: a plain git-init folder (no bare, no branch off a remote). Any scaffolding the
     # agent produces is version-controlled here and can later become the new app's real repo.
@@ -403,6 +405,11 @@ fi
 # propagate to existing worktrees on re-open. Skills are template-managed, not per-worktree edits.
 mkdir -p "$wt/.claude/skills"
 cp -r "$WTD/templates/.claude/skills/." "$wt/.claude/skills/" 2>/dev/null || true
+
+# presets (.wtd/custom: skills/agents/commands/rules/CLAUDE.md/AGENTS.md/hooks, per platform + repo)
+[ "$is_plan" = 1 ] || "$WTD/scripts/custom-apply.sh" "$repo" "$wt" $fresh || echo "warning: presets not applied (custom-apply.sh failed)"
+while read -r td; do [ -n "$td" ] && PATH="$td:$PATH"; done < <("$WTD/scripts/custom-apply.sh" --tool-dirs "$repo" 2>/dev/null)
+export PATH
 
 # ensure the always-present living-plan preview tab exists (seed a placeholder until the agent writes a
 # real plan via /plan). Every worktree gets a 'plan' tab in the preview panel this way.

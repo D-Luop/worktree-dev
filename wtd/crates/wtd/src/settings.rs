@@ -139,6 +139,13 @@ pub fn load_config(dev: &Path) -> Value {
         .unwrap_or_else(|| json!({ "version": 1, "repos": {} }))
 }
 
+/// Read-modify-write `.wtd/config.json`.
+pub fn update_config(dev: &Path, f: impl FnOnce(&mut Value)) -> Result<()> {
+    let mut cfg = load_config(dev);
+    f(&mut cfg);
+    save_config(dev, &cfg)
+}
+
 fn save_config(dev: &Path, cfg: &Value) -> Result<()> {
     let p = config_path(dev);
     let tmp = p.with_extension("json.tmp");

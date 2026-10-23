@@ -429,8 +429,7 @@ class DevSummaryProvider {
       t.show();
     }
     this._terms.set(key, t);
-    this._current = t;            // the just-opened session is now the selected one
-    this._showShell(slug, name, t).catch((e) => _dbg('shell: ' + e.message));
+    this.onTermActive(t);         // select it + dock its shell and Changes (no event fires if it was already active)
     this.clearUnread(key);
     _dbg(`  -> branch=${branch} tname=${JSON.stringify(t && t.name)} exit=${t && t.exitStatus}`);
     setTimeout(() => this._postRoster(), 1500);
@@ -853,6 +852,7 @@ class DevSummaryProvider {
     if (tk) { const j = tk.indexOf('\x01'); const s = tk.slice(0, j), n = tk.slice(j + 1);
       if (this.gitView) this.gitView.follow(s, n);
       if (this.changes) this.changes.follow(s, n);
+      if (!this._terms.has(tk) && t.exitStatus === undefined) this._terms.set(tk, t);   // adopt a reload-revived session
       if (this._terms.get(tk) === t) this._showShell(s, n, t).catch(() => {}); }
     for (const [k, v] of this._terms) if (v === t) { this.clearUnread(k); return; }
     // also match a reload-revived terminal by name
@@ -1169,7 +1169,7 @@ class DevSummaryProvider {
     this._notified = this._notified || {};
     try {
       for (const a of list) {
-        if (!a || a.nologin) continue;
+        if (!a || a.nologin || a.provider === 'codex') continue;   // switching moves Claude sessions only
         const util = Math.max((a.five_hour && a.five_hour.used) || 0, (a.seven_day && a.seven_day.used) || 0);
         if (util < 95) continue;
         const rk = (a.five_hour && a.five_hour.resets_at) || (a.seven_day && a.seven_day.resets_at) || '';
@@ -1471,7 +1471,7 @@ class DevSummaryProvider {
     const el=document.getElementById('lim');
     if(!accts || !accts.length){ el.innerHTML='<div class="none">'+(daemon.installed&&!daemon.running?'usage paused — daemon stopped':'waiting for usage…')+'</div>'; return; }
     el.innerHTML = accts.map(a=>{
-      const label = a.email || a.name;
+      const label = (a.provider==='codex'?'Codex · ':'') + (a.email || a.name);
       const head = '<div class="acct" title="'+esc(label)+'">'+esc(label)+'</div>';
       if(a.nologin) return '<div class="acctblk">'+head+'<div class="none">not logged in</div></div>';
       const f=a.five_hour||{}, s=a.seven_day||{};
@@ -1800,7 +1800,7 @@ async function newSessionWizard(dev) {
         items.push({ label: prov === 'claude' ? 'Claude' : 'Codex', kind: vscode.QuickPickItemKind.Separator });
         for (const a of list) items.push({
           label: (prov === 'claude' ? '$(sparkle) ' : '$(symbol-misc) ') + a.name + (a.logged_in ? '' : ' $(circle-slash)'),
-          description: [a.email, a.plan, prov === 'claude' && a.logged_in ? usageText(usage.get(a.name)) : ''].filter(Boolean).join(' · '),
+          description: [a.email, a.plan, a.logged_in ? usageText(usage.get(prov === 'codex' ? 'codex:' + a.name : a.name)) : ''].filter(Boolean).join(' · '),
           detail: !a.logged_in ? 'Not logged in — log in from Settings → Accounts' : (a.roles || []).includes('dev') ? 'Default for new sessions' : undefined,
           acct: a,
         });
@@ -1918,9 +1918,12 @@ async function launchSession(dev, st) {
     shellArgs: ['agent', slug, name].concat(args) });
   dev._terms.set(dev._key(slug, name), t); dev._current = t;
   t.show();
-  // after the worktree exists: join the chosen group, move the project card
+  // after the worktree exists: dock its shell + Changes panel (both skip a missing folder, so the focus
+  // above was too early for them), join the chosen group, move the project card
   const afterCreate = async () => {
-    for (let i = 0; i < 60 && !(dev.daemon && dev.daemon.wts.has(id)); i++) await new Promise((r) => setTimeout(r, 1000));
+    const wt = dev._wtPath(slug, name);
+    for (let i = 0; i < 60 && !(dev.daemon && dev.daemon.wts.has(id) && fs.existsSync(path.join(wt, '.git'))); i++) await new Promise((r) => setTimeout(r, 1000));
+    if (t.exitStatus === undefined && dev._current === t) dev.onTermActive(t);
     if (st.group && dev.daemon && dev.daemon.running) dev.daemon.request('group.assign', { worktree: id, group: st.group }).catch(() => {});
     if (st.item && st.item.item_id) {
       wtdJson(['issues', 'start', slug, st.item.item_id]).then((r) => { if (r && r.moved) vscode.window.setStatusBarMessage('$(project) Moved the card to ' + r.to, 5000); },
@@ -1961,6 +1964,9 @@ function activate(context) {
     if (kind === 'fleet' && wt && (!prev || prev.status !== wt.status)) provider.refresh(vscode.Uri.file(wt.path));
     if (kind === 'fleet' && wt && dev.gitView) dev.gitView.onWorktree(wt, prev);
     if (kind === 'fleet' && wt && dev.changes) dev.changes.onWorktree(wt, prev);
+    // after a reload the restored session terminal is active before the fleet is known, so nothing
+    // could match it to a worktree then; dock its shell + Changes once the first snapshot lands
+    if (kind === 'fleet' && !wt && !dev._dockedOnce && vscode.window.activeTerminal) { dev._dockedOnce = true; dev.onTermActive(vscode.window.activeTerminal); }
     if (settings && (kind === 'daemon' || kind === 'accounts')) settings.onDaemonChange();
     if (kind === 'release' && wt) { dev.releaseWorktree(wt).catch(() => {}); return; }
     if (kind === 'messages') { dev._onMessages(); kick('fleet'); }
@@ -1994,8 +2000,69 @@ function activate(context) {
   });
   { const k = dev._terminalKey(vscode.window.activeTerminal);
     if (k) { const j = k.indexOf('\x01'); dev.gitView.follow(k.slice(0, j), k.slice(j + 1)); dev.changes.follow(k.slice(0, j), k.slice(j + 1)); } }
+  // the tray: `wtd open <id> --in vscode` → …/open?slug=&name= · New session ▸ VS Code → …/new
+  context.subscriptions.push(vscode.window.registerUriHandler({ handleUri(uri) {
+    const q = new URLSearchParams(uri.query), slug = q.get('slug'), name = q.get('name');
+    if (uri.path === '/open' && slug && name) dev.openOrFocus(slug, name);
+    else if (uri.path === '/new') dev.newAgent();
+  } }));
   // ctrl+v in a focused session → image-aware paste (see DevSummaryProvider.smartPaste)
   context.subscriptions.push(vscode.commands.registerCommand('claudeStatus.smartPaste', () => dev.smartPaste()));
+  // a terminal swallows ctrl+v (sends it to the shell) unless the bound command is in commandsToSkipShell
+  if (IS_WIN) {
+    const tcfg = vscode.workspace.getConfiguration('terminal.integrated');
+    const skip = tcfg.inspect('commandsToSkipShell');
+    const cur = (skip && skip.globalValue) || [];
+    if (!cur.includes('claudeStatus.smartPaste'))
+      tcfg.update('commandsToSkipShell', cur.concat('claudeStatus.smartPaste'), vscode.ConfigurationTarget.Global).then(undefined, () => {});
+  }
+  // the chat / shell / Changes split needs visible dividers: paint them in the window's Peacock colour
+  // (beside Peacock's own workspace colorCustomizations), else a neutral grey in user settings
+  const syncDividers = () => {
+    const wcfg = vscode.workspace.getConfiguration('workbench');
+    const ins = wcfg.inspect('colorCustomizations') || {};
+    const peacock = vscode.workspace.getConfiguration('peacock').get('color');
+    const set = (scope, cur, val) => {
+      if ((cur || {})['editorGroup.border'] === val) return;
+      const next = Object.assign({}, cur);
+      if (val) next['editorGroup.border'] = val; else delete next['editorGroup.border'];
+      wcfg.update('colorCustomizations', next, scope).then(undefined, () => {});
+    };
+    if (peacock && vscode.workspace.workspaceFolders) set(vscode.ConfigurationTarget.Workspace, ins.workspaceValue, peacock);
+    else if (!(ins.globalValue || {})['editorGroup.border']) set(vscode.ConfigurationTarget.Global, ins.globalValue, '#6e7681');
+  };
+  syncDividers();
+  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => { if (e.affectsConfiguration('peacock.color')) syncDividers(); }));
+
+  // agents propose preset changes (MCP preset_propose → .wtd/state/preset-proposals/<id>.json); each
+  // pending one asks the user once, with a diff, before anything is written
+  const asked = new Set();
+  const askProposals = () => wtdJson(['custom', 'proposals']).then((rows) => {
+    for (const r of rows || []) {
+      const p = r.proposal;
+      if (p.state !== 'pending' || asked.has(p.id)) continue;
+      asked.add(p.id);
+      const scope = (p.repo || 'every repo') + (p.platform ? ' on ' + p.platform : '');
+      const what = (p.content == null ? 'delete ' : '') + p.path + ' (' + scope + ')';
+      const prompt = () => vscode.window.showInformationMessage((p.from ? p.from + ' proposes' : 'An agent proposes') + ' a preset change: ' + what
+        + (p.reason ? ' — ' + p.reason : ''), 'Review', 'Accept', 'Reject').then((c) => {
+        if (c === 'Review') {
+          const cur = fs.existsSync(r.target) ? vscode.Uri.file(r.target) : vscode.Uri.parse('untitled:' + p.path);
+          vscode.commands.executeCommand('vscode.diff', cur, vscode.Uri.file(r.proposed), 'Preset proposal: ' + what);
+          return prompt();   // ask again with the diff open
+        }
+        if (c === 'Accept') return wtdJson(['custom', 'accept', p.id]).then(() => vscode.window.setStatusBarMessage('$(check) Preset saved — new sessions get it', 5000),
+          (e) => vscode.window.showErrorMessage('Preset proposal: ' + e.message));
+        if (c === 'Reject') return wtdJson(['custom', 'reject', p.id]).catch(() => {});
+        asked.delete(p.id);   // dismissed: ask again on the next change
+      });
+      prompt();
+    }
+  }).catch(() => {});
+  const ppWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(path.join(WTD, 'state', 'preset-proposals'), '*.json'));
+  ppWatcher.onDidCreate(askProposals); ppWatcher.onDidChange(askProposals);
+  context.subscriptions.push(ppWatcher);
+  askProposals();
 
   // agents publish design mockups via the `preview` command (→ .wtd/state/previews/<slug>/<name>.html);
   // watch that tree so a 🖼 appears on the worktree's roster row, and clears when the file is removed.

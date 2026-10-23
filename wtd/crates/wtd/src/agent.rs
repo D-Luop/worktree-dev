@@ -477,6 +477,9 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
         Ok(log) => log.iter().for_each(|l| println!("{l}")),
         Err(e) => eprintln!("warning: customizations: {e:#}"),
     }
+    if let Err(e) = crate::frontend::ensure_zed_task(&wtp, &slug, &name) {
+        eprintln!("warning: zed task: {e:#}");
+    }
     // the linked ticket: link it (New Session passes the picked issue), then refresh
     // .claude-ticket.md in the background so the session doesn't wait on GitHub
     if let (Some(spec), false) = (&ticket, repo_less) {

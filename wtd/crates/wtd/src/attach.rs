@@ -26,11 +26,11 @@ use wtd_core::protocol::method;
 use crate::client::Client;
 use crate::{paths, win};
 
-const F_DATA: u8 = 0;
-const F_RESIZE: u8 = 1;
-const F_EXIT: u8 = 2;
+pub(crate) const F_DATA: u8 = 0;
+pub(crate) const F_RESIZE: u8 = 1;
+pub(crate) const F_EXIT: u8 = 2;
 
-fn frame(t: u8, payload: &[u8]) -> Vec<u8> {
+pub(crate) fn frame(t: u8, payload: &[u8]) -> Vec<u8> {
     let mut v = Vec::with_capacity(5 + payload.len());
     v.push(t);
     v.extend_from_slice(&(payload.len() as u32).to_le_bytes());
@@ -117,6 +117,11 @@ fn write_out(data: &[u8]) {
 }
 
 pub fn host_main(args: &[String]) -> Result<i32> {
+    // WTD_DETACH: start (or find) the hosted session and return; a frontend attaches on its own
+    if std::env::var_os("WTD_DETACH").is_some() {
+        host_detached(args)?;
+        return Ok(0);
+    }
     if Client::connect()?.is_none() {
         return crate::run::main(args); // no daemon: the session lives in this terminal, as before
     }

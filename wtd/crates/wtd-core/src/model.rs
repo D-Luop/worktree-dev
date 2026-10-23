@@ -120,6 +120,9 @@ pub struct Account {
     pub ts: i64,
     /// No credentials found: the account isn't logged in.
     pub nologin: bool,
+    /// `claude` | `codex` (empty in older daemons = claude). Codex accounts are named `codex:<name>`.
+    #[serde(default)]
+    pub provider: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

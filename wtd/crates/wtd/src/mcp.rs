@@ -1,7 +1,9 @@
 //! `wtd mcp`: stdio MCP server giving every agent read-only fleet awareness.
 //!
 //! Tools: `fleet_list`, `fleet_get`, `fleet_read_file` (read-only), `fleet_send` (a prompt to another
-//! worktree's agent — held by the daemon until the user approves it in VSCode), `fleet_inbox`.
+//! worktree's agent — held by the daemon until the user approves it in VSCode), `fleet_inbox`,
+//! `preset_list` (what presets a repo's sessions get) and `preset_propose` (a preset change the user
+//! must accept before anything is written).
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -96,6 +98,27 @@ fn tools() -> Value {
             "annotations": { "readOnlyHint": true }
         },
         {
+            "name": "preset_list",
+            "description": "The WorkTreeDev presets a repo's sessions get on this platform: skills, subagents, commands, rules (each with the layer it comes from: built-in, global, platform:<os>, repo:<slug>, repo:<slug>+<os>), CLAUDE.md / AGENTS.md additions, hooks and tool dirs. Read-only.",
+            "inputSchema": { "type": "object", "properties": {
+                "repo": { "type": "string", "description": "repo slug; defaults to this worktree's repo" },
+                "platform": { "type": "string", "enum": ["windows", "wsl", "linux", "mac"] }
+            }, "additionalProperties": false },
+            "annotations": { "readOnlyHint": true }
+        },
+        {
+            "name": "preset_propose",
+            "description": "Propose a change to the user's WorkTreeDev presets (.wtd/custom): a skill, subagent, command, rule, CLAUDE.md / AGENTS.md additions, hooks.json or the disabled list, for every repo, one repo, and/or one platform. Nothing is written until the user accepts it in VS Code (they see a diff) or with `wtd custom accept <id>`. Only propose after the user asked for it or agreed in chat; tell them it is waiting for their approval. `content` is the whole new file (omit it with delete=true to remove the file).",
+            "inputSchema": { "type": "object", "properties": {
+                "path": { "type": "string", "description": "CLAUDE.md | AGENTS.md | hooks.json | disabled | skills/<name>/<file> | agents/<name>.md | commands/<name>.md | rules/<name>.md" },
+                "content": { "type": "string", "description": "the complete new file contents" },
+                "delete": { "type": "boolean", "description": "remove the file instead" },
+                "repo": { "type": "string", "description": "only this repo's worktrees (omit for every repo)" },
+                "platform": { "type": "string", "enum": ["windows", "wsl", "linux", "mac"], "description": "only on this platform (omit for all)" },
+                "reason": { "type": "string", "description": "one line the user sees: why this change" }
+            }, "required": ["path", "reason"], "additionalProperties": false }
+        },
+        {
             "name": "fleet_read_file",
             "description": "Read a file from another worktree (path relative to that worktree's root). Read-only; never edit another worktree.",
             "inputSchema": { "type": "object", "properties": {
@@ -152,6 +175,22 @@ fn call(dev: &Path, me: Option<&str>, name: &str, args: &Value) -> Result<String
                 let dir = if m["from"] == me { format!("→ to {}", m["to"].as_str().unwrap_or("?")) } else { format!("← from {}", m["from"].as_str().unwrap_or("?")) };
                 format!("#{} {dir} [{}]\n{}", m["id"], m["state"].as_str().unwrap_or("?"), m["body"].as_str().unwrap_or(""))
             }).collect::<Vec<_>>().join("\n\n"))
+        }
+        "preset_list" => {
+            let repo = args.get("repo").and_then(Value::as_str).map(String::from).or_else(|| me.and_then(|m| m.split_once('/')).map(|(s, _)| s.to_string())).unwrap_or_default();
+            let os = args.get("platform").and_then(Value::as_str).unwrap_or(crate::custom::platform());
+            Ok(serde_json::to_string_pretty(&crate::custom::effective(dev, &repo, os))?)
+        }
+        "preset_propose" => {
+            let s = |k: &str| args.get(k).and_then(Value::as_str);
+            let path = s("path").context("path is required")?;
+            let delete = args.get("delete").and_then(Value::as_bool).unwrap_or(false);
+            let content = if delete { None } else { Some(s("content").context("content is required (or delete: true)")?) };
+            let p = crate::proposal::create(dev, me, s("repo"), s("platform"), path, content, s("reason").unwrap_or(""))?;
+            Ok(format!(
+                "Proposal {} ({} {}) is waiting for the user's approval in VS Code, or `wtd custom accept {}`. Nothing changes until they accept. Let the user know it's waiting for them.",
+                p.id, if delete { "delete" } else { "write" }, crate::proposal::target(dev, &p)?.display(), p.id
+            ))
         }
         "fleet_read_file" => {
             let id = args.get("id").and_then(Value::as_str).context("id is required")?;

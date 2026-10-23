@@ -3,17 +3,21 @@
 
 pub mod agent;
 pub mod attach;
+pub mod changes;
 pub mod client;
 pub mod codex;
 pub mod custom;
 pub mod daemon;
+pub mod frontend;
 pub mod gitx;
 pub mod guard;
 pub mod handoff;
 pub mod hook;
 pub mod issues;
 pub mod mcp;
+pub mod new;
 pub mod paths;
+pub mod proposal;
 pub mod repos;
 pub mod review;
 pub mod run;
@@ -22,6 +26,7 @@ pub mod statusfile;
 pub mod ticket;
 pub mod tools;
 pub mod tray;
+pub mod tui;
 pub mod win;
 pub mod wt;
 
@@ -37,6 +42,8 @@ Worktrees & sessions (also on PATH as plain `agent`, `archive`, … via ~/.local
   wtd agent <slug> <name> [--from ref] [--account a] [--issue-file md] [--no-claude] [ref…]
                                      create-or-open a worktree and its agent session
   wtd agent ls|stop|rm|done|pr|wip … manage worktrees (`wtd agent` for details)
+  wtd new [<slug>] [--in terminal|zed]
+                                     New Session wizard in the console (repo → branch)
   wtd archive <slug> <name>          park a worktree under worktrees/<slug>/archive (branch kept)
   wtd assistant                      the dev-root assistant session
   wtd close                          end the session this terminal belongs to
@@ -48,7 +55,9 @@ Worktrees & sessions (also on PATH as plain `agent`, `archive`, … via ~/.local
   wtd preview <file.html> [label]    stage an HTML design for the preview panel
   wtd preflight [<slug>/<name>]      run the repo's PR guardrails here (agent pr requires a pass)
   wtd ticket link|unlink|sync|show … the linked GitHub issue/PR, written to .claude-ticket.md
-  wtd custom ls|dir|new-skill|apply  your own skills/tools/CLAUDE.md/hooks (.wtd/custom)
+  wtd custom ls|effective|new|disable|apply|proposals …
+                                     presets: skills/agents/commands/rules/tools/CLAUDE.md/AGENTS.md/hooks
+                                     per platform and repo (.wtd/custom)
   wtd tokens                         token usage across sessions
   wtd ship                           package the toolkit for another machine
 
@@ -56,12 +65,18 @@ Fleet & daemon
   wtd daemon start|stop [--force]|status|run
                                      control the background daemon (--force: also end hosted sessions)
   wtd ls [--json]                    list worktrees (status, git, live session)
+  wtd open <slug/name> [--in vscode|zed|terminal]
+                                     show a worktree's session (default: `wtd frontend`)
+  wtd frontend [vscode|zed|terminal] show or set the default frontend
+  wtd tui                            the fleet in this terminal: roster, live session, changes/diffs
+  wtd changes <slug/name> [working|<sha>]
+                                     branch commits / a diff as JSON (files → hunks → lines)
   wtd stop <slug/name>               end a worktree's live session (kills its process tree)
   wtd refresh [slug/name]            rescan worktrees and re-check git now
   wtd hook <event>                   Claude Code hook handler (reads hook JSON on stdin)
   wtd mcp                            stdio MCP server: read-only fleet tools for agents
   wtd tray [--spawn|--quit|--logon on|off]
-                                     notification-area icon: start/stop the daemon, open VS Code
+                                     notification-area icon: sessions, new session, start/stop the daemon
   wtd repo ls|add|rm|fetch|set-github … repos (JSON output; see `wtd repo`)
   wtd account ls|add|rm|use …        Claude / Codex logins and role defaults (JSON output)
   wtd env                            installed CLIs, GitHub login + scopes, tray-at-logon
@@ -100,6 +115,11 @@ fn dispatch(cmd: &str, rest: &[String]) -> Result<i32> {
         "attach" => attach::attach_main(rest),
         "mcp" => mcp::main(),
         "tray" => tray::main(rest),
+        "open" => frontend::open_main(rest),
+        "new" => new::main(rest),
+        "changes" => changes::main(rest),
+        "tui" => tui::main(rest),
+        "frontend" => frontend::frontend_main(rest),
         "repo" => settings::repo_main(rest),
         "account" => settings::account_main(rest),
         "env" => settings::env_main(rest),
