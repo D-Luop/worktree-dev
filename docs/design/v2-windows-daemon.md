@@ -169,9 +169,21 @@ daemon would remove the only button that can start it again.
 - It learns the daemon's state by holding a subscription on the pipe. When the daemon is down, it
   retries the connection every few seconds (a cheap failed pipe open, no process spawn).
 - *Start tray at logon* (on by default after install) adds an `HKCU\…\Run` entry for the **tray only**.
-  The daemon still starts only when you click Start.
-- Windows puts new tray icons in the `^` overflow. Drag it onto the taskbar, or turn it on under
-  *Settings → Personalization → Taskbar → Other system tray icons*. The installer prints this hint.
+  The daemon still starts only when you click Start. Every install/update runs
+  `wtd tray --logon refresh`, which rewrites the entry with the current exe path unless the user turned
+  it off (remembered as `HKCU\Software\WorkTreeDev\TrayLogonOff`).
+- **Visible, not in the overflow.** Windows puts new tray icons in the `^` overflow. Windows 11 keeps
+  one `HKCU\Control Panel\NotifyIconSettings\<n>` entry per icon, keyed by `ExecutablePath` + `UID`
+  (no `NIF_GUID` needed: the install path is stable, and a GUID would bind to one exe path). On first
+  run the tray waits for Explorer to create its entry and sets `IsPromoted = 1` if the user hasn't
+  chosen yet (value absent; `0` means they hid it), then records `TrayPromoted` so it never does it
+  again. Where no entry appears, it shows a one-time balloon: drag the icon onto the taskbar, or turn
+  it on under *Settings → Personalization → Taskbar → Other system tray icons*.
+- **Self-healing.** The tray writes `running` / `quit` to a volatile key
+  (`HKCU\Software\WorkTreeDev\Session`, dropped at sign-out). While the daemon runs it checks every
+  5 s (`tray::ensure`, also `wtd tray --ensure`) and relaunches the tray if it's `running` with no
+  window (crashed or killed), or if nothing started it this sign-in and start-at-logon is on. *Quit
+  tray* writes `quit`, so it stays gone until the next sign-in. A named mutex keeps it to one icon.
 
 **Panel button.** The fleet panel toolbar gets a **Start / Stop** toggle with the same state. While the
 daemon is stopped, the panel shows the roster greyed out with a single *Start daemon* call to action,

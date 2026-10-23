@@ -374,7 +374,7 @@ if [ -x "$WTD_EXE" ]; then
     echo "    SKIPPED MCP registration: 'claude' not on PATH"
   fi
   "$WTD_EXE" tray --logon refresh && echo "    tray starts at logon unless you turned that off (toggle in its ⚙ menu)"
-  "$WTD_EXE" tray --spawn && echo "    tray icon started — find it in the taskbar's ^ overflow; drag it onto the taskbar to keep it visible"
+  "$WTD_EXE" tray --spawn && echo "    tray icon started — it pins itself to the taskbar on first run (if it's in the ^ overflow, drag it out)"
   echo "    the daemon does NOT auto-start: use the tray icon or the fleet panel's Start button"
 fi
 
