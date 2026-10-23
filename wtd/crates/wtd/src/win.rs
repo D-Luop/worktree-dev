@@ -13,7 +13,7 @@ use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation, JobObjectBasicProcessIdList,
     JobObjectExtendedLimitInformation, OpenJobObjectW, QueryInformationJobObject, SetInformationJobObject,
     TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 
 // Job access rights (winnt.h); windows-sys keeps them in SystemServices.
@@ -60,6 +60,8 @@ pub fn enter_new_job(name: &str) -> std::io::Result<Handle> {
 }
 
 /// A named job that kills every member when its last handle closes (members added by the caller).
+/// Children that ask for CREATE_BREAKAWAY_FROM_JOB may leave it: a tray or daemon started from inside
+/// a session must outlive that session.
 pub fn new_kill_on_close_job(name: &str) -> std::io::Result<Handle> {
     unsafe {
         let h = CreateJobObjectW(std::ptr::null(), wide(name).as_ptr());
@@ -68,7 +70,7 @@ pub fn new_kill_on_close_job(name: &str) -> std::io::Result<Handle> {
         }
         let job = Handle(h);
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
         if SetInformationJobObject(
             job.0,
             JobObjectExtendedLimitInformation,
