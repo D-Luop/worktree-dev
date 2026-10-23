@@ -230,7 +230,7 @@ pub fn render(dev: &Path, id: &str, wtp: &Path) -> Result<Option<String>> {
 
 /// Re-render and write `.claude-ticket.md` when its content changed. → whether a file was written.
 pub fn sync(dev: &Path, id: &str) -> Result<bool> {
-    let wtp = paths::worktree_path(dev, id);
+    let wtp = paths::worktree_root(dev, id);
     if !wtp.is_dir() {
         bail!("no worktree '{id}'");
     }
@@ -292,13 +292,13 @@ pub fn main(args: &[String]) -> Result<i32> {
         ["sync"] | ["sync", _] => {
             let id = match a.get(1) { Some(i) => i.to_string(), None => here()? };
             let wrote = sync(&dev, &id)?;
-            let exists = paths::worktree_path(&dev, &id).join(FILE).is_file();
+            let exists = paths::worktree_root(&dev, &id).join(FILE).is_file();
             println!("{}", if !exists { format!("{id}: nothing linked and no PR for this branch") } else if wrote { format!("{id}: {FILE} updated") } else { format!("{id}: {FILE} already current") });
             Ok(0)
         }
         ["show"] | ["show", _] => {
             let id = match a.get(1) { Some(i) => i.to_string(), None => here()? };
-            let p = paths::worktree_path(&dev, &id).join(FILE);
+            let p = paths::worktree_root(&dev, &id).join(FILE);
             out(json!({ "link": link_of(&dev, &id), "path": p.to_string_lossy(), "exists": p.is_file() }))?;
             Ok(0)
         }

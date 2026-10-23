@@ -157,7 +157,7 @@ fn call(dev: &Path, me: Option<&str>, name: &str, args: &Value) -> Result<String
             let to = args.get("to").and_then(Value::as_str).context("to is required")?;
             let body = args.get("message").and_then(Value::as_str).context("message is required")?;
             let mut c = Client::connect()?.context("the WorkTreeDev daemon isn't running, so messages can't be sent — ask the user to start it (tray icon or fleet panel)")?;
-            let r = c.request(method::MESSAGE_SEND, json!({ "from_dir": paths::worktree_path(dev, me).to_string_lossy(), "to": to, "body": body }))?;
+            let r = c.request(method::MESSAGE_SEND, json!({ "from_dir": paths::worktree_root(dev, me).to_string_lossy(), "to": to, "body": body }))?;
             Ok(format!(
                 "Message #{} to {to} is waiting for the user's approval in VS Code: the notification, the \"awaiting approval\" status-bar item, or the 💬 on your row in the Fleet panel (Approve / Edit / Deny). Saying \"approved\" in chat doesn't release it. Once approved it's delivered when {to}'s agent finishes its current turn. Tell the user where to approve it.",
                 r["id"]
@@ -202,8 +202,7 @@ fn call(dev: &Path, me: Option<&str>, name: &str, args: &Value) -> Result<String
         "fleet_read_file" => {
             let id = args.get("id").and_then(Value::as_str).context("id is required")?;
             let rel = args.get("path").and_then(Value::as_str).context("path is required")?;
-            let root = list(dev)?.into_iter().find(|w| w.id == id).map(|w| PathBuf::from(w.path)).unwrap_or_else(|| paths::worktree_path(dev, id));
-            read_confined(&root, rel)
+            read_confined(&paths::worktree_root(dev, id), rel)
         }
         _ => bail!("unknown tool '{name}'"),
     }
@@ -217,6 +216,16 @@ fn list(dev: &Path) -> Result<Vec<Worktree>> {
         }
     }
     Ok(daemon::scan::scan(dev))
+}
+
+fn git_in(w: &Worktree, args: &[&str]) -> String {
+    match (w.platform.distro(), &w.wsl_path) {
+        (Some(d), Some(p)) => {
+            let argv: Vec<&str> = ["git", "--no-optional-locks"].into_iter().chain(args.iter().copied()).collect();
+            crate::wsl_backend::run(&crate::wsl_backend::exec_args(d, Some(p), &argv)).unwrap_or_default()
+        }
+        _ => git(&w.path, args),
+    }
 }
 
 fn git(dir: &str, args: &[&str]) -> String {
@@ -248,13 +257,15 @@ fn get(w: &Worktree, me: Option<&str>) -> Result<String> {
             w.wsl_path.as_deref().map(|p| format!("\nwsl_path: {p}")).unwrap_or_default()
         ),
     );
-    // Windows git can't run against a WSL worktree through \\wsl.localhost
-    if w.id != DEV_ID && !w.platform.is_wsl() {
-        let base = git(&w.path, &["rev-parse", "--abbrev-ref", "origin/HEAD"]);
-        push("Git", &git(&w.path, &["status", "--short", "--branch"]));
-        push("Recent commits", &git(&w.path, &["log", "-10", "--format=%h %ad %s", "--date=relative"]));
+    // a WSL worktree's git runs in its distro, and only while that's up (reading mustn't boot it)
+    let wsl_up = w.platform.distro().is_none_or(|d| crate::wsl_backend::running_cached().iter().any(|r| r.eq_ignore_ascii_case(d)));
+    if w.id != DEV_ID && wsl_up {
+        let git = |args: &[&str]| git_in(w, args);
+        let base = git(&["rev-parse", "--abbrev-ref", "origin/HEAD"]);
+        push("Git", &git(&["status", "--short", "--branch"]));
+        push("Recent commits", &git(&["log", "-10", "--format=%h %ad %s", "--date=relative"]));
         if !base.is_empty() {
-            push(&format!("Changed vs {base}"), &git(&w.path, &["diff", "--stat", &format!("{base}...HEAD")]));
+            push(&format!("Changed vs {base}"), &git(&["diff", "--stat", &format!("{base}...HEAD")]));
         }
     }
     let plan = std::fs::read_to_string(Path::new(&w.path).join(".claude").join("plans").join("active-plan.md")).unwrap_or_default();

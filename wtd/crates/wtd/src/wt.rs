@@ -53,10 +53,11 @@ pub fn forget_worktree_state(dev: &Path, slug: &str, name: &str) {
 /// Accept a full name (`feat/x`) or a bare leaf (`x`) that's unique one namespace down.
 pub fn resolve_name(dev: &Path, slug: &str, name: &str) -> Result<String> {
     let root = dev.join("worktrees").join(slug);
-    if paths::worktree_path(dev, &format!("{slug}/{name}")).is_dir() {
+    let wsl = crate::wsl_backend::load(dev).into_iter().filter(|e| e.slug == slug && !e.archived).map(|e| e.name).collect::<Vec<_>>();
+    if paths::worktree_path(dev, &format!("{slug}/{name}")).is_dir() || wsl.iter().any(|n| n == name) {
         return Ok(name.to_string());
     }
-    let mut found = vec![];
+    let mut found: Vec<String> = wsl.into_iter().filter(|n| n.split_once('/').is_some_and(|(_, leaf)| leaf == name)).collect();
     if let Ok(rd) = std::fs::read_dir(&root) {
         for e in rd.flatten() {
             let ns = e.file_name().to_string_lossy().to_string();
@@ -75,6 +76,9 @@ pub fn resolve_name(dev: &Path, slug: &str, name: &str) -> Result<String> {
 /// `git worktree remove` (retrying briefly: a just-killed session can hold handles on Windows), then
 /// optionally delete the branch. Planning agents (slug `plan`) are plain folders.
 pub fn remove(dev: &Path, slug: &str, name: &str, force: bool, delete_branch: bool) -> Result<Vec<String>> {
+    if let Some(e) = crate::wsl_backend::find_any(dev, &format!("{slug}/{name}")) {
+        return crate::wsl_backend::remove(dev, &e, force, delete_branch);
+    }
     let mut log = vec![];
     let wt = paths::worktree_path(dev, &format!("{slug}/{name}"));
     if wt.is_dir() {
@@ -177,6 +181,9 @@ fn retry_while_busy<T>(mut f: impl FnMut() -> Result<T>) -> Result<T> {
 }
 
 pub fn archive(dev: &Path, slug: &str, name: &str) -> Result<PathBuf> {
+    if let Some(e) = crate::wsl_backend::find(dev, &format!("{slug}/{name}")) {
+        return Ok(crate::wsl_backend::archive(dev, &e)?.unc());
+    }
     let bare = gitx::require_repo(dev, slug)?;
     let wt = paths::worktree_path(dev, &format!("{slug}/{name}"));
     if !wt.is_dir() {

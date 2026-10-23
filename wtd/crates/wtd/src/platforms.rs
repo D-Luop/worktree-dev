@@ -332,47 +332,12 @@ pub fn config_main(args: &[String]) -> Result<i32> {
 
 // --- WSL worktrees ----------------------------------------------------------------------------------
 
-/// A worktree living inside a distro. Windows worktrees are found by scanning `worktrees/`; these
-/// can't be (they're not on the Windows disk), so they're recorded when created.
-#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
-pub struct WslWorktree {
-    pub platform: Platform,
-    pub wsl_path: String,
-}
-
-fn wsl_registry_path(dev: &Path) -> std::path::PathBuf {
-    dev.join(".wtd").join("state").join("wsl-worktrees.json")
-}
-
-pub fn wsl_worktrees(dev: &Path) -> std::collections::BTreeMap<String, WslWorktree> {
-    std::fs::read_to_string(wsl_registry_path(dev)).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
-}
-
-pub fn register_wsl(dev: &Path, id: &str, wt: Option<WslWorktree>) -> Result<()> {
-    let mut all = wsl_worktrees(dev);
-    match wt {
-        Some(w) => all.insert(id.to_string(), w),
-        None => all.remove(id),
-    };
-    let p = wsl_registry_path(dev);
-    std::fs::create_dir_all(p.parent().unwrap())?;
-    let tmp = p.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(&all)? + "\n")?;
-    std::fs::rename(&tmp, &p)?;
-    Ok(())
-}
-
-/// The Windows view of a path inside a distro (read-only uses: status file, plan title).
-pub fn unc_path(distro: &str, wsl_path: &str) -> String {
-    format!(r"\\wsl.localhost\{distro}{}", wsl_path.replace('/', "\\"))
-}
-
 /// Which platform `id` already lives on, if it exists. One branch gets one worktree.
 pub fn existing_platform(dev: &Path, id: &str) -> Option<Platform> {
     if crate::paths::worktree_path(dev, id).exists() {
         return Some(Platform::Windows);
     }
-    wsl_worktrees(dev).remove(id).map(|w| w.platform)
+    crate::wsl_backend::find_any(dev, id).map(|e| e.platform())
 }
 
 /// The platform `agent` opens `id` on: where it already is, else the resolved default.
@@ -514,17 +479,17 @@ mod tests {
     }
 
     #[test]
-    fn wsl_registry_roundtrip() {
+    fn existing_platform_reads_both_layouts() {
         let t = dev_root("registry", "", json!({}));
-        let u = WslWorktree { platform: Platform::Wsl("Ubuntu".into()), wsl_path: "/home/dev/dev/worktree-dev/worktrees/app/feat/x".into() };
-        register_wsl(&t, "app/feat/x", Some(u.clone())).unwrap();
-        assert_eq!(existing_platform(&t, "app/feat/x"), Some(u.platform.clone()));
+        let e = crate::wsl_backend::Entry {
+            id: "app/feat/x".into(), slug: "app".into(), name: "feat/x".into(), distro: "Ubuntu".into(),
+            wsl_path: "/home/dev/dev/worktree-dev/worktrees/app/feat/x".into(), archived: true,
+        };
+        crate::wsl_backend::upsert(&t, e).unwrap();
+        assert_eq!(existing_platform(&t, "app/feat/x"), Some(Platform::Wsl("Ubuntu".into())), "an archived WSL worktree reopens in WSL");
         assert_eq!(existing_platform(&t, "app/feat/y"), None);
         std::fs::create_dir_all(crate::paths::worktree_path(&t, "app/feat/y")).unwrap();
         assert_eq!(existing_platform(&t, "app/feat/y"), Some(Platform::Windows));
-        register_wsl(&t, "app/feat/x", None).unwrap();
-        assert!(wsl_worktrees(&t).is_empty());
-        assert_eq!(unc_path("Ubuntu", "/home/dev/x"), r"\\wsl.localhost\Ubuntu\home\dev\x");
         std::fs::remove_dir_all(&t).ok();
     }
 

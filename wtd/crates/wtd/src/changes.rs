@@ -68,6 +68,11 @@ pub struct FileDiff {
 }
 
 fn git(wt: &Path, args: &[&str]) -> Option<String> {
+    if let Some((distro, linux)) = crate::wsl_backend::path::from_unc(wt.to_str()?) {
+        let mut a = vec!["git"];
+        a.extend_from_slice(args);
+        return crate::wsl_backend::run(&crate::wsl_backend::exec_args(&distro, Some(&linux), &a)).ok();
+    }
     let mut a = vec!["-C", wt.to_str()?];
     a.extend_from_slice(args);
     gitx::out(&a).ok()
@@ -230,7 +235,7 @@ pub fn common_affixes(a: &str, b: &str) -> (usize, usize) {
 pub fn main(args: &[String]) -> Result<i32> {
     let dev = paths::dev_root()?;
     let id = args.first().ok_or_else(|| anyhow::anyhow!("usage: wtd changes <slug>/<name> [working | <sha>]"))?;
-    let wt = paths::worktree_path(&dev, id);
+    let wt = paths::worktree_root(&dev, id);
     match args.get(1).map(String::as_str) {
         None => settings::out(json!(summary(&wt))),
         Some("working") => settings::out(json!(working(&wt))),

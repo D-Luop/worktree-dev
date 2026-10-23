@@ -197,6 +197,9 @@ pub struct WtRef {
 /// Map any folder inside the dev tree to its worktree (walks up to the nearest `.git`), or `None` if
 /// the folder is outside worktree-dev entirely.
 pub fn resolve_worktree(dev: &Path, dir: &Path) -> Option<WtRef> {
+    if let Some(e) = crate::wsl_backend::resolve_host_path(dev, dir) {
+        return Some(WtRef { root: e.unc(), id: e.id });
+    }
     if eq_ci(dir, dev) {
         return Some(WtRef { id: DEV_ID.into(), root: dev.to_path_buf() });
     }
@@ -224,6 +227,11 @@ pub fn is_delegate_id(id: &str) -> bool {
 /// Slugs under `worktrees/` that hold plain folders (their own `git init`), not checkouts of a repo.
 pub fn repo_less(slug: &str) -> bool {
     slug == "plan" || slug == DELEGATE
+}
+
+/// [`worktree_path`], or a registered WSL worktree's `\\wsl.localhost\…` view.
+pub fn worktree_root(dev: &Path, id: &str) -> PathBuf {
+    crate::wsl_backend::find(dev, id).map(|e| e.unc()).unwrap_or_else(|| worktree_path(dev, id))
 }
 
 pub fn worktree_path(dev: &Path, id: &str) -> PathBuf {

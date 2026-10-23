@@ -11,8 +11,7 @@ use crate::statusfile;
 /// `worktrees/<slug>/archive/`, plus the dev base itself (the assistant).
 pub fn scan(dev: &Path) -> Vec<Worktree> {
     let mut out = vec![facts(dev, DEV_ID, WorktreeKind::Dev, "", "assistant", dev)];
-    let root = dev.join("worktrees");
-    let slugs = std::fs::read_dir(&root).into_iter().flatten().flatten();
+    let slugs = std::fs::read_dir(dev.join("worktrees")).into_iter().flatten().flatten();
     for slug in slugs.filter(|e| e.path().is_dir()) {
         let slug_name = slug.file_name().to_string_lossy().to_string();
         let kind = match slug_name.as_str() {
@@ -22,18 +21,36 @@ pub fn scan(dev: &Path) -> Vec<Worktree> {
         };
         walk(dev, &slug.path(), &slug_name, "", kind, 0, &mut out);
     }
-    for (id, w) in crate::platforms::wsl_worktrees(dev) {
-        let (Some(distro), Some((slug, name))) = (w.platform.distro(), id.split_once('/')) else { continue };
-        if out.iter().any(|x| x.id == id) {
-            continue;
-        }
-        let unc = crate::platforms::unc_path(distro, &w.wsl_path);
-        let mut wt = facts(dev, &id, WorktreeKind::Repo, slug, name, Path::new(&unc));
-        wt.platform = w.platform;
-        wt.wsl_path = Some(w.wsl_path);
-        out.push(wt);
-    }
+    let seen: std::collections::HashSet<String> = out.iter().map(|w| w.id.clone()).collect();
+    out.extend(wsl(dev).into_iter().filter(|w| !seen.contains(&w.id)));
     out
+}
+
+/// Registered WSL worktrees. Their files are read through `\\wsl.localhost` only while the distro
+/// runs (touching it would boot it); otherwise the status comes from the Windows-side mirror.
+fn wsl(dev: &Path) -> Vec<Worktree> {
+    let entries: Vec<_> = crate::wsl_backend::load(dev).into_iter().filter(|e| !e.archived).collect();
+    if entries.is_empty() {
+        return vec![];
+    }
+    let running = crate::wsl_backend::running_cached();
+    entries
+        .into_iter()
+        .map(|e| {
+            let unc = e.unc();
+            let up = running.iter().any(|r| r.eq_ignore_ascii_case(&e.distro));
+            let mut w = if up {
+                facts(dev, &e.id, WorktreeKind::Repo, &e.slug, &e.name, &unc)
+            } else {
+                let mirror = crate::paths::state_dir(dev).join("status").join(wtd_core::model::id_to_key(&e.id));
+                let status = std::fs::read_to_string(mirror).map(|s| wtd_core::status::Status::parse(&s)).unwrap_or_default();
+                Worktree { id: e.id.clone(), kind: WorktreeKind::Repo, slug: e.slug.clone(), name: e.name.clone(), path: unc.to_string_lossy().into(), status, ..Default::default() }
+            };
+            w.platform = e.platform();
+            w.wsl_path = Some(e.wsl_path);
+            w
+        })
+        .collect()
 }
 
 fn walk(dev: &Path, dir: &Path, slug: &str, rel: &str, kind: WorktreeKind, depth: usize, out: &mut Vec<Worktree>) {
@@ -102,16 +119,23 @@ mod tests {
     }
 
     #[test]
-    fn wsl_worktrees_join_the_scan() {
-        use wtd_core::model::Platform;
+    fn registered_wsl_worktrees_without_touching_a_stopped_distro() {
         let t = std::env::temp_dir().join(format!("wtd-scan-wsl-{}", std::process::id()));
-        let wsl = crate::platforms::WslWorktree { platform: Platform::Wsl("Ubuntu".into()), wsl_path: "/home/dev/wt/app/feat/y".into() };
-        crate::platforms::register_wsl(&t, "app/feat/y", Some(wsl)).unwrap();
-        let w = scan(&t).into_iter().find(|w| w.id == "app/feat/y").expect("registered WSL worktree is listed");
-        assert_eq!((w.slug.as_str(), w.name.as_str(), w.kind), ("app", "feat/y", WorktreeKind::Repo));
-        assert_eq!(w.platform, Platform::Wsl("Ubuntu".into()));
-        assert_eq!(w.wsl_path.as_deref(), Some("/home/dev/wt/app/feat/y"));
-        assert_eq!(w.path, r"\\wsl.localhost\Ubuntu\home\dev\wt\app\feat\y");
+        let _ = std::fs::remove_dir_all(&t);
+        let distro = "NoSuchDistro-wtd-test";
+        crate::wsl_backend::upsert(&t, crate::wsl_backend::Entry {
+            id: "r/feat/w".into(), slug: "r".into(), name: "feat/w".into(), distro: distro.into(),
+            wsl_path: "/home/u/dev/worktree-dev/worktrees/r/feat/w".into(), archived: false,
+        }).unwrap();
+        let mirror = crate::paths::state_dir(&t).join("status");
+        std::fs::create_dir_all(&mirror).unwrap();
+        std::fs::write(mirror.join("r__feat__w"), "working").unwrap();
+        let w = scan(&t).into_iter().find(|w| w.id == "r/feat/w").unwrap();
+        assert_eq!((w.slug.as_str(), w.name.as_str(), w.kind), ("r", "feat/w", WorktreeKind::Repo));
+        assert_eq!(w.platform, wtd_core::model::Platform::Wsl(distro.into()));
+        assert_eq!(w.status, wtd_core::status::Status::Working);
+        assert_eq!(w.wsl_path.as_deref(), Some("/home/u/dev/worktree-dev/worktrees/r/feat/w"));
+        assert!(w.path.starts_with(r"\\wsl.localhost\NoSuchDistro-wtd-test\home"), "{}", w.path);
         std::fs::remove_dir_all(&t).ok();
     }
 }

@@ -114,7 +114,7 @@ fn decide_many(d: &Arc<Daemon>, ids: &[u64], approve: bool) -> Result<Value> {
 /// Expire undelivered messages whose target worktree is gone from disk (archived/deleted): they could
 /// never be delivered, and would otherwise sit pending forever.
 pub(super) fn expire_orphans(d: &Daemon, inner: &mut Inner) {
-    let gone = |to: &str| !inner.worktrees.contains_key(to) && !crate::paths::worktree_path(&d.dev, to).is_dir();
+    let gone = |to: &str| !inner.worktrees.contains_key(to) && !crate::paths::worktree_root(&d.dev, to).is_dir();
     let orphans: Vec<u64> = inner.store.messages.iter().filter(|m| matches!(m.state, MessageState::Pending | MessageState::Queued) && gone(&m.to)).map(|m| m.id).collect();
     if orphans.is_empty() {
         return;
@@ -190,7 +190,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dev);
         let mut inner = Inner::default();
         for id in ids {
-            let p = crate::paths::worktree_path(&dev, id);
+            let p = crate::paths::worktree_root(&dev, id);
             std::fs::create_dir_all(p.join(".git")).unwrap();
             inner.worktrees.insert(id.to_string(), Worktree { id: id.to_string(), path: p.to_string_lossy().into(), ..Default::default() });
         }
@@ -199,7 +199,7 @@ mod tests {
     }
 
     fn send_from(d: &Arc<Daemon>, from: &str, to: &str) -> u64 {
-        let dir = crate::paths::worktree_path(&d.dev, from);
+        let dir = crate::paths::worktree_root(&d.dev, from);
         send(d, &json!({ "from_dir": dir.to_string_lossy(), "to": to, "body": "hi" })).unwrap()["id"].as_u64().unwrap()
     }
 

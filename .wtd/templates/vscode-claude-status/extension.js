@@ -6,6 +6,7 @@ const cp = require('child_process');
 const { GitView } = require('./gitview.js');   // the native Worktree Changes tree + diffs
 const { ChangesPanel } = require('./changespanel.js');   // the docked right-half commits/diff panel
 const { SettingsPanel } = require('./settings.js');   // the WorkTreeDev Settings editor tab
+const wsl = require('./wslpath.js');   // WSL worktrees: git and shells through wsl.exe
 
 const STATUS_FILE = '.claude-status';
 const HOME = os.homedir();
@@ -337,7 +338,9 @@ class DevSummaryProvider {
     this._term = null;            // the pinned plain terminal's Terminal (focus instead of duplicate)
     this._preview = {};           // roster key -> { label: staged-.html-path } (multiple previews/worktree)
   }
-  _wtPath(slug, name) { return path.join(DEV, 'worktrees', slug, name); }
+  _row(slug, name) { return this.daemon && this.daemon.wts.get(slug + '/' + name); }
+  // a WSL worktree's folder is its \\wsl.localhost view (the daemon sends it as the row's path)
+  _wtPath(slug, name) { const r = this._row(slug, name); return r && r.wsl_path ? r.path : path.join(DEV, 'worktrees', slug, name); }
   _key(slug, name) { return slug + '' + name; }
   clearUnread(key) { if (this._unread[key]) { this._unread[key] = false; this._postRoster(); } }
   markUnread(key) { if (!this._unread[key]) { this._unread[key] = true; this._postRoster(); } }
@@ -737,10 +740,13 @@ class DevSummaryProvider {
     if (!sh) {
       sh = vscode.window.terminals.find((x) => termName(x) === this._shellName(slug, name) && x.exitStatus === undefined);
       if (!sh) {
+        // a WSL worktree's shell is a login shell inside its distro, never a Windows one
+        const inWsl = wsl.wslShell(this._row(slug, name));
         const wt = this._wtPath(slug, name);
-        if (!fs.existsSync(wt)) return;
-        sh = vscode.window.createTerminal({ name: this._shellName(slug, name), cwd: wt, location: { viewColumn: col, preserveFocus: true },
-          env: wtdTermEnv(slug), shellPath: bashShell(), shellArgs: ['-l', '-i'], iconPath: new vscode.ThemeIcon('terminal') });
+        if (!inWsl && !fs.existsSync(wt)) return;
+        sh = vscode.window.createTerminal(Object.assign({ name: this._shellName(slug, name), location: { viewColumn: col, preserveFocus: true },
+          iconPath: new vscode.ThemeIcon('terminal') },
+          inWsl || { cwd: wt, env: wtdTermEnv(slug), shellPath: bashShell(), shellArgs: ['-l', '-i'] }));
       }
       this._shells.set(key, sh);
     }

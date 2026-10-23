@@ -22,7 +22,7 @@ use crate::gitx::{self, s};
 use crate::wt::{self, session_key, session_name};
 use crate::{paths, platforms, statusfile, wsl_backend};
 
-fn confirm(question: &str, default_yes: bool) -> bool {
+pub(crate) fn confirm(question: &str, default_yes: bool) -> bool {
     if !std::io::stdin().is_terminal() {
         return default_yes;
     }
@@ -78,7 +78,7 @@ pub fn main(args: &[String]) -> Result<i32> {
                 (Some(slug), Some(name)) => format!("{slug}/{name}"),
                 _ => here(&dev)?.id,
             };
-            let root = paths::worktree_path(&dev, &id);
+            let root = paths::worktree_root(&dev, &id);
             if root.is_dir() {
                 apply_status(&dev, &paths::WtRef { id: id.clone(), root }, Event::SessionEnd, "sessionend")?;
             }
@@ -111,7 +111,7 @@ fn rm(dev: &Path, args: &[String]) -> Result<i32> {
         }
     }
     let [slug, name] = pos.as_slice() else { bail!("usage: agent rm <slug> <name> [--branch] [--force] [-y]") };
-    let wtp = paths::worktree_path(dev, &format!("{slug}/{name}"));
+    let wtp = paths::worktree_root(dev, &format!("{slug}/{name}"));
     println!("About to remove:\n  worktree : {}{}", wtp.display(), if wtp.is_dir() { "" } else { "  (missing)" });
     if del_branch {
         println!("  branch   : {name} (force-deleted)");
@@ -256,7 +256,7 @@ fn claude_session_args(dev: &Path, key: &str, cwd: &Path, config_dir: &Path) -> 
     Ok(if transcript(config_dir, cwd, &id).is_file() { vec!["--resume".into(), id] } else { vec!["--session-id".into(), id] })
 }
 
-fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+pub(crate) fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(to)?;
     for e in std::fs::read_dir(from)?.flatten() {
         let (src, dst) = (e.path(), to.join(e.file_name()));
@@ -289,7 +289,7 @@ fn add_excludes(exclude: &Path) -> Result<()> {
 }
 
 /// Insert the work item into CLAUDE.md's "Context / scope" placeholder.
-fn seed_issue(wtp: &Path, issue: &Path) -> Result<()> {
+pub(crate) fn seed_issue(wtp: &Path, issue: &Path) -> Result<()> {
     let body = std::fs::read_to_string(issue)?;
     let p = wtp.join("CLAUDE.md");
     let text = std::fs::read_to_string(&p)?;
@@ -302,7 +302,7 @@ fn seed_issue(wtp: &Path, issue: &Path) -> Result<()> {
 }
 
 /// Announce read-only reference checkouts in CLAUDE.md (additive across runs).
-fn announce_refs(wtp: &Path, refs: &[(String, PathBuf)]) -> Result<()> {
+pub(crate) fn announce_refs(wtp: &Path, refs: &[(String, PathBuf)]) -> Result<()> {
     let p = wtp.join("CLAUDE.md");
     let text = std::fs::read_to_string(&p).unwrap_or_default();
     let (begin, end) = ("<!-- BEGIN agent-references -->", "<!-- END agent-references -->");
@@ -406,51 +406,24 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
     let (Some(slug), Some(name)) = (pos.first().cloned(), pos.get(1).cloned()) else { bail!("usage: agent <slug> <name> [options] [ref…]") };
     let ref_tokens = pos[2..].to_vec();
     let started_from = delegator_of(dev, std::env::var("WTD_WORKTREE").ok().as_deref(), &std::env::current_dir()?);
+    let id = format!("{slug}/{name}");
+    let platform = platforms::choose(platforms::existing_platform(dev, &id), platform, &id, || platforms::resolve_for(dev, &slug, None))?;
+    if let Platform::Wsl(distro) = &platform {
+        if paths::repo_less(&slug) {
+            bail!("planning agents and delegators run on Windows (drop --platform {platform})");
+        }
+        let o = wsl_backend::launch::Opts {
+            slug, name, from, account, issue, ticket, launch_agent, pmode, detach, prompt, parent, ref_tokens, started_from,
+        };
+        return wsl_backend::launch::launch(dev, distro, o);
+    }
     let is_delegate = slug == paths::DELEGATE;
     let repo_less = paths::repo_less(&slug);
     // a delegator's name is the repo it delegates for
     let delegated = if is_delegate { Some(crate::repos::require(dev, &name)?) } else { None };
     let repo = if repo_less { None } else { Some(crate::repos::require(dev, &slug)?) };
     let bare = repo.as_ref().map(|r| r.path.clone());
-    let id = format!("{slug}/{name}");
     let wtp = paths::worktree_path(dev, &id);
-    let platform = platforms::choose(platforms::existing_platform(dev, &id), platform, &id, || platforms::resolve_for(dev, &slug, None))?;
-    if let Platform::Wsl(distro) = &platform {
-        if repo_less {
-            bail!("planning agents and delegators run on Windows (drop --platform {platform})");
-        }
-        if !ref_tokens.is_empty() || ticket.is_some() {
-            eprintln!("note: reference checkouts and --ticket aren't wired up for WSL worktrees yet; ignoring them");
-        }
-        let r = repo.as_ref().unwrap();
-        let wsl_path = match platforms::wsl_worktrees(dev).remove(&id) {
-            Some(w) => w.wsl_path,
-            None => {
-                let req = wsl_backend::CreateWorktree { distro, slug: &slug, name: &name, url: &r.url, from: from.as_deref(), issue: issue.as_deref().filter(|f| f.is_file()) };
-                let c = wsl_backend::create_worktree(dev, &req)?;
-                platforms::register_wsl(dev, &id, Some(platforms::WslWorktree { platform: platform.clone(), wsl_path: c.wsl_path.clone() }))?;
-                if let (None, Some(p)) = (&parent, &started_from) {
-                    record_parent(&id, Some(p));
-                }
-                c.wsl_path
-            }
-        };
-        if let Some(p) = parent.as_deref() {
-            record_parent(&id, (p != "none").then_some(p));
-        }
-        if !launch_agent {
-            println!("worktree ready: {wsl_path} (in {distro})");
-            return Ok(0);
-        }
-        let account = account.unwrap_or_else(|| "default".into());
-        let (program, acct_name) = match account.strip_prefix("codex:") {
-            Some(n) => ("codex", n),
-            None => ("claude", account.strip_prefix("claude:").unwrap_or(&account)),
-        };
-        let prompt = prompt.or_else(|| (detach && issue.is_some()).then(|| WORKER_PROMPT.to_string()));
-        let req = wsl_backend::Host { distro, wsl_path: &wsl_path, id: &id, program, account: acct_name, permission_mode: &pmode, prompt: prompt.as_deref(), detach };
-        return wsl_backend::host(dev, &req);
-    }
     let session = session_name(&slug, &name);
     let key = session_key(&session);
     let acct = resolve_account(dev, account.as_deref(), &session)?;
@@ -654,7 +627,7 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
 /// The delegator `agent` is being run from. `WTD_WORKTREE` (set on every session `agent` launches,
 /// inherited by its tool calls) wins, since the agent may have `cd`'d elsewhere; without it, the cwd
 /// covers delegator sessions started before the variable existed.
-fn delegator_of(dev: &Path, session_wt: Option<&str>, cwd: &Path) -> Option<String> {
+pub(crate) fn delegator_of(dev: &Path, session_wt: Option<&str>, cwd: &Path) -> Option<String> {
     let id = match session_wt.filter(|s| !s.is_empty()) {
         Some(id) => id.to_string(),
         None => paths::resolve_worktree(dev, cwd)?.id,
@@ -663,7 +636,7 @@ fn delegator_of(dev: &Path, session_wt: Option<&str>, cwd: &Path) -> Option<Stri
 }
 
 /// Best effort: a worktree that can't be nested still opens.
-fn record_parent(id: &str, parent: Option<&str>) {
+pub(crate) fn record_parent(id: &str, parent: Option<&str>) {
     let res = match Client::connect() {
         Ok(Some(mut c)) => c.request(method::WORKTREE_PARENT, json!({ "worktree": id, "parent": parent })).map(|_| ()),
         Ok(None) => Err(anyhow::anyhow!("the daemon isn't running")),
@@ -676,9 +649,9 @@ fn record_parent(id: &str, parent: Option<&str>) {
     }
 }
 
-const WORKER_PROMPT: &str = "Your task is in CLAUDE.md under Context / scope (also .claude/issue.md).     Write your active plan, then start the work.";
+pub(crate) const WORKER_PROMPT: &str = "Your task is in CLAUDE.md under Context / scope (also .claude/issue.md).     Write your active plan, then start the work.";
 
-fn seed_env(root: &Path, dir: &Path, wtp: &Path) -> Result<()> {
+pub(crate) fn seed_env(root: &Path, dir: &Path, wtp: &Path) -> Result<()> {
     for e in std::fs::read_dir(dir)?.flatten() {
         let p = e.path();
         if p.is_dir() {

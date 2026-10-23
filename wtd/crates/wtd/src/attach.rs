@@ -135,7 +135,11 @@ pub fn host_detached(args: &[String]) -> Result<Value> {
     if Client::connect()?.is_none() {
         bail!("the wtd daemon isn't running; start it to launch a background session");
     }
-    let params = spawn_params(args)?;
+    spawn_detached(spawn_params(args)?)
+}
+
+/// Start (or find) a session from ready-made `session.spawn` params without attaching.
+pub fn spawn_detached(params: Value) -> Result<Value> {
     tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
         let (mut rd, _w) = request(method::SESSION_SPAWN, params).await?;
         let mut line = String::new();
@@ -146,6 +150,11 @@ pub fn host_detached(args: &[String]) -> Result<Value> {
             None => Ok(resp["result"].clone()),
         }
     })
+}
+
+/// Open-or-attach a session from ready-made `session.spawn` params (a WSL session builds its own).
+pub fn host_prepared(params: Value) -> Result<i32> {
+    relay(method::SESSION_SPAWN, params)
 }
 
 fn spawn_params(args: &[String]) -> Result<Value> {
