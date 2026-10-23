@@ -119,17 +119,35 @@ session is live, and the file is git-ignored.
 `agent pr`, which `/pr` runs, refuses unless the current commit passed preflight. It runs preflight
 itself first when it hasn't. Turn guardrails on per repo, or as defaults for all repos.
 
-**Customizations:** your own additions for every worktree, or for one repo's, kept in `.wtd/custom/`
-(yours, not in git):
+**Presets (customizations):** what every Claude and Codex session gets, kept in `.wtd/custom/`
+(yours, not in git) and edited in Settings → Customizations or with `wtd custom`. Layers stack, and a
+later item with the same name wins:
 
-- **Skills:** `skills/<name>/SKILL.md`
+| Layer | Folder |
+|---|---|
+| built-in | the shipped skills (`.wtd/templates/.claude/skills`) |
+| every repo | `.wtd/custom/` |
+| a platform | `.wtd/custom/platforms/<windows\|wsl\|linux\|mac>/` |
+| one repo | `.wtd/custom/repos/<slug>/` |
+| one repo on a platform | `.wtd/custom/repos/<slug>/platforms/<os>/` |
+
+Each layer can hold:
+
+- **Skills:** `skills/<name>/SKILL.md`, for Claude (`.claude/skills`) and Codex (`.agents/skills`)
+- **Subagents · commands · rules:** `agents/<name>.md` · `commands/<name>.md` · `rules/<name>.md`
 - **Tools on the session's PATH:** `tools/`
 - **CLAUDE.md additions:** `CLAUDE.md`
+- **Codex instructions:** `AGENTS.md`, written to `AGENTS.override.md` with the repo's own AGENTS.md
+  and a pointer to CLAUDE.md (so tracked files are never edited)
 - **Claude hooks:** `hooks.json`
-- **Env files for new worktrees:** `repos/<slug>/env/`
+- **Disabled items:** `disabled`, one `<kind>/<name>` per line (e.g. `skills/blueprint`)
+- **Env files for new worktrees:** `env/` (repo layers)
 
-They're applied every time a session opens. Team- or stack-specific things belong here, such as a
-`/proto` skill, a `build` or `db` script, or house rules.
+They're applied every time a session opens (`wtd custom apply --all` for open ones). Files a repo
+tracks are never overwritten, and items removed from a layer are removed from worktrees.
+`wtd custom effective <slug>` shows what a repo gets and from which layer. Agents can read that
+(`preset_list`) and **propose** changes (`preset_propose`); nothing is written until you accept it
+in VS Code (with a diff) or with `wtd custom accept <id>`.
 
 **Agent messaging:** agents can see the rest of the fleet through the `wtd` MCP server
 (`fleet_list`, `fleet_get`, `fleet_read_file`). They can also *propose* a message to another
@@ -162,7 +180,7 @@ On Windows: `wtd help`. Each command below also works as a bare name through its
 | `preview <file.html> [label]` | Stage an HTML design mockup for the preview panel. |
 | `wtd preflight [<slug>/<name>]` | Run the repo's PR guardrails in a worktree. A pass is stamped on the commit, which `agent pr` requires. |
 | `wtd ticket link\|unlink\|sync\|show …` | Link a worktree to an issue or PR (URL, `owner/repo#N` or `#N`), and refresh `.claude-ticket.md`. |
-| `wtd custom ls\|dir\|new-skill\|apply …` | Your customizations: list them, create a skill, or re-apply them to open worktrees. |
+| `wtd custom ls\|effective <slug>\|new <kind> <name>\|disable\|enable <kind>/<name>\|apply …` · `wtd custom proposals\|accept\|reject <id>` | Presets: list layers, see what a repo gets, create a skill/agent/command/rule, disable an item, re-apply to open worktrees (layer flags `--repo <slug>`, `--platform <os>`) · review agents' proposals. |
 | `wtd repo set-dir <folder>\|--clear` · `wtd repo set-guardrails <slug>\|* <json>` | The repos folder, and guardrails for one repo or the defaults (`*`). |
 | `tokens` | Token usage and estimated cost per worktree. |
 | `ship [out]` | Package the toolkit (no secrets, worktrees or repos) for another machine. |

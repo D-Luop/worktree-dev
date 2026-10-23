@@ -15,6 +15,7 @@ pub mod issues;
 pub mod mcp;
 pub mod new;
 pub mod paths;
+pub mod proposal;
 pub mod repos;
 pub mod review;
 pub mod run;
@@ -51,7 +52,9 @@ Worktrees & sessions (also on PATH as plain `agent`, `archive`, … via ~/.local
   wtd preview <file.html> [label]    stage an HTML design for the preview panel
   wtd preflight [<slug>/<name>]      run the repo's PR guardrails here (agent pr requires a pass)
   wtd ticket link|unlink|sync|show … the linked GitHub issue/PR, written to .claude-ticket.md
-  wtd custom ls|dir|new-skill|apply  your own skills/tools/CLAUDE.md/hooks (.wtd/custom)
+  wtd custom ls|effective|new|disable|apply|proposals …
+                                     presets: skills/agents/commands/rules/tools/CLAUDE.md/AGENTS.md/hooks
+                                     per platform and repo (.wtd/custom)
   wtd tokens                         token usage across sessions
   wtd ship                           package the toolkit for another machine
 

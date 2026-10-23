@@ -2006,6 +2006,36 @@ function activate(context) {
   syncDividers();
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => { if (e.affectsConfiguration('peacock.color')) syncDividers(); }));
 
+  // agents propose preset changes (MCP preset_propose → .wtd/state/preset-proposals/<id>.json); each
+  // pending one asks the user once, with a diff, before anything is written
+  const asked = new Set();
+  const askProposals = () => wtdJson(['custom', 'proposals']).then((rows) => {
+    for (const r of rows || []) {
+      const p = r.proposal;
+      if (p.state !== 'pending' || asked.has(p.id)) continue;
+      asked.add(p.id);
+      const scope = (p.repo || 'every repo') + (p.platform ? ' on ' + p.platform : '');
+      const what = (p.content == null ? 'delete ' : '') + p.path + ' (' + scope + ')';
+      const prompt = () => vscode.window.showInformationMessage((p.from ? p.from + ' proposes' : 'An agent proposes') + ' a preset change: ' + what
+        + (p.reason ? ' — ' + p.reason : ''), 'Review', 'Accept', 'Reject').then((c) => {
+        if (c === 'Review') {
+          const cur = fs.existsSync(r.target) ? vscode.Uri.file(r.target) : vscode.Uri.parse('untitled:' + p.path);
+          vscode.commands.executeCommand('vscode.diff', cur, vscode.Uri.file(r.proposed), 'Preset proposal: ' + what);
+          return prompt();   // ask again with the diff open
+        }
+        if (c === 'Accept') return wtdJson(['custom', 'accept', p.id]).then(() => vscode.window.setStatusBarMessage('$(check) Preset saved — new sessions get it', 5000),
+          (e) => vscode.window.showErrorMessage('Preset proposal: ' + e.message));
+        if (c === 'Reject') return wtdJson(['custom', 'reject', p.id]).catch(() => {});
+        asked.delete(p.id);   // dismissed: ask again on the next change
+      });
+      prompt();
+    }
+  }).catch(() => {});
+  const ppWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(path.join(WTD, 'state', 'preset-proposals'), '*.json'));
+  ppWatcher.onDidCreate(askProposals); ppWatcher.onDidChange(askProposals);
+  context.subscriptions.push(ppWatcher);
+  askProposals();
+
   // agents publish design mockups via the `preview` command (→ .wtd/state/previews/<slug>/<name>.html);
   // watch that tree so a 🖼 appears on the worktree's roster row, and clears when the file is removed.
   const pvDir = path.join(WTD, 'state', 'previews');
