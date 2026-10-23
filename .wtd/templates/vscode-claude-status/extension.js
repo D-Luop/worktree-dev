@@ -1212,7 +1212,7 @@ class DevSummaryProvider {
     for (const w of this.daemon.wts.values()) {
       if (w.kind === 'dev') continue;   // the assistant has its own pinned row
       const slug = w.slug, name = w.name;
-      rows.push({ id: w.id, group: w.group || null, slug, name, status: w.status === 'none' ? '' : w.status, dirty: !!(w.git && w.git.dirty), ahead: (w.git && w.git.ahead) || 0,
+      rows.push({ id: w.id, group: w.group || null, parent: w.parent || null, slug, name, status: w.status === 'none' ? '' : w.status, dirty: !!(w.git && w.git.dirty), ahead: (w.git && w.git.ahead) || 0,
                   branch: (w.git && w.git.branch) || '', plan: w.plan_title || '', account: w.account || '', live: !!w.live, kind: w.kind || '', program: w.program || '', msgPending: pendingFrom[w.id] || 0 });
       if (w.live) live.add(slug + '-' + name);
     }
@@ -1390,6 +1390,7 @@ class DevSummaryProvider {
   .gbody{min-height:4px;border-radius:3px;}
   .gempty{font-size:12px;color:var(--vscode-descriptionForeground);padding:2px 0 4px 24px;font-style:italic;}
   .row.dragging{opacity:.4;}
+  .row.wt.child{padding-left:20px;}
   .msgp{flex:none;color:var(--vscode-editorWarning-foreground,#d2a000);padding:2px;border-radius:3px;}
   .msgp:hover{background:var(--vscode-toolbar-hoverBackground);}
   .row.wt:not(.live) .st{opacity:.55;} .row.wt:not(.live) .nm{color:var(--vscode-descriptionForeground);}
@@ -1532,7 +1533,7 @@ class DevSummaryProvider {
     return true;
   }
 
-  function wtRow(w){
+  function wtRow(w, child){
     const s=SMAP[w.status]||['','No status','circle-outline','var(--vscode-descriptionForeground)'];
     const g=GLYPH[w.status]||GLYPH.stopped;
     const git=(w.ahead?'<span class="ahead" title="'+w.ahead+' unpushed commit(s)">↑'+w.ahead+'</span>':'')+(w.dirty?'<span class="dirty" title="uncommitted changes">●</span>':'');
@@ -1542,7 +1543,7 @@ class DevSummaryProvider {
     const role = w.kind==='delegate' ? '<span class="badge" title="Delegator for '+esc(w.name)+': keeps its docs and research, and starts worktrees">delegator</span>' : '';
     const tip = w.slug+'/'+w.name+' — '+s[1]+(w.active?' · live session':'')+(w.branch?' · '+w.branch:'')+(w.plan?'\\n'+w.plan:'')+'\\nclick to open';
     const drag = groupsData && canEditGroups;
-    return '<div class="row wt'+(w.active?' live':'')+(w.unread?' unread':'')+(w.current?' current':'')+'" data-id="'+esc(w.id||'')+'" data-slug="'+esc(w.slug)+'" data-name="'+esc(w.name)+'" data-glyph="'+g+'" title="'+esc(tip)+'"'+(drag?' draggable="true"':'')+'>'
+    return '<div class="row wt'+(child?' child':'')+(w.active?' live':'')+(w.unread?' unread':'')+(w.current?' current':'')+'" data-id="'+esc(w.id||'')+'" data-slug="'+esc(w.slug)+'" data-name="'+esc(w.name)+'" data-glyph="'+g+'" title="'+esc(tip)+'"'+(drag?' draggable="true"':'')+'>'
       +'<span class="st" style="color:'+s[3]+'">'+ico(s[2])+'</span>'
       +'<span class="nm">'+esc(w.name)+'</span>'+(groupsData&&w.kind!=='delegate'?'<span class="rb" title="repository">'+esc(w.slug)+'</span>':'')+role+acct
       +(w.msgPending?'<i class="codicon codicon-comment-unresolved msgp" title="'+w.msgPending+' message'+(w.msgPending===1?'':'s')+' from this agent awaiting your approval — click to review"></i>':'')
@@ -1579,14 +1580,18 @@ class DevSummaryProvider {
       // unless a filter is narrowing the list
       const filtering = activeOnly || statuses.size>0 || !!query;
       const known = new Set(groupsData.map(g=>g.id));
-      const byG = {}; shown.forEach(w=>{ const g = w.group && known.has(w.group) ? w.group : ''; (byG[g]=byG[g]||[]).push(w); });
+      // a delegator's workers render right under it, in its section, whatever their own group
+      const shownIds = new Set(shown.map(w=>w.id));
+      const kids = {}; shown.forEach(w=>{ if(w.parent && w.parent!==w.id && shownIds.has(w.parent)) (kids[w.parent]=kids[w.parent]||[]).push(w); });
+      const byG = {}; shown.forEach(w=>{ if(w.parent && kids[w.parent]) return; const g = w.group && known.has(w.group) ? w.group : ''; (byG[g]=byG[g]||[]).push(w); });
+      const rowsHtml=(rows)=>byPrio(rows).map(w=>wtRow(w)+byPrio(kids[w.id]||[]).map(k=>wtRow(k,true)).join('')).join('');
       const sec=(id,name,collapsed,rows,editable)=>{
         if(filtering && !rows.length) return '';
         const hdr='<div class="ghdr" data-g="'+esc(id)+'"'+(editable&&canEditGroups?' draggable="true"':'')+' title="'+esc(name)+(collapsed?' — click to expand':' — click to collapse')+'">'
-          +ico(collapsed?'chevron-right':'chevron-down')+'<span class="gn">'+esc(name)+'</span><span class="n">'+rows.length+'</span>'
+          +ico(collapsed?'chevron-right':'chevron-down')+'<span class="gn">'+esc(name)+'</span><span class="n">'+rows.reduce((n,w)=>n+1+(kids[w.id]||[]).length,0)+'</span>'
           +(editable&&canEditGroups?'<span class="gacts"><i class="codicon codicon-edit gren" title="Rename"></i><i class="codicon codicon-trash gdel danger" title="Delete group"></i></span>':'')+'</div>';
         if(collapsed) return hdr;
-        return hdr+'<div class="gbody" data-g="'+esc(id)+'">'+(rows.length?byPrio(rows).map(wtRow).join(''):'<div class="gempty">'+(canEditGroups?'Drag worktrees here':'Empty')+'</div>')+'</div>';
+        return hdr+'<div class="gbody" data-g="'+esc(id)+'">'+(rows.length?rowsHtml(rows):'<div class="gempty">'+(canEditGroups?'Drag worktrees here':'Empty')+'</div>')+'</div>';
       };
       el.innerHTML = groupsData.map(g=>sec(g.id,g.name,g.collapsed,byG[g.id]||[],true)).join('')
         + sec('', 'Ungrouped', ungroupedCollapsed, byG['']||[], false);
@@ -1596,7 +1601,7 @@ class DevSummaryProvider {
       const groups={}; shown.forEach(w=>{ (groups[w.slug]=groups[w.slug]||[]).push(w); });
       el.innerHTML = Object.keys(groups).sort((a,b)=>a.localeCompare(b)).map(slug=>{
         const rows=byPrio(groups[slug]);
-        return '<div class="sect">'+esc(slug)+'<span class="n">'+rows.length+'</span></div>'+rows.map(wtRow).join('');
+        return '<div class="sect">'+esc(slug)+'<span class="n">'+rows.length+'</span></div>'+rows.map(w=>wtRow(w)).join('');
       }).join('');
     }
     const on=(sel,cmd)=>el.querySelectorAll(sel).forEach(x=>x.onclick=(ev)=>{ ev.stopPropagation(); const p=x.closest('.wt'); vsc.postMessage({cmd,slug:p.dataset.slug,name:p.dataset.name}); });

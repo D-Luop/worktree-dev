@@ -172,7 +172,7 @@ impl App {
     fn rows(&self) -> Vec<Worktree> {
         let mut v: Vec<Worktree> = self.fleet.lock().unwrap().1.values().filter(|w| w.kind != WorktreeKind::Dev).cloned().collect();
         v.sort_by(|a, b| (rank(a.status), !a.live, &a.id).cmp(&(rank(b.status), !b.live, &b.id)));
-        v
+        wtd_core::model::nest_under_parents(v)
     }
 
     fn selected(&self) -> Option<Worktree> {
@@ -472,9 +472,10 @@ impl App {
         let items: Vec<ListItem> = rows.iter().map(|w| {
             let (g, col) = glyph(w);
             let attached = self.session.as_ref().is_some_and(|s| s.id == w.id);
+            let indent = if w.parent.is_some() { "  " } else { "" };
             ListItem::new(vec![
-                Line::from(vec![Span::styled(format!("{g} "), Style::default().fg(col)), Span::styled(w.name.clone(), Style::default().add_modifier(if attached { Modifier::BOLD } else { Modifier::empty() }))]),
-                Line::from(Span::styled(format!("  {}{}{}", w.slug, if w.git.dirty { " ●" } else { "" }, if w.git.ahead > 0 { format!(" ↑{}", w.git.ahead) } else { String::new() }), Style::default().fg(Color::DarkGray))),
+                Line::from(vec![Span::raw(indent), Span::styled(format!("{g} "), Style::default().fg(col)), Span::styled(w.name.clone(), Style::default().add_modifier(if attached { Modifier::BOLD } else { Modifier::empty() }))]),
+                Line::from(Span::styled(format!("{indent}  {}{}{}", w.slug, if w.git.dirty { " ●" } else { "" }, if w.git.ahead > 0 { format!(" ↑{}", w.git.ahead) } else { String::new() }), Style::default().fg(Color::DarkGray))),
             ])
         }).collect();
         let title = Line::from(vec![Span::styled(" WorkTreeDev ", Style::default().add_modifier(Modifier::BOLD)), Span::styled(if up { "" } else { "daemon down " }, Style::default().fg(Color::Red))]);

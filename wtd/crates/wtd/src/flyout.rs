@@ -384,21 +384,25 @@ fn data() -> Data {
         Status::Done => 5,
     };
     let mut groups: std::collections::BTreeMap<String, Vec<Worktree>> = Default::default();
-    for w in tray::FLEET.lock().unwrap().iter().filter(|w| w.kind != WorktreeKind::Dev) {
-        let g = match w.kind {
-            WorktreeKind::Delegate => w.name.clone(),
-            WorktreeKind::Plan => "planning".into(),
-            _ => w.slug.clone(),
-        };
-        groups.entry(g).or_default().push(w.clone());
+    let fleet = tray::FLEET.lock().unwrap();
+    let group_of = |w: &Worktree| match w.kind {
+        WorktreeKind::Delegate => w.name.clone(),
+        WorktreeKind::Plan => "planning".into(),
+        _ => w.slug.clone(),
+    };
+    for w in fleet.iter().filter(|w| w.kind != WorktreeKind::Dev) {
+        // a delegator's workers sit in its group, whatever their own
+        let parent = w.parent.as_ref().and_then(|p| fleet.iter().find(|x| &x.id == p));
+        groups.entry(group_of(parent.unwrap_or(w))).or_default().push(w.clone());
     }
+    drop(fleet);
     for v in groups.values_mut() {
         v.sort_by(|a, b| {
             (a.kind != WorktreeKind::Delegate, rank(a.status), !a.live, &a.name).cmp(&(b.kind != WorktreeKind::Delegate, rank(b.status), !b.live, &b.name))
         });
     }
     let accounts = tray::ACCOUNTS.lock().unwrap().iter().filter(|a| !a.nologin && (a.five_hour.is_some() || a.seven_day.is_some())).take(MAX_ACCOUNTS).cloned().collect();
-    Data { view: tray::view(), rows: groups.into_iter().collect(), accounts }
+    Data { view: tray::view(), rows: groups.into_iter().map(|(g, v)| (g, wtd_core::model::nest_under_parents(v))).collect(), accounts }
 }
 
 fn text_width(f: &Fly, font: Font, s: &str) -> f32 {
@@ -532,7 +536,8 @@ fn layout(f: &mut Fly, t: &Theme) -> (Vec<Op>, Vec<Hit>, f32) {
             if hov(&act) {
                 ops.push(Op::Round { x0: 8.0, y0: ly, x1: WIDTH - 8.0, y1: ly + ROW_H, r: 4.0, c: t.hover, clip: true });
             }
-            let (cx, cy) = (PAD + 4.0, ly + ROW_H / 2.0);
+            let x = PAD + if w.parent.is_some() { 14.0 } else { 0.0 };
+            let (cx, cy) = (x + 4.0, ly + ROW_H / 2.0);
             let c = status_color(w.status);
             if w.live || !matches!(w.status, Status::None | Status::Stopped) {
                 ops.push(Op::Round { x0: cx - 4.0, y0: cy - 4.0, x1: cx + 4.0, y1: cy + 4.0, r: 4.0, c, clip: true });
@@ -543,7 +548,7 @@ fn layout(f: &mut Fly, t: &Theme) -> (Vec<Op>, Vec<Hit>, f32) {
             let ww = text_width(f, Font::Small, word);
             let name = if w.kind == WorktreeKind::Delegate { "delegator".to_string() } else { w.name.clone() };
             let nc = if w.live { t.text } else { t.muted };
-            ops.push(Op::Text { r: rect(PAD + 16.0, ly, right - ww - 12.0, ly + ROW_H), s: name, font: Font::Body, c: nc,
+            ops.push(Op::Text { r: rect(x + 16.0, ly, right - ww - 12.0, ly + ROW_H), s: name, font: Font::Body, c: nc,
                 flags: DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX, clip: true });
             ops.push(Op::Text { r: rect(right - ww - 4.0, ly, right, ly + ROW_H), s: word.into(), font: Font::Small,
                 c: if w.status == Status::Input { c } else { t.muted }, flags: DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX, clip: true });
