@@ -173,8 +173,7 @@ pub fn prepare(dev: &Path, repo: &Repo) -> Result<()> {
     }
     let hooks = repo.admin.join("hooks");
     std::fs::create_dir_all(&hooks)?;
-    let wtd = dev.join(".wtd");
-    let strip = wtd.join("hooks").join("strip-claude-attribution.sh").to_string_lossy().replace('\\', "/");
+    let strip = crate::paths::asset_in(dev, "hooks/strip-claude-attribution.sh").to_string_lossy().replace('\\', "/");
     install_hook(&hooks.join("commit-msg"), &format!("#!/bin/sh\n# worktree-dev: strip AI attribution lines from commit messages\nexec \"{strip}\" \"$@\"\n"))?;
     let exe = crate::paths::wtd_exe().to_string_lossy().replace('\\', "/");
     install_hook(&hooks.join("pre-push"), &format!("#!/bin/sh\n# worktree-dev: PR guardrails (blocked push branches) — configure in Settings → Guardrails\nexec \"{exe}\" guard pre-push \"$@\"\n"))?;

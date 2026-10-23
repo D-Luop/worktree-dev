@@ -9,7 +9,7 @@ plus CLI. It hosts every agent session and pushes fleet state to the VS Code ext
 winget install Git.Git                  # Git + Git Bash (Claude Code needs it; so does the installer)
 winget install Rustlang.Rustup          # Rust toolchain, to build wtd.exe
 winget install Microsoft.VisualStudio.2022.BuildTools   # pick "Desktop development with C++"
-winget install jqlang.jq                # the installer merges JSON config with jq
+winget install jqlang.jq                # the claude-pace statusline reads JSON with jq
 winget install Python.Python.3.12       # builds the VS Code extension's .vsix at install time
 winget install OpenJS.NodeJS.LTS        # checks the extension's webview scripts before packaging
 winget install GitHub.cli               # optional: GitHub issues / Projects in New Session
@@ -35,9 +35,10 @@ git clone https://github.com/D-Luop/worktree-dev /d/dev/worktree-dev   # this fo
 /d/dev/worktree-dev/.wtd/scripts/install.sh
 ```
 
-The installer is idempotent. Re-run it any time; it doesn't stop a running daemon. It:
+`install.sh` builds `wtd.exe` with cargo, then runs `wtd setup`, which does the rest.
+It is idempotent. Re-run it any time; it doesn't stop a running daemon. It:
 
-- builds `wtd.exe` and `wtd-tray.exe` into `.wtd/bin/`
+- copies `wtd.exe` and `wtd-tray.exe` into `.wtd/bin/`
 - writes `~/.local/bin` shims (`agent`, `archive`, `review`, …) that exec `wtd.exe`, and puts
   `~/.local/bin` on PATH in `~/.bashrc`
 - points Claude's status hooks at `wtd.exe hook <event>`, merged into `~/.claude/settings.json`
@@ -47,9 +48,36 @@ The installer is idempotent. Re-run it any time; it doesn't stop a running daemo
   dev root)
 - starts the tray icon and sets it to start at logon
 
+Options, passed through `install.sh` or to `wtd setup` directly: `--repair` re-applies every step
+(reinstalls the extension, re-registers MCP, restores a broken `~/.claude/settings.json` from its
+`.bak`); `--uninstall` reverses the install and asks before deleting the dev root (`--keep-data`
+keeps it, `--yes` deletes it without asking); `--skip <steps>` leaves steps out (`wtd setup --help`).
+
 **The daemon does not start at logon.** Start it yourself (step 3).
 
 Then open the dev root in VS Code (`code /d/dev/worktree-dev`) and run *Developer: Reload Window*.
+
+### Program dir and dev root
+
+An installed build keeps its program files in `%LOCALAPPDATA%\WorkTreeDev\current\` (`bin\wtd.exe`,
+`bin\wtd-tray.exe`, `templates\`, `hooks\`, `scripts\`, `claude-status.vsix`, `version.txt`). The dev
+root then holds only your data (worktrees, repos, refs, `.wtd\state`, `.wtd\custom`,
+`.wtd\config.json`, `.wtd\repos.tsv`) and doesn't have to be a git checkout.
+
+A checkout installed with `install.sh` runs in **dev mode**: binaries in `.wtd\bin`, templates from
+`.wtd\templates`. It stays in dev mode until a program dir is installed; set `WTD_DEV_SOURCE=1` to keep
+using the checkout even then. `wtd version` shows which one is active (`dev_mode`, `program_dir`).
+
+To move a checkout install to the program dir:
+
+```bash
+wtd setup --migrate
+```
+
+It copies the checkout's program files into `versions\<ver>\`, points `current\` at it, writes
+`~/.config/wtd/program-dir`, and repoints hooks, shims, MCP registrations and repo git hooks from
+`.wtd\bin|hooks|scripts` to `current\`. Worktrees, repos and `.wtd\state` aren't touched. Then restart
+the daemon and tray from the new `wtd.exe` and reload VS Code.
 
 ## 3. Use it
 
@@ -108,6 +136,67 @@ The icon sits in the taskbar's `^` overflow; drag it onto the taskbar to keep it
   `code --list-extensions --show-versions | grep claude-status`.
 - **Logs**: the daemon's log is `.wtd/state/daemon.log`. `wtd ls` prints the fleet as the daemon
   sees it.
+
+## Releases
+
+Pushing a tag `vX.Y.Z` runs `.github/workflows/release.yml`, which publishes a GitHub Release with:
+
+| Asset | What it is |
+|---|---|
+| `WorkTreeDev-Setup-X.Y.Z.exe` | Per-user installer (no admin). Asks for the dev root, offers `winget install` for missing Git / VS Code / Claude Code, lays the payload down at `%LOCALAPPDATA%\WorkTreeDev\versions\X.Y.Z`, points `current` at it, then runs `wtd setup`. |
+| `worktree-dev-X.Y.Z-windows-x64.zip` | The payload in `current\` shape (`bin\`, `templates\`, `hooks\`, `scripts\`, `claude-status.vsix`, `version.txt`), used by auto-update. |
+| `latest.json` | Updater manifest: version, payload/Setup URLs and sha256. A tag with a prerelease suffix (`v1.2.0-beta.1`) publishes `latest-beta.json` instead and marks the release as a prerelease. |
+
+To cut a release:
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0      # or v0.2.0-beta.1 for the beta channel
+```
+
+The version comes from the tag only. The workflow stamps it into the crate and the vsix at build time;
+don't bump `Cargo.toml` or `package.json` by hand. Re-running the workflow on an existing release
+replaces its assets.
+
+`.github/workflows/ci.yml` runs `cargo test` and the webview parse check on every PR.
+
+### Building the release locally
+
+`installer/build-local.ps1` runs the same scripts as the workflow, without signing or upload. It
+needs cargo, python, node and Inno Setup 6 (`winget install JRSoftware.InnoSetup`):
+
+```powershell
+powershell -File installer\build-local.ps1 -Version 0.2.0    # artifacts in dist\
+```
+
+To try the installer without touching your real install, install into a throwaway program dir and
+dev root, then uninstall:
+
+```powershell
+dist\WorkTreeDev-Setup-0.2.0.exe /VERYSILENT /DIR=$env:TEMP\wtd-prog /DEVROOT=$env:TEMP\wtd-dev /LOG=$env:TEMP\wtd-setup.log
+& $env:TEMP\wtd-prog\unins000.exe /VERYSILENT
+```
+
+`wtd setup` writes its output to `setup.log` in the program dir. Uninstalling runs
+`wtd setup --uninstall --keep-data`, so the dev root stays.
+
+### Code signing
+
+Without signing, SmartScreen warns on Setup and Smart App Control can block `wtd.exe` on other
+machines. The workflow signs `wtd.exe`, `wtd-tray.exe` and Setup with
+[Azure Trusted Signing](https://learn.microsoft.com/azure/trusted-signing/) when all six repository
+secrets below are set. If any is missing, it ships unsigned and logs a warning.
+
+| Secret | Value |
+|---|---|
+| `AZURE_TENANT_ID` | Tenant of the app registration |
+| `AZURE_CLIENT_ID` | App registration (service principal) with the *Trusted Signing Certificate Profile Signer* role on the account |
+| `AZURE_CLIENT_SECRET` | A client secret for that app registration |
+| `TRUSTED_SIGNING_ENDPOINT` | The account's region endpoint, e.g. `https://wus2.codesigning.azure.net/` |
+| `TRUSTED_SIGNING_ACCOUNT` | Trusted Signing account name |
+| `TRUSTED_SIGNING_PROFILE` | Certificate profile name |
+
+Set them under *Settings → Secrets and variables → Actions*, or with
+`gh secret set AZURE_TENANT_ID` (and so on).
 
 ## Environment variables
 

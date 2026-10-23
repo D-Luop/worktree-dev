@@ -1,4 +1,4 @@
-//! `wtd update …` and `wtd version`.
+//! `wtd update …`.
 
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
@@ -6,27 +6,10 @@ use serde_json::{json, Value};
 use super::{apply, installed_layout, running_version, Channel, LivePolicy, Settings};
 use crate::client::Client;
 use wtd_core::protocol::method;
-use crate::paths;
 
 const USAGE: &str = "usage: wtd update [--check] [--channel stable|beta] [--apply-now [--yes]]
        wtd update status                  what's available / staged, as JSON
        wtd update config [--auto on|off] [--channel stable|beta] [--live never|ask|auto]";
-
-pub fn version_main() -> Result<i32> {
-    let s = Settings::load();
-    println!(
-        "{}",
-        json!({
-            "version": running_version(),
-            "channel": s.channel.as_str(),
-            "program_dir": paths::program_dir().ok(),
-            "dev_root": paths::dev_root().ok(),
-            "commit": option_env!("WTD_COMMIT"),
-            "mode": if installed_layout().is_some() { "installed" } else { "dev" },
-        })
-    );
-    Ok(0)
-}
 
 pub fn main(args: &[String]) -> Result<i32> {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();

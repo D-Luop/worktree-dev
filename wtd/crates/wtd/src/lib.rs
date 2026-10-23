@@ -20,12 +20,14 @@ pub mod mcp;
 pub mod new;
 pub mod nudge;
 pub mod paths;
+pub mod program;
 pub mod proposal;
 pub mod repos;
 pub mod review;
 pub mod run;
 pub mod session_env;
 pub mod settings;
+pub mod setup;
 pub mod statusfile;
 pub mod ticket;
 pub mod tools;
@@ -68,7 +70,10 @@ Worktrees & sessions (also on PATH as plain `agent`, `archive`, … via ~/.local
   wtd update [--check] [--channel stable|beta] [--apply-now [--yes]]
                                      check for / download / apply a new release (installed builds)
   wtd update status|config …         update state as JSON; auto / channel / restart-with-live-sessions
-  wtd version                        version, channel, program dir, dev root (JSON)
+  wtd version                        version, channel, program dir, dev root, commit (JSON)
+  wtd setup [--repair] [--uninstall [--keep-data]] [--dev-root d] [--from payload] [--yes] [--skip steps]
+                                     install / repair / remove WorkTreeDev for this user (idempotent)
+  wtd setup --migrate                move a checkout install's program files to the program dir
 
 Fleet & daemon
   wtd daemon start|stop [--force]|status|run
@@ -152,7 +157,9 @@ fn dispatch(cmd: &str, rest: &[String]) -> Result<i32> {
         "tokens" => tools::tokens_main(rest),
         "ship" => tools::ship_main(rest),
         "update" => updater::cli::main(rest),
-        "version" | "--version" | "-V" => updater::cli::version_main(),
+        "version" | "--version" | "-V" => program::version_main(rest),
+        "setup" if rest.iter().any(|a| a == "--migrate") => program::setup_main(rest),
+        "setup" => setup::main(rest),
         "stop" => {
             let id = rest.first().ok_or_else(|| anyhow::anyhow!("usage: wtd stop <slug/name>"))?;
             let r = client::Client::connect_required()?.request(method::SESSION_STOP, json!({ "id": id }))?;

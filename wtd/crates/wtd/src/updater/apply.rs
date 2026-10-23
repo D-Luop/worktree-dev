@@ -360,7 +360,7 @@ pub fn spawn_helper(l: &Layout, ver: &str, wait: bool) -> Result<i32> {
 
 /// `wtd update __apply <ver>` (the helper).
 pub fn helper_main(ver: &str) -> Result<i32> {
-    let l = Layout::installed()?;
+    let l = Layout::installed();
     match apply(&l, ver, &mut RealHost)? {
         Outcome::Applied { from, to, vsix_changed } => {
             println!("updated {from} → {to}{}", if vsix_changed { " (VS Code extension reinstalled: reload the window)" } else { "" });

@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: wtd
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: cargo test
+        run: cargo test --locked --manifest-path wtd/Cargo.toml
+
+      - name: check-webview
+        run: node .wtd/templates/vscode-claude-status/check-webview.js

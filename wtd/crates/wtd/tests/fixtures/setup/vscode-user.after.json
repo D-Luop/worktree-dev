@@ -1,0 +1,11 @@
+{
+  "editor.fontSize": 13,
+  "terminal.integrated.tabs.title": "${sequence}",
+  "workbench.colorTheme": "Default Dark Modern",
+  "terminal.integrated.tabs.description": "${cwdFolder}",
+  "terminal.integrated.enableVisualBell": true,
+  "accessibility.signals.terminalBell": {
+    "sound": "off"
+  },
+  "terminal.integrated.confirmOnKill": "never"
+}

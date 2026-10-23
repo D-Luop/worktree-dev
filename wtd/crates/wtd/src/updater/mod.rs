@@ -23,7 +23,7 @@ pub const RELEASES: &str = "https://github.com/D-Luop/worktree-dev/releases";
 const RELEASES_API: &str = "https://api.github.com/repos/D-Luop/worktree-dev/releases?per_page=30";
 
 pub fn running_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    crate::program::VERSION
 }
 
 // --- versions ----------------------------------------------------------------------------------------
@@ -250,8 +250,8 @@ impl Layout {
     pub fn new(root: impl Into<PathBuf>) -> Layout {
         Layout { root: root.into() }
     }
-    pub fn installed() -> Result<Layout> {
-        Ok(Layout::new(paths::program_dir()?))
+    pub fn installed() -> Layout {
+        Layout::new(paths::program_dir())
     }
     pub fn current(&self) -> PathBuf {
         self.root.join("current")
@@ -358,7 +358,7 @@ pub fn installed_layout() -> Option<Layout> {
     if std::env::var("WTD_DEV_SOURCE").is_ok_and(|v| v == "1") {
         return None;
     }
-    let l = Layout::installed().ok()?;
+    let l = Layout::installed();
     let exe = std::env::current_exe().ok()?;
     let under = |base: &Path| {
         let b = base.to_string_lossy().trim_end_matches('\\').to_lowercase();

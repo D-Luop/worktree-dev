@@ -1,0 +1,9 @@
+{
+    "workbench.editor.showTabs": "none",
+    "files.watcherExclude": {
+        "**/target/**": true
+    },
+    "search.exclude": {
+        "**/node_modules": false
+    }
+}

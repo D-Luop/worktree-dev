@@ -1,0 +1,17 @@
+{
+    "workbench.editor.showTabs": "none",
+    "files.watcherExclude": {
+        "**/target/**": true,
+        "**/repos/**": true,
+        "**/refs/**": true,
+        "**/worktrees/**": true
+    },
+    "search.exclude": {
+        "**/node_modules": true,
+        "**/repos/**": true,
+        "**/.wtd/state/**": true,
+        "**/worktrees/*/archive/**": true
+    },
+    "git.autoRepositoryDetection": "openEditors",
+    "git.openRepositoryInParentFolders": "never"
+}

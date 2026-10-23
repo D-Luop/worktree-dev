@@ -55,6 +55,7 @@ function resolveDevRoot() {
 function refreshDevRoot() {
   DEV = resolveDevRoot();
   WTD = path.join(DEV, '.wtd');
+  WTD_EXE = null;
 }
 const IS_WIN = process.platform === 'win32';
 const PASTE_IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'];
@@ -157,7 +158,28 @@ function wtdTermEnv(slug) {
 // and pushes changes over a named pipe; the panel just renders them. Without it, the legacy
 // in-extension scanning below is used.
 const net = require('net');
-function wtdExe() { return path.join(WTD, 'bin', 'wtd.exe'); }
+// Installed, wtd.exe lives in the program dir (%LOCALAPPDATA%\WorkTreeDev\current\bin); a contributor
+// checkout without one (or with WTD_DEV_SOURCE=1) runs <dev>/.wtd/bin/wtd.exe — the dev mode of paths.rs.
+const PROGRAM_DIR_PIN = path.join(HOME, '.config', 'wtd', 'program-dir');
+let WTD_EXE = null;   // resolved once per dev root (see refreshDevRoot)
+function programExe(dir) { return dir ? path.join(dir, 'current', 'bin', 'wtd.exe') : null; }
+function resolveWtdExe() {
+  const has = (p) => { try { return !!p && fs.existsSync(p); } catch { return false; } };
+  const devExe = path.join(WTD, 'bin', 'wtd.exe');
+  if (process.env.WTD_DEV_SOURCE === '1' && has(devExe)) return devExe;
+  const pinned = [process.env.WTD_PROGRAM_DIR];
+  try { pinned.push(fs.readFileSync(PROGRAM_DIR_PIN, 'utf8').trim()); } catch {}
+  for (const d of pinned) if (has(programExe(d))) return programExe(d);
+  if (has(devExe)) {
+    try {   // the checkout's exe knows where the program dir is, even a non-default one
+      const v = JSON.parse(cp.execFileSync(devExe, ['version'], { timeout: 3000, windowsHide: true, encoding: 'utf8' }));
+      if (has(programExe(v.program_dir))) return programExe(v.program_dir);
+    } catch {}
+  }
+  const def = programExe(process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'WorkTreeDev'));
+  return has(def) ? def : devExe;
+}
+function wtdExe() { return WTD_EXE || (WTD_EXE = resolveWtdExe()); }
 // run `wtd <args…>` (no shell); cb(err, stdout, stderr)
 function wtdRun(args, opts, cb) {
   try { return cp.execFile(wtdExe(), args, Object.assign({ windowsHide: true }, opts || {}), cb || (() => {})); }
@@ -1304,7 +1326,7 @@ class DevSummaryProvider {
   toggleDaemon(want) {
     const running = !!(this.daemon && this.daemon.running);
     const start = want === undefined ? !running : want;
-    if (!daemonInstalled()) { vscode.window.showWarningMessage('wtd.exe is not installed — run install.sh (needs Rust: winget install Rustlang.Rustup).'); return; }
+    if (!daemonInstalled()) { vscode.window.showWarningMessage('wtd.exe is not installed — run the WorkTreeDev installer, or install.sh from a checkout (needs Rust).'); return; }
     if (start === running) return;
     // stopping ends the agent sessions the daemon hosts: say so, and only then force it
     const hosted = start ? 0 : [...this.daemon.wts.values()].filter((w) => w.hosted).length;

@@ -46,3 +46,6 @@ wtd/target/
 .wtd/custom/
 # The claude-status extension is built from source at install time (build-vsix.py) — never commit it.
 .wtd/templates/vscode-claude-status/*.vsix
+
+# Release artifacts built by installer/build-local.ps1
+dist/

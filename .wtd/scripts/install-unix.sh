@@ -1,0 +1,395 @@
+#!/usr/bin/env bash
+set -euo pipefail
+WTD="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"   # ~/dev/.wtd
+BASE="$(dirname "$WTD")"                                                  # ~/dev
+BASHRC="$HOME/.bashrc"
+SETTINGS="$HOME/.claude/settings.json"
+HOOKS_TMPL="$WTD/templates/claude-hooks.json"
+EXT_DIR="$WTD/templates/vscode-claude-status"
+# Shipped templates carry __DEV__/__USER__/__DISTRO__ placeholders so they're machine-agnostic;
+# render them to this host's real values at install time.
+WTD_USER="$(id -un)"
+WTD_DISTRO="${WSL_DISTRO_NAME:-Ubuntu}"
+wtd_render() { sed -e "s#__DEV__#$BASE#g" -e "s#__USER__#$WTD_USER#g" -e "s#__DISTRO__#$WTD_DISTRO#g" "$@"; }
+# platform detection: tmux backend on Linux/WSL/mac, VSCode-terminal backend on native Windows.
+# shellcheck source=platform-lib.sh
+. "$WTD/scripts/platform-lib.sh"
+OS="$(wtd_os)"; BACKEND="$(wtd_session_backend)"
+echo "==> platform: $OS (session backend: $BACKEND)"
+mkdir -p "$WTD/state/sessions"   # the registry the VSCode backend uses to track live sessions
+
+echo "==> A. install 'agent' + 'add-repo' + 'ref' commands into ~/.local/bin"
+# Real executables on PATH (exported -> inherited by every child shell). A bashrc
+# *function* breaks under exported guards like __BASHRC_LOADED that make child shells
+# (tmux, VSCode terminals, subshells) skip the bashrc body before defining functions.
+mkdir -p "$HOME/.local/bin"
+# On Unix, symlink to the bash tooling. On native Windows every command is a `wtd.exe` subcommand:
+# write a tiny shim that execs it (Git-Bash symlinks need Developer Mode anyway; wtd.exe is built in A2).
+wtd_link() {
+  local tgt="$WTD/scripts/$1" dst="$HOME/.local/bin/$2" sub="${3:-$2}"
+  case "$OS" in
+    windows)
+      printf '#!/usr/bin/env bash\nw=%q\n[ -x "$w" ] && exec "$w" %s "$@"\necho "wtd.exe is not built yet: re-run .wtd/scripts/install.sh (needs Rust)" >&2; exit 1\n' "$WTD/bin/wtd.exe" "$sub" > "$dst"
+      chmod +x "$dst" 2>/dev/null || true
+      echo "    shimmed ~/.local/bin/$2 -> wtd $sub" ;;
+    *) ln -sf "$tgt" "$dst"; echo "    linked ~/.local/bin/$2 -> $tgt" ;;
+  esac
+}
+wtd_link agent.sh     agent
+wtd_link add-repo.sh  add-repo "repo add"
+wtd_link ref.sh       ref
+wtd_link review.sh    review
+wtd_link archive.sh   archive
+wtd_link close.sh     close
+wtd_link wt-review.sh wt-review
+wtd_link ask.sh       ask
+wtd_link account.sh   account
+wtd_link ship.sh      ship
+wtd_link assistant.sh assistant
+wtd_link preview.sh   preview
+wtd_link tokens.sh    tokens
+# the CLI itself (wtd preflight / ticket / custom …), for agents and you
+if [ "$OS" = windows ]; then
+  printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$WTD/bin/wtd.exe" > "$HOME/.local/bin/wtd"; chmod +x "$HOME/.local/bin/wtd" 2>/dev/null || true
+  echo "    shimmed ~/.local/bin/wtd -> wtd.exe"
+fi
+# migrate: strip the obsolete bashrc function block if a previous install added it
+if grep -q '>>> agent worktree launcher >>>' "$BASHRC" 2>/dev/null; then
+  tmp=$(mktemp)
+  sed '/# >>> agent worktree launcher >>>/,/# <<< agent worktree launcher <<</d' "$BASHRC" > "$tmp" && mv "$tmp" "$BASHRC"
+  echo "    removed obsolete ~/.bashrc agent() function"
+fi
+# Put ~/.local/bin on PATH for every bash: ~/.bashrc exports it, and ~/.bash_profile (what a login
+# shell reads — Git Bash and VSCode's bash terminals are login shells) sources ~/.bashrc. Without this
+# a fresh machine fails `agent` / `assistant` with "command not found".
+if ! grep -q 'wtd: ~/.local/bin on PATH' "$BASHRC" 2>/dev/null; then
+  { [ -s "$BASHRC" ] && [ -n "$(tail -c1 "$BASHRC")" ] && printf '\n'
+    printf '# wtd: ~/.local/bin on PATH (worktree-dev commands: agent, assistant, review, …)\n'
+    printf 'case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac\n'; } >> "$BASHRC"
+  echo "    added ~/.local/bin to PATH in ~/.bashrc"
+fi
+if ! grep -qs 'bashrc' "$HOME/.bash_profile"; then
+  printf '# load ~/.bashrc in login shells too\n[ -f ~/.bashrc ] && . ~/.bashrc\n' >> "$HOME/.bash_profile"
+  echo "    ~/.bash_profile now sources ~/.bashrc"
+fi
+# bash tab-completion for agent/archive/review (slugs + branch/worktree names). bash-completion
+# auto-sources ~/.local/share/bash-completion/completions/<cmd> on first <cmd><TAB> in a new shell.
+CDIR="$HOME/.local/share/bash-completion/completions"; mkdir -p "$CDIR"
+for c in agent archive review ask account; do ln -sf "$WTD/completions/wtd-completion.bash" "$CDIR/$c"; done
+echo "    installed bash completion for agent/archive/review/ask (open a new shell to use)"
+
+echo "==> B. dependency check"
+deps="jq git code node"
+# Check tmux on every non-Windows OS, not just "if the backend already resolved to tmux" — that
+# used to be circular: a missing tmux is *why* the backend falls back to vscode, so gating the
+# check on BACKEND=tmux meant a missing tmux was silently never reported as missing at all.
+[ "$OS" != windows ] && deps="$deps tmux"
+# git-delta is optional (diffs fall back to git's colors) but recommended.
+missing=()
+for d in $deps; do
+  if command -v "$d" >/dev/null 2>&1; then
+    echo "    ok: $d"
+  else
+    echo "    MISSING: $d"
+    missing+=("$d")
+  fi
+done
+command -v delta >/dev/null 2>&1 && echo "    ok: delta (optional)" || echo "    optional: delta (git-delta) — nicer diffs"
+if [ "${#missing[@]}" -gt 0 ]; then
+  case "$OS" in
+    windows) echo "    install missing deps on Windows:  winget install <name>   (or: scoop install ${missing[*]})" ;;
+    mac)     echo "    install missing deps:  brew install ${missing[*]}" ;;
+    *)       echo "    install missing deps (may need sudo):  sudo apt-get install -y ${missing[*]}" ;;
+  esac
+fi
+
+WTD_EXE="$WTD/bin/wtd.exe"
+if [ "$OS" = windows ]; then
+  echo "==> A2. build + install wtd.exe (daemon · hook · session wrapper · tray · MCP)"
+  built=""
+  if command -v cargo >/dev/null 2>&1; then
+    if (cd "$BASE/wtd" && cargo build --release -q); then built="$BASE/wtd/target/release/wtd.exe"; fi
+  else
+    echo "    SKIPPED: cargo not found — install Rust (winget install Rustlang.Rustup + VS C++ Build Tools)."
+    echo "    Until then the bash hooks are used."
+  fi
+  if [ -n "$built" ] && [ -f "$built" ]; then
+    mkdir -p "$WTD/bin"
+    was_running=0
+    if [ -x "$WTD_EXE" ]; then
+      "$WTD_EXE" daemon status >/dev/null 2>&1 && was_running=1
+      "$WTD_EXE" tray --quit >/dev/null 2>&1 || true   # section K starts the new one
+      # the daemon is NOT stopped: it hosts the agent sessions, and stopping it would end them
+    fi
+    # wtd.exe (console CLI) + wtd-tray.exe (GUI subsystem: the tray never gets a console window).
+    # Live sessions (`wtd run`) and MCP servers keep running the old exe: Windows lets a running exe
+    # be renamed but not overwritten, so move it aside and clean up old copies that are free again.
+    stamp="$(date +%s)"
+    for exe in wtd.exe wtd-tray.exe; do
+      src="$(dirname "$built")/$exe"; dst="$WTD/bin/$exe"
+      [ -f "$src" ] || continue
+      [ -e "$dst" ] && { mv -f "$dst" "$dst.old-$stamp" 2>/dev/null || true; }
+      cp "$src" "$dst" && echo "    installed $dst"
+    done
+    for o in "$WTD/bin"/*.exe.old-*; do [ -e "$o" ] && rm -f "$o" 2>/dev/null; done; true
+    [ "$was_running" = 1 ] && echo "    the running daemon keeps the previous version (it hosts your sessions) — restart it from the tray when convenient to update" 
+  fi
+fi
+
+echo "==> C. merge Claude status hooks into ~/.claude/settings.json"
+mkdir -p "$(dirname "$SETTINGS")"
+HOOKS_RENDERED="$(mktemp)"; wtd_render "$HOOKS_TMPL" > "$HOOKS_RENDERED"   # __DEV__/__DISTRO__ -> real
+if [ -x "$WTD_EXE" ]; then
+  # call the Rust hook directly (skips the bash script that would just exec it)
+  tmp=$(mktemp)
+  jq --arg exe "$WTD_EXE" '(.. | objects | select(has("command")) | .command) |= sub("^.*/\\.wtd/hooks/wt-status\\.sh"; "\($exe) hook")' \
+     "$HOOKS_RENDERED" > "$tmp" && mv "$tmp" "$HOOKS_RENDERED"
+  echo "    status hooks → $WTD_EXE hook <event>"
+fi
+if [ -f "$SETTINGS" ]; then
+  cp "$SETTINGS" "$SETTINGS.bak"
+  echo "    backed up to $SETTINGS.bak"
+  tmp=$(mktemp)
+  jq -s '.[0] as $cur | .[1] as $tmpl | $cur + {hooks: (($cur.hooks // {}) + $tmpl.hooks)}' \
+     "$SETTINGS" "$HOOKS_RENDERED" > "$tmp"
+  mv "$tmp" "$SETTINGS"
+  echo "    merged (existing non-status hooks preserved)"
+else
+  cp "$HOOKS_RENDERED" "$SETTINGS"
+  echo "    created $SETTINGS from template"
+fi
+rm -f "$HOOKS_RENDERED"
+
+echo "==> D. install VSCode claude-status extension"
+# Pin the dev base for the extension. The .vsix is not __DEV__-rendered, so the
+# extension reads this file to find the real root regardless of which folder VSCode has open. Store a
+# NATIVE path (cygpath -w on Windows) — the extension resolves it with node's fs, not an MSYS path.
+DEV_ROOT_PIN="$HOME/.config/wtd/dev-root"
+mkdir -p "$(dirname "$DEV_ROOT_PIN")"
+if command -v cygpath >/dev/null 2>&1; then cygpath -w "$BASE" > "$DEV_ROOT_PIN"; else printf '%s\n' "$BASE" > "$DEV_ROOT_PIN"; fi
+echo "    pinned dev root -> $(cat "$DEV_ROOT_PIN")  ($DEV_ROOT_PIN)"
+# Built from source every install (build-vsix.py derives the version from git, so a source change
+# always yields a new version). A prebuilt vsix already in the folder (e.g. from a `wtd ship` tarball)
+# is the fallback when python is missing or the build fails.
+PY=""
+for p in python3 python "py -3"; do
+  if $p -c 'import sys; sys.exit(sys.version_info < (3, 6))' >/dev/null 2>&1; then PY="$p"; break; fi
+done
+if [ -n "$PY" ] && $PY "$EXT_DIR/build-vsix.py"; then
+  echo "    built from source"
+else
+  echo "    WARN: could not build the vsix (${PY:-no python 3 found}); using a prebuilt one if present"
+fi
+VSIX="$(ls -1v "$EXT_DIR"/claude-status-*.vsix 2>/dev/null | tail -1)"
+if [ -z "$VSIX" ]; then
+  echo "    SKIPPED: no vsix — install python 3 and re-run"
+elif ! command -v code >/dev/null 2>&1; then
+  echo "    SKIPPED: 'code' not on PATH"
+elif code --install-extension "$VSIX" --force 2>/dev/null; then
+  echo "    installed via --force"
+else
+  echo "    WARN: 'code' CLI could not reach a live VSCode server (stale IPC socket)."
+  echo "          Run from an integrated VSCode terminal, or it may already be installed:"
+  echo "          code --install-extension \"$VSIX\" --force"
+fi
+
+echo "==> D2. VSCode terminal tab title + bell prefs"
+# On the tmux backend, tmux pushes a title (set-titles, step H) using @wt_label; on Windows the
+# extension names each terminal directly. Either way VSCode displays it when the tab title uses
+# ${sequence}. Write it to this OS's VSCode user/machine settings. NOTE: reload the window to apply.
+MSET="$(wtd_vscode_settings_path)"
+mkdir -p "$(dirname "$MSET")"; [ -f "$MSET" ] || echo '{}' > "$MSET"
+tmp=$(mktemp)
+jq '. + {"terminal.integrated.tabs.title":"${sequence}","terminal.integrated.tabs.description":"${cwdFolder}","terminal.integrated.enableVisualBell":true,"accessibility.signals.terminalBell":{"sound":"off"},"terminal.integrated.confirmOnKill":"never"}' "$MSET" > "$tmp" && mv "$tmp" "$MSET"
+echo "    set tab title=\${sequence} + visual terminal bell (sound off) in $MSET"
+# NOTE: editor tabs are hidden via the worktree-dev WORKSPACE settings (.vscode/settings.json),
+# not globally — so other VSCode windows keep their tabs. (workbench.editor.showTabs lives there.)
+
+echo "==> E. install claude-pace statusline"
+# Vendored from github.com/Astro-Han/claude-pace (manual method: no npm / no interactive
+# /plugin). Single bash+jq file. Occupies the single statusLine slot.
+install -m 0755 "$WTD/templates/claude-pace.sh" "$HOME/.claude/statusline.sh"
+echo "    installed $HOME/.claude/statusline.sh"
+tmp=$(mktemp)
+jq '.statusLine = {type: "command", command: "~/.claude/statusline.sh"}' "$SETTINGS" > "$tmp"
+mv "$tmp" "$SETTINGS"
+echo "    set statusLine -> claude-pace"
+
+echo "==> F. strip Claude attribution from commits + PRs"
+# No agent co-author / "Generated with Claude Code" lines, fleet-wide.
+tmp=$(mktemp)
+jq '.attribution = ((.attribution // {}) + {commit: "", pr: ""})' "$SETTINGS" > "$tmp"
+mv "$tmp" "$SETTINGS"
+echo "    set attribution.commit=\"\" and attribution.pr=\"\""
+
+echo "==> G. grant fleet-wide READ access to the reference checkouts (~/dev/refs)"
+# Reference checkouts (managed by `ref add` / `agent <slug> <name> <ref>...`) are GLOBAL context:
+# every worktree can read any of them, granted once here instead of per-worktree. Whole-tree
+# additionalDirectories covers refs added later; Edit is denied to keep them read-only (an Edit rule
+# covers every file-editing tool — Claude Code ignores Write(...) deny rules, so none is added).
+REFROOT="$BASE/refs"
+mkdir -p "$REFROOT"
+tmp=$(mktemp)
+jq --arg root "$REFROOT" '
+  .permissions = (.permissions // {})
+  | .permissions.additionalDirectories = (((.permissions.additionalDirectories // []) + [$root]) | unique)
+  | .permissions.deny =
+      (((.permissions.deny // []) - ["Write(\($root)/**)"] + ["Edit(\($root)/**)"]) | unique)
+' "$SETTINGS" > "$tmp"
+mv "$tmp" "$SETTINGS"
+echo "    granted read on $REFROOT (edits denied) in $SETTINGS"
+
+# Section H configures tmux (mouse, pane-lock, titles, bell, commit-click). Only the tmux backend
+# needs it — native Windows runs sessions in VSCode terminals, so skip the whole block there.
+if [ "$BACKEND" != tmux ]; then
+  echo "==> H. tmux config — SKIPPED (backend: $BACKEND; sessions run in VSCode integrated terminals)"
+else
+echo "==> H. tmux mouse scrollback (so the wheel scrolls history, not the app)"
+TMUXCONF="$HOME/.tmux.conf"
+touch "$TMUXCONF"
+if grep -qE '^[[:space:]]*set(-option)?[[:space:]]+-g[[:space:]]+mouse[[:space:]]+on' "$TMUXCONF"; then
+  echo "    already set in $TMUXCONF"
+else
+  { [ -s "$TMUXCONF" ] && [ -n "$(tail -c1 "$TMUXCONF")" ] && printf '\n'
+    printf '# scroll wheel scrolls pane scrollback instead of sending arrows to the app\n'
+    printf 'set -g mouse on\n'
+    printf 'set -g history-limit 50000\n'; } >> "$TMUXCONF"
+  echo "    added mouse on + history-limit to $TMUXCONF"
+fi
+tmux set -g mouse on 2>/dev/null && echo "    applied to running tmux server" || true
+# Mouse border-drag RESIZE stays enabled (default) — it's a deliberate, useful gesture. We only
+# disable the keyboard shortcuts + menus that REARRANGE which pane holds what (accidental swap (`{`
+# `}`), rotate (C-o / M-o), break-pane (`!`), relayout (Space / E / M-1..M-5), and the `>` context
+# menu). Selection/scroll/resize are untouched.
+if ! grep -q 'wtd: lock pane arrangement' "$TMUXCONF"; then
+  { printf '# wtd: lock pane arrangement — disable accidental pane swap/rotate/break/relayout keys\n'
+    # quote every key: '{' '}' '>' are command-block/parse delimiters in tmux 3.x, so unquoted
+    # `unbind {` aborts the whole config load (mouse + click bindings then never apply). Quoting is
+    # harmless for the others and makes the key literal.
+    for k in '{' '}' 'C-o' 'M-o' '!' 'Space' 'E' '>' 'M-1' 'M-2' 'M-3' 'M-4' 'M-5'; do printf "unbind '%s'\n" "$k"; done
+  } >> "$TMUXCONF"
+  echo "    disabled pane-rearrange keybindings in $TMUXCONF"
+fi
+for k in '{' '}' 'C-o' 'M-o' '!' 'Space' 'E' '>' 'M-1' 'M-2' 'M-3' 'M-4' 'M-5'; do tmux unbind "$k" 2>/dev/null || true; done
+# and disable the right-click context menus — they include Swap entries that let panes get
+# rearranged by accident; right-click then falls through to the terminal (paste).
+RCBINDS="MouseDown3Pane MouseDown3Status MouseDown3StatusLeft MouseDown3StatusRight M-MouseDown3Pane M-MouseDown3Status M-MouseDown3StatusLeft"
+if ! grep -q 'wtd: disable right-click menus' "$TMUXCONF"; then
+  { printf '# wtd: disable right-click menus (they let panes get swapped by accident)\n'
+    for b in $RCBINDS; do printf 'unbind -n %s\n' "$b"; done
+  } >> "$TMUXCONF"
+  echo "    disabled right-click menus in $TMUXCONF"
+fi
+for b in $RCBINDS; do tmux unbind -n "$b" 2>/dev/null || true; done
+# terminal tab title: let tmux push a title to the outer terminal (VSCode), using the worktree
+# label agent.sh stamps on each session (@wt_label), falling back to the session name. VSCode only
+# shows it when terminal.integrated.tabs.title includes ${sequence} (set in .vscode/settings.json).
+TITLESTR='#{?#{@wt_label},#{@wt_label},#S}'   # worktree label only — NO status glyph/dot in the tab
+if ! grep -q 'set-titles-string' "$TMUXCONF"; then
+  { [ -s "$TMUXCONF" ] && [ -n "$(tail -c1 "$TMUXCONF")" ] && printf '\n'
+    printf '# show the worktree label (set by agent.sh) as the outer terminal/VSCode tab title\n'
+    printf 'set -g set-titles on\n'
+    printf "set -g set-titles-string '%s'\n" "$TITLESTR"; } >> "$TMUXCONF"
+  echo "    added set-titles to $TMUXCONF"
+else
+  # migrate an older set-titles-string (which prefixed the @wt_status dot) to the dot-free one.
+  # NB: the title contains '#', so use '|' as the sed delimiter, not '#'.
+  sed -i "s|^set -g set-titles-string .*|set -g set-titles-string '$TITLESTR'|" "$TMUXCONF"
+fi
+tmux set -g set-titles on 2>/dev/null || true
+tmux set -g set-titles-string "$TITLESTR" 2>/dev/null && echo "    applied set-titles to running tmux server" || true
+# pass pane bells through to the VSCode terminal (visual "unread" tab badge on turn-end). visual-bell
+# off = bell is forwarded to the client terminal (not swallowed by tmux); bell-action any flags any
+# window; monitor-bell on so panes are watched. The BEL itself is emitted by wt-status.sh on Stop.
+if ! grep -q 'bell-action' "$TMUXCONF"; then
+  { printf 'set -g visual-bell off\n'; printf 'set -g bell-action any\n'; printf 'setw -g monitor-bell on\n'; } >> "$TMUXCONF"
+  echo "    added bell pass-through to $TMUXCONF"
+fi
+tmux set -g visual-bell off 2>/dev/null || true
+tmux set -g bell-action any 2>/dev/null || true
+tmux setw -g monitor-bell on 2>/dev/null || true
+# double-click-a-SHA-to-diff-popup binding: render the placeholder snippet to real paths, then
+# source THAT from ~/.tmux.conf (idempotent). Keeping the rendered copy out of the shipped tree.
+CLICKSRC="$WTD/templates/tmux-commit-click.conf"      # placeholder template (__DEV__)
+CLICKCONF="$HOME/.config/wtd/tmux-commit-click.conf"  # rendered, real paths
+mkdir -p "$(dirname "$CLICKCONF")"
+wtd_render "$CLICKSRC" > "$CLICKCONF"
+sed -i "\#source-file $CLICKSRC#d" "$TMUXCONF" 2>/dev/null || true   # migrate any old direct-template source
+if ! grep -qF "source-file $CLICKCONF" "$TMUXCONF" 2>/dev/null; then
+  { [ -s "$TMUXCONF" ] && [ -n "$(tail -c1 "$TMUXCONF")" ] && printf '\n'
+    printf 'source-file %s\n' "$CLICKCONF"; } >> "$TMUXCONF"
+  echo "    added 'source-file $CLICKCONF' to $TMUXCONF"
+fi
+tmux source-file "$CLICKCONF" 2>/dev/null && echo "    loaded commit-click binding into running server" || true
+fi   # end Section H (tmux backend only)
+
+echo "==> I. commit-msg attribution stripper + git perf config on all registered bares"
+# Belt-and-suspenders with attribution="": deterministically strip any Claude/AI lines from
+# commit messages, repo-side, so commits are never tied to Claude regardless of the model.
+if [ -f "$WTD/repos.tsv" ]; then
+  while IFS=$'\t' read -r slug url; do
+    case "$slug" in ''|'#'*) continue;; esac
+    bare="$BASE/repos/$slug/.bare"
+    [ -d "$bare" ] || continue
+    if [ ! -e "$bare/hooks/commit-msg" ] || [ -L "$bare/hooks/commit-msg" ]; then
+      mkdir -p "$bare/hooks"
+      ln -sf "$WTD/hooks/strip-claude-attribution.sh" "$bare/hooks/commit-msg"
+      echo "    [$slug] commit-msg hook linked"
+    else
+      echo "    [$slug] existing commit-msg hook left intact"
+    fi
+    wtd_git_perf_config "$bare" && echo "    [$slug] git perf config (untrackedCache, manyFiles)"
+  done < "$WTD/repos.tsv"
+fi
+
+echo "==> J. control-window VSCode settings ($BASE/.vscode/settings.json)"
+# The dev base is opened as ONE window containing every worktree. Keep VSCode's own background work
+# off the worktrees: the built-in Git extension otherwise discovers each worktree as a repository and
+# runs its own `git status` on every file change; the recursive file watcher and search otherwise walk
+# every worktree's build output. The roster/extension doesn't rely on any of these (status arrives via
+# .wtd/state/status). Open a worktree in its own window to review it with full git/LSP support.
+WSET="$BASE/.vscode/settings.json"
+mkdir -p "$(dirname "$WSET")"; [ -f "$WSET" ] || echo '{}' > "$WSET"
+if jq empty "$WSET" 2>/dev/null; then
+  tmp=$(mktemp)
+  jq --indent 4 '
+    . + {"git.autoRepositoryDetection": "openEditors", "git.openRepositoryInParentFolders": "never"}
+    | .["files.watcherExclude"] = ((.["files.watcherExclude"] // {}) + {
+        "**/repos/**": true, "**/refs/**": true, "**/worktrees/**": true})
+    | .["search.exclude"] = ((.["search.exclude"] // {}) + {
+        "**/repos/**": true, "**/.wtd/state/**": true,
+        "**/worktrees/*/archive/**": true, "**/node_modules": true})
+  ' "$WSET" > "$tmp" && mv "$tmp" "$WSET"
+  echo "    git autodetect → open editors only; worktrees/repos/refs out of the file watcher; search trimmed"
+else
+  echo "    SKIPPED: $WSET is not plain JSON (comments?) — add the settings by hand (see install.sh section J)"
+fi
+
+if [ -x "$WTD_EXE" ]; then
+  echo "==> K. wtd MCP server (fleet tools for agents) + tray icon"
+  WEXE_WIN="$(cygpath -w "$WTD_EXE" 2>/dev/null || printf '%s' "$WTD_EXE")"
+  # user-scope MCP server for the default login and every extra account (each has its own config dir)
+  reg_mcp() {
+    local label="$1"; shift
+    "$@" claude mcp remove --scope user wtd >/dev/null 2>&1 || true
+    if "$@" claude mcp add --scope user wtd -- "$WEXE_WIN" mcp >/dev/null 2>&1; then
+      echo "    [$label] MCP server 'wtd' registered (fleet_list / fleet_get / fleet_read_file)"
+    else
+      echo "    [$label] could not register the MCP server (is 'claude' on PATH?)"
+    fi
+  }
+  if command -v claude >/dev/null 2>&1; then
+    reg_mcp default env -u CLAUDE_CONFIG_DIR
+    for d in "$HOME/.claude-accounts"/*/; do
+      [ -d "$d" ] || continue
+      reg_mcp "$(basename "$d")" env CLAUDE_CONFIG_DIR="${d%/}"
+    done
+  else
+    echo "    SKIPPED MCP registration: 'claude' not on PATH"
+  fi
+  "$WTD_EXE" tray --logon refresh && echo "    tray starts at logon unless you turned that off (toggle in its ⚙ menu)"
+  "$WTD_EXE" tray --spawn && echo "    tray icon started — it pins itself to the taskbar on first run (if it's in the ^ overflow, drag it out)"
+  echo "    the daemon does NOT auto-start: use the tray icon or the fleet panel's Start button"
+fi
+
+echo "==> done"
