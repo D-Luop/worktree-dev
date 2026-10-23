@@ -503,6 +503,11 @@ pub fn new_item(layer: &Path, kind: &str, name: &str) -> Result<PathBuf> {
     Ok(file)
 }
 
+/// Worktrees `apply --all` reaches: every one `agent` applies presets to on open, delegators included.
+fn bulk_target(id: &str, slug: &str) -> bool {
+    id != wtd_core::model::DEV_ID && slug != "plan"
+}
+
 const USAGE: &str = "usage: wtd custom ls | effective <slug> [--platform os] | dir | new <skill|agent|command|rule> <name> \
 | disable|enable <kind>/<name> | apply [<slug>/<name> | --all] | proposals | accept|reject <id>   (layer flags: --repo <slug> --platform <os>)";
 
@@ -559,7 +564,7 @@ pub fn main(args: &[String]) -> Result<i32> {
             for r in crate::repos::all(&dev) {
                 let _ = crate::repos::prepare(&dev, &r); // keep what we write git-ignored
             }
-            for w in crate::daemon::scan::scan(&dev).into_iter().filter(|w| w.id != wtd_core::model::DEV_ID && !crate::paths::repo_less(&w.slug)) {
+            for w in crate::daemon::scan::scan(&dev).into_iter().filter(|w| bulk_target(&w.id, &w.slug)) {
                 match apply(&dev, &w.slug, Path::new(&w.path), false) {
                     Ok(_) => n += 1,
                     Err(e) => eprintln!("{}: {e:#}", w.id),
@@ -582,6 +587,14 @@ mod tests {
         std::fs::create_dir_all(t.join(".wtd").join("custom").join("repos").join("r")).unwrap();
         std::fs::create_dir_all(t.join("wt")).unwrap();
         t
+    }
+
+    #[test]
+    fn apply_all_includes_delegators() {
+        assert!(bulk_target("delegate/worktree-dev", crate::paths::DELEGATE));
+        assert!(bulk_target("luop/feat/x", "luop"));
+        assert!(!bulk_target(wtd_core::model::DEV_ID, ""));
+        assert!(!bulk_target("plan/x", "plan"));
     }
 
     #[test]
