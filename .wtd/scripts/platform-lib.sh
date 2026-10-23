@@ -65,9 +65,16 @@ wtd_vscode_settings_path() {
   esac
 }
 
+# A parent Claude session's identity vars, stripped before launching an agent so one started from
+# inside a session (a delegator) runs as a fresh top-level session — an inherited
+# CLAUDE_CODE_CHILD_SESSION turns transcript saving off. Mirrors wtd/crates/wtd/src/session_env.rs.
+WTD_SESSION_ENV_VARS="CLAUDECODE CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ATTENDED CLAUDE_PID CLAUDE_EFFORT AI_AGENT TRACEPARENT CLAUDE_CODE_EXECPATH CLAUDE_CODE_INVOKED_SKILLS CLAUDE_CODE_BRIDGE_SESSION_ID CLAUDE_CODE_CHROME_MCP_ORG_DENIED CLAUDE_CODE_EVAL_INTERVIEW_SESSION CLAUDE_CODE_HOST_WORKTREE CLAUDE_CODE_HOST_WORKTREE_FENCE CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SSE_PORT CLAUDE_CODE_ENTRYPOINT"
+# shellcheck disable=SC2086
+wtd_scrub_session_env() { unset $WTD_SESSION_ENV_VARS; }
+
 # wtd_exec_claude <claude args…> / wtd_exec_agent <program> <args…>  → exec the agent CLI in this terminal.
 wtd_exec_claude() { wtd_exec_agent claude "$@"; }
-wtd_exec_agent() { exec "$@"; }
+wtd_exec_agent() { wtd_scrub_session_env; exec "$@"; }
 
 # wtd_git_perf_config <bare>  → cheaper `git status` in every worktree of this bare (config is shared):
 # untrackedCache + manyFiles (index v4). Deliberately NOT core.fsmonitor: on a ~3k-file repo it measured

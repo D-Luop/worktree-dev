@@ -177,7 +177,7 @@ On Windows: `wtd help`. Each command below also works as a bare name through its
 | `ref add\|sync\|rm\|ls …` | Read-only reference checkouts under `refs/`. |
 | `account ls\|add\|login\|rm\|use\|usage\|switch …` | Claude and Codex logins, role defaults, live usage, moving a session to another account. |
 | `repo ls\|add\|rm\|fetch …` · `add-repo <slug> <url>` | Register and bare-clone repos (`repo add --new <slug>` creates a local-only repo). |
-| `preview <file.html> [label]` | Stage an HTML design mockup for the preview panel. |
+| `preview <file.html> [label]` | Stage an HTML design mockup as a tab in the Changes panel. |
 | `wtd preflight [<slug>/<name>]` | Run the repo's PR guardrails in a worktree. A pass is stamped on the commit, which `agent pr` requires. |
 | `wtd ticket link\|unlink\|sync\|show …` | Link a worktree to an issue or PR (URL, `owner/repo#N` or `#N`), and refresh `.claude-ticket.md`. |
 | `wtd custom ls\|effective <slug>\|new <kind> <name>\|disable\|enable <kind>/<name>\|apply …` · `wtd custom proposals\|accept\|reject <id>` | Presets: list layers, see what a repo gets, create a skill/agent/command/rule, disable an item, re-apply to open worktrees (layer flags `--repo <slug>`, `--platform <os>`) · review agents' proposals. |

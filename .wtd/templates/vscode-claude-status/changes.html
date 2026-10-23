@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src __CSP__ 'unsafe-inline'; font-src __CSP__; script-src 'nonce-__NONCE__';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src __CSP__ 'unsafe-inline' https:; font-src __CSP__ data: https:; img-src __CSP__ data: https:; script-src 'nonce-__NONCE__';">
 <link rel="stylesheet" href="__CODICON_HREF__">
 <style>
   :root {
@@ -26,12 +26,16 @@
     --ren-fg: var(--vscode-gitDecoration-renamedResourceForeground, #73c991);
     --unt-fg: var(--vscode-gitDecoration-untrackedResourceForeground, #73c991);
     --gutter: var(--vscode-editorLineNumber-foreground, #858585);
-    --hunk-bg: var(--vscode-editorGutter-background, transparent);
     --hdr-bg: var(--vscode-sideBarSectionHeader-background, var(--vscode-editorGroupHeader-tabsBackground, rgba(128,128,128,.08)));
+    --tabs-bg: var(--vscode-editorGroupHeader-tabsBackground, var(--hdr-bg));
     --badge-bg: var(--vscode-badge-background);
     --badge-fg: var(--vscode-badge-foreground);
     --focus: var(--vscode-focusBorder);
     --link: var(--vscode-textLink-foreground);
+    --menu-bg: var(--vscode-menu-background, var(--vscode-editorWidget-background, var(--bg)));
+    --menu-fg: var(--vscode-menu-foreground, var(--fg));
+    --menu-sel: var(--vscode-menu-selectionBackground, var(--sel));
+    --menu-selfg: var(--vscode-menu-selectionForeground, var(--selfg));
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; padding: 0; }
@@ -39,74 +43,106 @@
          display: flex; flex-direction: column; overflow: hidden; }
   button.icon { background: none; border: 0; color: var(--fg); cursor: pointer; padding: 3px; border-radius: 4px; line-height: 0; opacity: .85; }
   button.icon:hover { background: var(--vscode-toolbar-hoverBackground, var(--hover)); opacity: 1; }
-  button.icon.on { background: var(--vscode-inputOption-activeBackground, var(--inactsel)); color: var(--vscode-inputOption-activeForeground, var(--fg)); opacity: 1; }
-  button.icon:focus-visible, .row:focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; }
+  button.icon:disabled { opacity: .35; cursor: default; background: none; }
+  button.icon.on, button.tgl.on { background: var(--vscode-inputOption-activeBackground, var(--inactsel)); color: var(--vscode-inputOption-activeForeground, var(--fg)); opacity: 1; }
+  button.tgl { background: none; border: 1px solid var(--border); color: var(--fg); cursor: pointer; padding: 1px 8px; border-radius: 3px; font: inherit; font-size: 12px; }
+  button.tgl:hover { background: var(--vscode-toolbar-hoverBackground, var(--hover)); }
+  button.icon:focus-visible, button.tgl:focus-visible, .row:focus-visible, .tab:focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; }
+  .plus { color: var(--add-fg); } .minus { color: var(--del-fg); }
+  .dim { color: var(--dim); }
 
   /* ---------- header ---------- */
-  #head { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 12px; border-bottom: 1px solid var(--border); min-height: 35px; flex-wrap: wrap; }
-  #head .wt { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+  #head { display: flex; align-items: center; gap: 8px; padding: 5px 8px 5px 12px; border-bottom: 1px solid var(--border); min-height: 35px; flex: none; }
+  #head .wt { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; min-width: 0; flex: 0 1 auto; }
   #head .wt:hover { text-decoration: underline; }
-  #head .br { display: inline-flex; align-items: center; gap: 4px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-  .sync { display: inline-flex; gap: 6px; color: var(--dim); font-size: 12px; white-space: nowrap; }
+  #head .br { display: inline-flex; align-items: center; gap: 4px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 2 auto; }
+  .sync { display: inline-flex; gap: 6px; color: var(--dim); font-size: 12px; white-space: nowrap; border: 1px solid var(--border); border-radius: 10px; padding: 0 8px; line-height: 18px; flex: none; }
+  .sync:empty { display: none; }
   .sync .up { color: var(--link); }
   #head .grow { flex: 1; }
   #filter { background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, transparent);
-            border-radius: 2px; padding: 2px 6px; width: 140px; font: inherit; font-size: 12px; }
+            border-radius: 2px; padding: 2px 6px; width: 140px; min-width: 60px; flex: 0 1 140px; font: inherit; font-size: 12px; }
   #filter:focus { outline: 1px solid var(--focus); outline-offset: -1px; }
+  #menu { position: fixed; z-index: 20; min-width: 220px; background: var(--menu-bg); color: var(--menu-fg); border: 1px solid var(--vscode-menu-border, var(--border));
+          border-radius: 5px; padding: 4px 0; box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0,0,0,.36)); }
+  #menu[hidden] { display: none; }
+  #menu .mi { display: flex; align-items: center; gap: 8px; padding: 0 12px; height: 26px; cursor: pointer; white-space: nowrap; }
+  #menu .mi:hover, #menu .mi:focus { background: var(--menu-sel); color: var(--menu-selfg); outline: none; }
+  #menu .mi .k { margin-left: auto; padding-left: 16px; opacity: .7; font-size: 12px; }
+  #menu .sep { height: 1px; margin: 4px 0; background: var(--vscode-menu-separatorBackground, var(--border)); }
 
-  /* ---------- commit list ---------- */
-  #list { overflow-y: auto; flex: 0 0 auto; height: 34%; min-height: 60px; }
-  .row { display: flex; align-items: center; gap: 6px; padding: 0 10px 0 12px; height: 24px; cursor: pointer; white-space: nowrap; user-select: none; }
+  /* ---------- top band: commits | message + file tree ---------- */
+  #top { flex: none; display: flex; min-height: 80px; height: 38vh; }
+  #list { width: 44%; min-width: 0; overflow: auto; border-right: 1px solid var(--border); }
+  #side { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+  #tree { flex: 1; overflow: auto; min-height: 0; }
+  .sec { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--dim); padding: 6px 12px 2px; user-select: none; }
+  .row { display: flex; align-items: center; gap: 6px; padding: 0 10px 0 12px; height: 22px; cursor: pointer; white-space: nowrap; user-select: none; }
   .row:hover { background: var(--hover); }
   .row.sel { background: var(--inactsel); }
-  body.listfocus .row.sel { background: var(--sel); color: var(--selfg); }
-  body.listfocus .row.sel .meta, body.listfocus .row.sel .sha { color: inherit; opacity: .85; }
+  .focus .row.sel { background: var(--sel); color: var(--selfg); }
+  .focus .row.sel .meta, .focus .row.sel .dim, .focus .row.sel .plus, .focus .row.sel .minus, .focus .row.sel .st { color: inherit; opacity: .9; }
   .row .codicon { flex: none; }
   .row .subj { overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
   .row .meta { color: var(--dim); font-size: 12px; flex: none; }
-  .row .sha { font-family: var(--mono); font-size: 12px; color: var(--dim); flex: none; }
+  .row .meta .sha { font-family: var(--mono); }
   .row .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--link); flex: none; }
   .row .dot.pushed { background: transparent; border: 1px solid var(--dim); opacity: .5; }
   .row.working .codicon { color: var(--mod-fg); }
-  .row.note { color: var(--dim); cursor: default; font-size: 12px; height: 22px; }
+  .row.note { color: var(--dim); cursor: default; font-size: 12px; }
   .row.note:hover { background: none; }
   .row .count { background: var(--badge-bg); color: var(--badge-fg); border-radius: 10px; padding: 0 6px; font-size: 11px; line-height: 16px; }
 
-  #sash { flex: none; height: 4px; cursor: row-resize; border-top: 1px solid var(--border); background: transparent; }
+  #meta { flex: 0 1 auto; max-height: 65%; overflow: auto; border-bottom: 1px solid var(--border); padding: 5px 12px; font-size: 12px; }
+  #meta:empty { display: none; }
+  #meta .line { display: flex; align-items: baseline; gap: 6px; min-width: 0; white-space: nowrap; }
+  #meta .s { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; }
+  #meta .info { color: var(--dim); flex: none; display: inline-flex; gap: 6px; }
+  #meta .tog { background: none; border: 0; padding: 0; color: var(--link); cursor: pointer; font: inherit; flex: none; }
+  #meta .tog:hover { text-decoration: underline; }
+  #meta .more { margin-top: 4px; }
+  #meta .more .s2 { font-weight: 600; white-space: pre-wrap; word-break: break-word; }
+  #meta .more .b { white-space: pre-wrap; word-break: break-word; opacity: .85; margin: 4px 0; }
+  #meta .more .a { color: var(--dim); display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  #meta .copy { font-family: var(--mono); cursor: pointer; }
+  #meta .copy:hover { color: var(--link); }
+  #tree .row { padding-left: calc(12px + var(--i, 0) * 14px); }
+  #tree .row.dir { color: var(--dim); }
+  #tree .row.dir .codicon { transition: transform .1s; }
+  #tree .row.dir.folded .chev { transform: rotate(-90deg); }
+  #tree .row .nm { overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+  #tree .row .n { font-family: var(--mono); font-size: 11px; flex: none; }
+  .st { font-family: var(--mono); font-size: 11px; font-weight: 700; width: 14px; text-align: center; flex: none; }
+  .st-M { color: var(--mod-fg); } .st-A { color: var(--add-fg); } .st-U { color: var(--unt-fg); } .st-D { color: var(--del-fg); } .st-R { color: var(--ren-fg); }
+
+  #sash { flex: none; height: 6px; cursor: row-resize; background: var(--tabs-bg); border-top: 1px solid var(--border); display: flex; align-items: center; justify-content: center; }
+  #sash::after { content: ''; width: 36px; height: 2px; border-radius: 1px; background: var(--dim); opacity: .4; }
   #sash:hover, #sash.drag { background: var(--focus); }
 
-  /* ---------- diff ---------- */
-  #diff { flex: 1; overflow: auto; position: relative; }
-  .cmeta { padding: 10px 12px 8px; border-bottom: 1px solid var(--border); }
-  .cmeta .s { font-weight: 600; font-size: 14px; margin-bottom: 4px; white-space: pre-wrap; word-break: break-word; }
-  .cmeta .b { white-space: pre-wrap; color: var(--fg); opacity: .85; margin: 6px 0; font-size: 12px; word-break: break-word; }
-  .cmeta .a { color: var(--dim); font-size: 12px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-  .cmeta .a .sha { font-family: var(--mono); cursor: pointer; }
-  .cmeta .a .sha:hover { color: var(--link); }
-  .summary { display: flex; align-items: center; gap: 10px; padding: 6px 12px; color: var(--dim); font-size: 12px; border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 3; background: var(--bg); }
-  .summary .grow { flex: 1; }
-  .plus { color: var(--add-fg); } .minus { color: var(--del-fg); }
-
-  .file { border-bottom: 1px solid var(--border); }
-  .fh { position: sticky; top: 29px; z-index: 2; display: flex; align-items: center; gap: 6px; padding: 0 8px 0 6px; height: 28px; background: var(--hdr-bg);
-        backdrop-filter: blur(6px); cursor: pointer; user-select: none; border-bottom: 1px solid var(--border); }
-  .fh:hover { filter: brightness(1.08); }
-  .fh .st { font-family: var(--mono); font-size: 11px; font-weight: 700; width: 14px; text-align: center; flex: none; }
-  .st-M { color: var(--mod-fg); } .st-A, .st-U { color: var(--add-fg); } .st-D { color: var(--del-fg); } .st-R { color: var(--ren-fg); }
-  .fh .name { font-weight: 600; white-space: nowrap; }
-  .fh .dir { color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; direction: rtl; text-align: left; }
-  .fh .stat { font-size: 11px; font-family: var(--mono); white-space: nowrap; display: inline-flex; gap: 6px; align-items: center; }
+  /* ---------- bottom pane: Diff + one tab per staged preview ---------- */
+  #tabs { flex: none; display: flex; background: var(--tabs-bg); border-bottom: 1px solid var(--border); overflow-x: auto; overflow-y: hidden; }
+  #tabs::-webkit-scrollbar { height: 3px; }
+  .tab { display: inline-flex; align-items: center; gap: 6px; background: none; border: 0; border-bottom: 2px solid transparent; color: var(--vscode-tab-inactiveForeground, var(--dim));
+         padding: 5px 12px 4px; font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap; max-width: 280px; }
+  .tab span.t { overflow: hidden; text-overflow: ellipsis; }
+  .tab:hover { color: var(--fg); }
+  .tab.on { color: var(--vscode-tab-activeForeground, var(--fg)); border-bottom-color: var(--vscode-panelTitle-activeBorder, var(--focus)); background: var(--bg); }
+  #pane { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
+  #dv { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  #dv[hidden], #pv[hidden] { display: none; }
+  .fh { flex: none; display: flex; align-items: center; gap: 6px; padding: 0 6px 0 12px; height: 30px; background: var(--hdr-bg); border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .fh .name { font-weight: 600; }
+  .fh .dir { color: var(--dim); overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1; direction: rtl; text-align: left; }
+  .fh .stat { font-size: 11px; font-family: var(--mono); display: inline-flex; gap: 6px; align-items: center; }
+  .fh .nav { display: inline-flex; align-items: center; gap: 0; color: var(--dim); font-size: 12px; }
+  .fh .nav .pos { min-width: 42px; text-align: center; font-variant-numeric: tabular-nums; }
   .bar { display: inline-flex; gap: 1px; }
   .bar i { width: 7px; height: 7px; border-radius: 1px; background: var(--dim); opacity: .3; display: inline-block; }
   .bar i.a { background: var(--add-fg); opacity: 1; } .bar i.d { background: var(--del-fg); opacity: 1; }
-  .fh .acts { display: none; gap: 2px; }
-  .fh:hover .acts, .fh:focus-within .acts { display: inline-flex; }
-  .file.collapsed .fb { display: none; }
-  .file.collapsed .chev { transform: rotate(-90deg); }
-  .chev { transition: transform .1s; }
+  #fb { flex: 1; min-height: 0; overflow: auto; font-family: var(--mono); font-size: var(--monosize); line-height: 1.45; }
+  #pv { flex: 1; min-height: 0; width: 100%; border: 0; background: transparent; display: block; }
 
-  .fb { overflow-x: auto; font-family: var(--mono); font-size: var(--monosize); line-height: 1.45; }
-  table.d { border-collapse: collapse; width: 100%; table-layout: auto; }
+  table.d { border-collapse: collapse; min-width: 100%; table-layout: auto; }
   table.d td { padding: 0; vertical-align: top; }
   td.ln { width: 1%; min-width: 34px; padding: 0 8px !important; text-align: right; color: var(--gutter); user-select: none; font-size: .92em; opacity: .9; }
   td.mk { width: 14px; user-select: none; color: var(--dim); text-align: center; }
@@ -131,17 +167,27 @@
   ::-webkit-scrollbar-thumb { background: var(--vscode-scrollbarSlider-background, rgba(121,121,121,.4)); }
   ::-webkit-scrollbar-thumb:hover { background: var(--vscode-scrollbarSlider-hoverBackground, rgba(100,100,100,.7)); }
   ::-webkit-scrollbar-thumb:active { background: var(--vscode-scrollbarSlider-activeBackground, rgba(191,191,191,.4)); }
-  .msg { color: var(--dim); padding: 14px 16px; font-size: 12px; display: flex; gap: 8px; align-items: center; }
+  .msg { color: var(--dim); padding: 14px 16px; font-size: 12px; display: flex; gap: 8px; align-items: center; font-family: var(--vscode-font-family); }
   .msg button { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: 0; padding: 3px 10px; border-radius: 2px; cursor: pointer; font: inherit; }
   .msg button:hover { background: var(--vscode-button-secondaryHoverBackground); }
-  #empty { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; gap: 10px; color: var(--dim); text-align: center; padding: 20px; }
+  #empty { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 1; gap: 10px; color: var(--dim); text-align: center; padding: 20px; }
   #empty .codicon { font-size: 32px !important; opacity: .5; }
+  body.nosession #top, body.nosession #sash, body.nosession #tabs, body.nosession #pane { display: none; }
+  body:not(.nosession) #empty { display: none; }
   .busy { position: absolute; top: 0; left: 0; right: 0; height: 2px; overflow: hidden; z-index: 5; }
   .busy::after { content: ''; position: absolute; left: -30%; width: 30%; height: 100%; background: var(--vscode-progressBar-background, var(--focus)); animation: slide 1s linear infinite; }
   @keyframes slide { to { left: 100%; } }
+
+  /* narrow panel: the two top-band columns stack; the bottom pane stays at the bottom */
+  @media (max-width: 560px) {
+    #top { flex-direction: column; height: 50vh; }
+    #list { width: auto; flex: 0 0 40%; border-right: 0; border-bottom: 1px solid var(--border); }
+    #side { min-height: 0; }
+    #head .br { display: none; }
+  }
 </style>
 </head>
-<body>
+<body class="nosession">
   <div id="head">
     <span class="codicon codicon-git-compare" style="opacity:.8"></span>
     <span class="wt" id="wt" title="Show changes for another worktree" tabindex="0">No session</span>
@@ -149,16 +195,24 @@
     <span class="sync" id="sync"></span>
     <span class="grow"></span>
     <input id="filter" placeholder="Filter files" spellcheck="false">
-    <button class="icon" id="bSmaller" title="Smaller code (Ctrl -)"><span class="codicon codicon-zoom-out"></span></button>
-    <button class="icon" id="bBigger" title="Larger code (Ctrl =)"><span class="codicon codicon-zoom-in"></span></button>
-    <button class="icon" id="bTests" title="Hide test files"><span class="codicon codicon-beaker"></span></button>
-    <button class="icon" id="bMode" title="Side-by-side"><span class="codicon codicon-split-horizontal"></span></button>
-    <button class="icon" id="bFold" title="Collapse all files"><span class="codicon codicon-collapse-all"></span></button>
-    <button class="icon" id="bRefresh" title="Refresh"><span class="codicon codicon-refresh"></span></button>
+    <button class="tgl" id="bMode" title="Side-by-side view">Split</button>
+    <button class="icon" id="bMore" title="More actions"><span class="codicon codicon-ellipsis"></span></button>
   </div>
-  <div id="list" tabindex="0"></div>
-  <div id="sash"></div>
-  <div id="diff"><div id="empty"><span class="codicon codicon-git-compare"></span><div>Open a session to see its commits and changes here.</div></div></div>
+  <div id="menu" hidden></div>
+  <div id="empty"><span class="codicon codicon-git-compare"></span><div>Open a session to see its commits and changes here.</div></div>
+  <div id="top">
+    <div id="list" tabindex="0"></div>
+    <div id="side">
+      <div id="meta"></div>
+      <div id="tree" tabindex="0"></div>
+    </div>
+  </div>
+  <div id="sash" title="Drag to resize"></div>
+  <div id="tabs" role="tablist"></div>
+  <div id="pane">
+    <div id="dv"></div>
+    <iframe id="pv" hidden sandbox="allow-scripts" title="Staged preview"></iframe>
+  </div>
 
 <script nonce="__NONCE__">
 (function () {
@@ -166,35 +220,49 @@
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const WORKING = '~working';
-  const BIG = 600;                     // diff lines above which a file starts collapsed
-  const st = Object.assign({ listH: 0, mode: 'unified', fs: 11 }, vs.getState() || {});
+  const st = Object.assign({ topH: 0, mode: 'unified', fs: 11, tabs: {} }, vs.getState() || {});
+  const save = () => vs.setState(st);
   // code font size: persisted, 8–20px
   function setFont(px) {
-    st.fs = Math.max(8, Math.min(20, px)); vs.setState(st);
+    st.fs = Math.max(8, Math.min(20, px)); save();
     document.documentElement.style.setProperty('--monosize', st.fs + 'px');
   }
   setFont(st.fs);
   let diffSig = '';
-  let list = null, diff = null, sel = WORKING, hideTests = false, collapsed = {}, filterText = '';
+  let list = null, diff = null, sel = WORKING, hideTests = false, filterText = '';
+  let file = null;                 // path shown in the Diff tab
+  const fileBySel = {};            // selection → the file last viewed there
+  const folded = {};               // tree dir → collapsed
+  let msgOpen = false;
+  let previews = [], tab = 'diff'; // staged preview labels (plan first); 'diff' | 'pv:<label>'
+  let pvShown = null;              // { label, sig } loaded in the iframe
+  const pvY = {};                  // preview label → scroll offset, kept across re-stages
+  const targetKey = (t) => (t ? t.slug + '/' + t.name : '');
 
-  // ---------- layout: draggable split between commit list and diff ----------
-  const listEl = $('list'), sash = $('sash'), diffEl = $('diff');
-  if (st.listH) listEl.style.height = st.listH + 'px';
+  const listEl = $('list'), treeEl = $('tree'), metaEl = $('meta'), topEl = $('top'), sash = $('sash'),
+    tabsEl = $('tabs'), paneEl = $('pane'), dvEl = $('dv'), pvEl = $('pv');
+
+  // ---------- layout: draggable split between the top band and the bottom pane ----------
+  const fitTop = () => { if (st.topH) topEl.style.height = Math.max(80, Math.min(window.innerHeight - 140, st.topH)) + 'px'; };
+  fitTop();
+  window.addEventListener('resize', fitTop);
   sash.addEventListener('mousedown', (e) => {
     e.preventDefault(); sash.classList.add('drag');
-    const y0 = e.clientY, h0 = listEl.offsetHeight;
-    const mv = (ev) => { const h = Math.max(60, Math.min(window.innerHeight - 120, h0 + ev.clientY - y0)); listEl.style.height = h + 'px'; };
-    const up = () => { sash.classList.remove('drag'); document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up);
-      st.listH = listEl.offsetHeight; vs.setState(st); };
+    pvEl.style.pointerEvents = 'none';   // the iframe would swallow mousemove
+    const y0 = e.clientY, h0 = topEl.offsetHeight;
+    const mv = (ev) => { topEl.style.height = Math.max(80, Math.min(window.innerHeight - 140, h0 + ev.clientY - y0)) + 'px'; };
+    const up = () => { sash.classList.remove('drag'); pvEl.style.pointerEvents = ''; document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up);
+      st.topH = topEl.offsetHeight; save(); };
     document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
   });
-  listEl.addEventListener('focus', () => document.body.classList.add('listfocus'));
-  listEl.addEventListener('blur', () => document.body.classList.remove('listfocus'));
+  sash.addEventListener('dblclick', () => { st.topH = 0; save(); topEl.style.height = ''; });
+  for (const el of [listEl, treeEl]) {
+    el.addEventListener('focus', () => el.classList.add('focus'));
+    el.addEventListener('blur', () => el.classList.remove('focus'));
+  }
 
   // ---------- header ----------
   $('wt').addEventListener('click', () => vs.postMessage({ cmd: 'pick' }));
-  $('bSmaller').addEventListener('click', () => setFont(st.fs - 1));
-  $('bBigger').addEventListener('click', () => setFont(st.fs + 1));
   document.addEventListener('keydown', (e) => {
     if (!e.ctrlKey && !e.metaKey) return;
     if (e.key === '=' || e.key === '+') { e.preventDefault(); setFont(st.fs + 1); }
@@ -202,70 +270,113 @@
     else if (e.key === '0') { e.preventDefault(); setFont(11); }
   });
   document.addEventListener('wheel', (e) => { if (!e.ctrlKey) return; e.preventDefault(); setFont(st.fs + (e.deltaY < 0 ? 1 : -1)); }, { passive: false });
-  $('bRefresh').addEventListener('click', () => vs.postMessage({ cmd: 'refresh' }));
-  $('bTests').addEventListener('click', () => vs.postMessage({ cmd: 'toggleTests' }));
-  $('bMode').addEventListener('click', () => { st.mode = st.mode === 'split' ? 'unified' : 'split'; vs.setState(st); syncButtons(); renderDiff(true); });
-  $('bFold').addEventListener('click', () => {
-    if (!diff) return;
-    const anyOpen = visibleFiles().some((f) => !isCollapsed(f));
-    for (const f of visibleFiles()) collapsed[key(f)] = anyOpen;
-    renderDiff(true);
-  });
-  $('filter').addEventListener('input', (e) => { filterText = e.target.value.trim().toLowerCase(); renderDiff(true); });
+  $('bMode').addEventListener('click', () => { st.mode = st.mode === 'split' ? 'unified' : 'split'; save(); syncButtons(); renderDiff(true); });
+  $('filter').addEventListener('input', (e) => { filterText = e.target.value.trim().toLowerCase(); renderSide(); renderDiff(true); });
   function syncButtons() {
-    $('bTests').classList.toggle('on', hideTests);
-    $('bTests').title = hideTests ? 'Show test files' : 'Hide test files';
     $('bMode').classList.toggle('on', st.mode === 'split');
-    $('bMode').title = st.mode === 'split' ? 'Inline view' : 'Side-by-side view';
+    $('bMode').title = st.mode === 'split' ? 'Showing side-by-side · click for inline' : 'Showing inline · click for side-by-side';
   }
 
+  // ⋯ menu: the toolbar actions that don't need to be one click away
+  const menuEl = $('menu');
+  const MENU = () => [
+    { icon: 'zoom-in', label: 'Larger code', key: 'Ctrl =', run: () => setFont(st.fs + 1), keep: true },
+    { icon: 'zoom-out', label: 'Smaller code', key: 'Ctrl -', run: () => setFont(st.fs - 1), keep: true },
+    { icon: 'text-size', label: 'Reset code size', key: 'Ctrl 0', run: () => setFont(11) },
+    '-',
+    { icon: hideTests ? 'beaker' : 'beaker-stop', label: hideTests ? 'Show test files' : 'Hide test files', run: () => vs.postMessage({ cmd: 'toggleTests' }) },
+    { icon: 'diff-multiple', label: 'Open all in the diff editor', run: () => vs.postMessage({ cmd: 'openAll', sel }), off: !diff || !diff.files.length },
+    '-',
+    { icon: 'refresh', label: 'Refresh', run: () => vs.postMessage({ cmd: 'refresh' }) },
+    { icon: 'list-selection', label: 'Show another worktree…', run: () => vs.postMessage({ cmd: 'pick' }) },
+  ];
+  let menuItems = [];
+  function openMenu() {
+    menuItems = MENU();
+    menuEl.innerHTML = menuItems.map((m, i) => m === '-' ? '<div class="sep"></div>'
+      : '<div class="mi" tabindex="-1" data-i="' + i + '"' + (m.off ? ' style="opacity:.4;pointer-events:none"' : '') + '><span class="codicon codicon-' + m.icon + '"></span>'
+        + esc(m.label) + (m.key ? '<span class="k">' + m.key + '</span>' : '') + '</div>').join('');
+    menuEl.hidden = false;
+    const r = $('bMore').getBoundingClientRect();
+    menuEl.style.top = (r.bottom + 2) + 'px';
+    menuEl.style.left = Math.max(4, Math.min(window.innerWidth - menuEl.offsetWidth - 4, r.right - menuEl.offsetWidth)) + 'px';
+    const first = menuEl.querySelector('.mi'); if (first) first.focus();
+  }
+  const closeMenu = () => { menuEl.hidden = true; };
+  $('bMore').addEventListener('click', (e) => { e.stopPropagation(); if (menuEl.hidden) openMenu(); else closeMenu(); });
+  menuEl.addEventListener('click', (e) => {
+    const it = e.target.closest('.mi'); if (!it) return;
+    const m = menuItems[+it.dataset.i]; m.run();
+    if (!m.keep) closeMenu();
+  });
+  menuEl.addEventListener('keydown', (e) => {
+    const items = [...menuEl.querySelectorAll('.mi')], i = items.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); const n = items[(i + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length]; if (n) n.focus(); }
+    else if (e.key === 'Enter' && i >= 0) { e.preventDefault(); items[i].click(); }
+    else if (e.key === 'Escape') { closeMenu(); $('bMore').focus(); }
+  });
+  document.addEventListener('mousedown', (e) => { if (!menuEl.hidden && !menuEl.contains(e.target) && !e.target.closest('#bMore')) closeMenu(); });
+  window.addEventListener('blur', closeMenu);
+
   // ---------- commit list ----------
-  function renderList() {
-    if (!list) { listEl.innerHTML = ''; return; }
+  const ago = (s) => String(s || '').replace(/^(\d+) (second|minute|hour|day|week|month|year)s? ago$/,
+    (m, n, u) => n + ({ second: 's', minute: 'm', hour: 'h', day: 'd', week: 'w', month: 'mo', year: 'y' })[u]);
+  function renderHead() {
+    document.body.classList.toggle('nosession', !list);
+    if (!list) { $('wt').textContent = 'No session'; $('br').innerHTML = ''; $('sync').innerHTML = ''; return; }
     $('wt').textContent = list.target.slug + '/' + list.target.name;
     $('br').innerHTML = '<span class="codicon codicon-git-branch"></span>' + esc(list.branch);
     const up = list.upstream;
     $('sync').innerHTML = up ? ('<span class="' + (up.ahead ? 'up' : '') + '" title="' + up.ahead + ' to push">↑' + up.ahead + '</span>'
       + '<span title="' + up.behind + ' to pull">↓' + up.behind + '</span>') : '<span title="No upstream branch">unpublished</span>';
+  }
+  function renderList() {
+    renderHead();
+    if (!list) { listEl.innerHTML = ''; return; }
+    const up = list.upstream;
     let h = '';
-    if (list.changes) h += '<div class="row working' + (sel === WORKING ? ' sel' : '') + '" data-sel="' + WORKING + '">'
+    if (list.changes) h += '<div class="sec">Working tree</div><div class="row working' + (sel === WORKING ? ' sel' : '') + '" data-sel="' + WORKING + '">'
       + '<span class="codicon codicon-circle-filled" style="font-size:10px"></span><span class="subj">Uncommitted changes</span>'
-      + '<span class="count">' + list.changes + '</span></div>';
-    if (list.fallback) h += '<div class="row note"><span class="codicon codicon-info"></span>'
-      + esc(list.base ? 'No commits ahead of ' + list.base + ' · recent history' : 'Recent history') + '</div>';
+      + '<span class="count" title="' + list.changes + ' changed file' + (list.changes === 1 ? '' : 's') + '">' + list.changes + '</span></div>';
+    h += '<div class="sec">' + (list.fallback ? esc(list.base ? 'No commits ahead of ' + list.base + ' · recent history' : 'Recent history') : 'Commits') + '</div>';
     list.commits.forEach((c, i) => {
       const pushed = !up || i >= up.ahead;
       h += '<div class="row' + (sel === c.sha ? ' sel' : '') + '" data-sel="' + c.sha + '" title="' + esc(c.subject + '\n' + c.author + ' · ' + c.date) + '">'
         + '<span class="dot' + (pushed ? ' pushed' : '') + '" title="' + (pushed ? 'pushed' : 'not pushed') + '"></span>'
-        + '<span class="subj">' + esc(c.subject) + '</span><span class="meta">' + esc(c.when) + '</span><span class="sha">' + esc(c.short) + '</span></div>';
+        + '<span class="subj">' + esc(c.subject) + '</span><span class="meta">' + esc(ago(c.when)) + ' · <span class="sha">' + esc(c.short) + '</span></span></div>';
     });
     if (!list.changes && !list.commits.length) h += '<div class="row note">No changes</div>';
     listEl.innerHTML = h;
-    // fit the list to its rows (up to a third of the panel) until the user drags the divider
-    if (!st.listH) listEl.style.height = 'auto';
-    if (!st.listH) listEl.style.height = Math.max(60, Math.min(listEl.scrollHeight + 4, Math.round(window.innerHeight * 0.34))) + 'px';
   }
   listEl.addEventListener('click', (e) => { const r = e.target.closest('.row[data-sel]'); if (r) select(r.dataset.sel); });
   listEl.addEventListener('keydown', (e) => {
     const rows = [...listEl.querySelectorAll('.row[data-sel]')]; if (!rows.length) return;
     const i = rows.findIndex((r) => r.dataset.sel === sel);
-    if (e.key === 'ArrowDown' || e.key === 'j') { e.preventDefault(); select(rows[Math.min(rows.length - 1, i + 1)].dataset.sel); }
-    else if (e.key === 'ArrowUp' || e.key === 'k') { e.preventDefault(); select(rows[Math.max(0, i - 1)].dataset.sel); }
+    if (e.key === 'ArrowDown') { e.preventDefault(); select(rows[Math.min(rows.length - 1, i + 1)].dataset.sel); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); select(rows[Math.max(0, i - 1)].dataset.sel); }
   });
   function select(s) {
     if (s === sel && diff && diff.sel === s) return;
-    sel = s; renderList();
+    sel = s; msgOpen = false; renderList();
     const r = listEl.querySelector('.row.sel'); if (r && r.scrollIntoView) r.scrollIntoView({ block: 'nearest' });
     busy(true); vs.postMessage({ cmd: 'select', sel: s });
   }
-  function busy(on) { const b = diffEl.querySelector('.busy'); if (on && !b) diffEl.insertAdjacentHTML('afterbegin', '<div class="busy"></div>'); else if (!on && b) b.remove(); }
+  function busy(on) { const b = paneEl.querySelector('.busy'); if (on && !b) paneEl.insertAdjacentHTML('afterbegin', '<div class="busy"></div>'); else if (!on && b) b.remove(); }
 
-  // ---------- diff ----------
-  const key = (f) => f.path;
-  const isCollapsed = (f) => (key(f) in collapsed ? collapsed[key(f)] : (f.adds + f.dels > BIG));
+  // ---------- files of the selection ----------
   function visibleFiles() {
-    if (!diff) return [];
+    if (!diff || diff.sel !== sel) return [];
     return diff.files.filter((f) => (!hideTests || !f.test) && (!filterText || f.path.toLowerCase().includes(filterText)));
+  }
+  const dirOf = (p) => { const i = p.lastIndexOf('/'); return i >= 0 ? p.slice(0, i) : ''; };
+  const baseOf = (p) => p.slice(p.lastIndexOf('/') + 1);
+  // tree order: root files first, then folders A→Z, files A→Z within each
+  function navFiles() {
+    return visibleFiles().slice().sort((a, b) => {
+      const da = dirOf(a.path), db = dirOf(b.path);
+      if (da !== db) return !da ? -1 : !db ? 1 : da.localeCompare(db);
+      return baseOf(a.path).localeCompare(baseOf(b.path));
+    });
   }
   function letter(f) { return f.untracked ? 'U' : ({ added: 'A', deleted: 'D', renamed: 'R' })[f.status] || 'M'; }
   function bar(a, d) {
@@ -273,7 +384,93 @@
     let ga = Math.round(5 * a / n), gd = Math.min(5 - ga, Math.round(5 * d / n)); if (a && !ga) { ga = 1; } if (d && !gd && ga < 5) gd = 1;
     let s = '<span class="bar">'; for (let i = 0; i < 5; i++) s += '<i class="' + (i < ga ? 'a' : i < ga + gd ? 'd' : '') + '"></i>'; return s + '</span>';
   }
+  const counts = (f) => (f.adds ? '<span class="n plus">+' + f.adds + '</span>' : '') + (f.dels ? '<span class="n minus">−' + f.dels + '</span>' : '');
+  const currentFile = () => (diff && diff.sel === sel ? visibleFiles().find((f) => f.path === file) : null) || null;
+  // keep the shown file valid for the current selection + filter: last viewed here → previous → first
+  function pickFile() {
+    const nav = navFiles();
+    const want = [fileBySel[sel], file].find((p) => p && nav.some((f) => f.path === p));
+    file = want || (nav[0] && nav[0].path) || null;
+    if (file) fileBySel[sel] = file;
+  }
 
+  function renderMeta() {
+    if (!diff || diff.sel !== sel) { metaEl.innerHTML = ''; return; }
+    const files = visibleFiles(), m = diff.meta;
+    const A = files.reduce((s, f) => s + f.adds, 0), D = files.reduce((s, f) => s + f.dels, 0);
+    const hidden = diff.files.length - files.length;
+    const info = (m ? '<span>· ' + esc(m.author) + '</span>' : '') + '<span>· ' + files.length + ' file' + (files.length === 1 ? '' : 's') + '</span>'
+      + '<span class="plus">+' + A + '</span><span class="minus">−' + D + '</span>'
+      + (hidden ? '<span title="' + (hideTests ? 'test files' + (filterText ? ' and the filter' : '') : 'the filter') + '">· ' + hidden + ' hidden</span>' : '')
+      + (diff.omitted ? '<span>· ' + diff.omitted + ' more not listed</span>' : '');
+    let h = '<div class="line"><span class="s" title="' + esc(m ? m.subject : '') + '">' + esc(m ? m.subject : 'Uncommitted changes') + '</span>'
+      + '<span class="info">' + info + '</span>'
+      + (m ? '<button class="tog" id="msgTog">' + (msgOpen ? 'message ▾' : 'message ▸') + '</button>' : '') + '</div>';
+    if (m && msgOpen) h += '<div class="more"><div class="s2">' + esc(m.subject) + '</div>' + (m.body ? '<div class="b">' + esc(m.body) + '</div>' : '')
+      + '<div class="a"><span><span class="codicon codicon-account"></span> ' + esc(m.author) + '</span><span>' + esc(m.date) + ' (' + esc(m.when) + ')</span>'
+      + '<span class="copy" data-copy="' + esc(m.sha) + '" title="Copy full SHA"><span class="codicon codicon-copy"></span> ' + esc(m.short) + '</span></div></div>';
+    metaEl.innerHTML = h;
+  }
+  metaEl.addEventListener('click', (e) => {
+    const cp = e.target.closest('[data-copy]'); if (cp) { vs.postMessage({ cmd: 'copy', text: cp.dataset.copy }); return; }
+    if (e.target.closest('#msgTog')) { msgOpen = !msgOpen; renderMeta(); }
+  });
+
+  function renderTree() {
+    if (!diff || diff.sel !== sel) { treeEl.innerHTML = ''; return; }
+    const nav = navFiles();
+    if (!nav.length) {
+      treeEl.innerHTML = '<div class="msg">' + (diff.files.length ? 'All files are hidden by the current filter.' : sel === WORKING ? 'Working tree clean.' : 'This commit has no file changes.') + '</div>';
+      return;
+    }
+    let h = '', cur = null;
+    for (const f of nav) {
+      const d = dirOf(f.path);
+      if (d && d !== cur) h += '<div class="row dir' + (folded[d] ? ' folded' : '') + '" data-dir="' + esc(d) + '" title="' + esc(d) + '">'
+        + '<span class="codicon codicon-chevron-down chev"></span><span class="nm">' + esc(d) + '</span></div>';
+      cur = d;
+      if (d && folded[d]) continue;
+      const L = letter(f);
+      h += '<div class="row' + (f.path === file ? ' sel' : '') + '" style="--i:' + (d ? 1 : 0) + '" data-path="' + esc(f.path) + '" title="' + esc(f.path + (f.from ? '\nrenamed from ' + f.from : '')) + '">'
+        + '<span class="st st-' + L + '">' + L + '</span><span class="nm">' + esc(baseOf(f.path)) + '</span>' + counts(f) + '</div>';
+    }
+    treeEl.innerHTML = h;
+  }
+  function renderSide() { pickFile(); renderMeta(); renderTree(); renderTabs(); }
+  treeEl.addEventListener('click', (e) => {
+    const dr = e.target.closest('.row.dir'); if (dr) { const d = dr.dataset.dir; folded[d] = !folded[d]; renderTree(); return; }
+    const r = e.target.closest('.row[data-path]'); if (r) showFile(r.dataset.path);
+  });
+  treeEl.addEventListener('dblclick', (e) => { const r = e.target.closest('.row[data-path]'); if (r) post('openFile', currentFile()); });
+  treeEl.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); step(e.key === 'ArrowDown' ? 1 : -1); }
+    else if (e.key === 'Enter') { e.preventDefault(); post('openFile', currentFile()); }
+  });
+  // show a file in the Diff tab (and bring that tab forward)
+  function showFile(p, keepTab) {
+    if (!p) return;
+    const d = dirOf(p); if (folded[d]) { folded[d] = false; }
+    file = p; fileBySel[sel] = p;
+    renderTree();
+    const r = treeEl.querySelector('.row.sel'); if (r && r.scrollIntoView) r.scrollIntoView({ block: 'nearest' });
+    if (!keepTab && tab !== 'diff') setTab('diff'); else { renderTabs(); renderDiff(); }
+  }
+  function step(dir) {
+    const nav = navFiles(); if (!nav.length) return;
+    const i = nav.findIndex((f) => f.path === file);
+    const j = i < 0 ? 0 : Math.max(0, Math.min(nav.length - 1, i + dir));
+    if (j !== i) showFile(nav[j].path);
+  }
+  // J/K (and n/p) step files from anywhere but a text box
+  document.addEventListener('keydown', (e) => {
+    if (e.ctrlKey || e.metaKey || e.altKey || e.target.tagName === 'INPUT' || !menuEl.hidden) return;
+    const k = e.key.toLowerCase();
+    if (k === 'j' || k === 'n') { e.preventDefault(); step(1); }
+    else if (k === 'k' || k === 'p') { e.preventDefault(); step(-1); }
+  });
+  function post(cmd, f) { if (f) vs.postMessage({ cmd, sel, file: { path: f.path, from: f.from, status: f.status, untracked: !!f.untracked } }); }
+
+  // ---------- diff ----------
   // word-level highlight of a changed line pair: LCS over tokens (bounded), else common prefix/suffix
   const tok = (s) => s.match(/\w+|\s+|[^\w\s]/g) || [];
   function wordDiff(a, b) {
@@ -362,95 +559,102 @@
     return (st.mode === 'split' ? splitTable(rows) : unifiedTable(rows))
       + (f.truncated ? '<div class="msg">' + f.truncated + ' more lines not shown<button data-act="native">Open full diff</button></div>' : '');
   }
+  // only the selected file's diff is ever in the DOM, so a big commit costs one file's render
   function renderDiff(keepScroll) {
-    busy(false);
-    const y = diffEl.scrollTop;
-    const sx = {};   // path → horizontal scroll of that file's body
-    if (keepScroll && diffEl._files) diffEl.querySelectorAll('.file').forEach((fe) => {
-      const f = diffEl._files[+fe.dataset.i], fb = fe.querySelector('.fb');
-      if (f && fb && fb.scrollLeft) sx[f.path] = fb.scrollLeft;
-    });
-    if (!list) { diffEl.innerHTML = '<div id="empty"><span class="codicon codicon-git-compare"></span><div>Open a session to see its commits and changes here.</div></div>'; return; }
+    if (tab !== 'diff' || !list) return;
     if (!diff || diff.sel !== sel) return;
-    let h = '';
-    if (diff.meta) {
-      const m = diff.meta;
-      h += '<div class="cmeta"><div class="s">' + esc(m.subject) + '</div>' + (m.body ? '<div class="b">' + esc(m.body) + '</div>' : '')
-        + '<div class="a"><span><span class="codicon codicon-account"></span> ' + esc(m.author) + '</span><span>' + esc(m.date) + ' (' + esc(m.when) + ')</span>'
-        + '<span class="sha" data-copy="' + esc(m.sha) + '" title="Copy full SHA"><span class="codicon codicon-copy"></span> ' + esc(m.short) + '</span></div></div>';
+    busy(false);
+    const old = $('fb'), same = keepScroll && old && old.dataset.path === file;
+    const y = same ? old.scrollTop : 0, x = same ? old.scrollLeft : 0;
+    const f = currentFile();
+    if (!f) {
+      dvEl.innerHTML = '<div class="msg">' + (diff.files.length ? 'No file selected.' : sel === WORKING ? 'Working tree clean.' : 'This commit has no file changes.') + '</div>';
+      return;
     }
-    const files = visibleFiles();
-    const A = files.reduce((s, f) => s + f.adds, 0), D = files.reduce((s, f) => s + f.dels, 0);
-    const hidden = diff.files.length - files.length;
-    h += '<div class="summary"><span>' + files.length + ' file' + (files.length === 1 ? '' : 's') + ' changed</span><span class="plus">+' + A + '</span><span class="minus">−' + D + '</span>'
-      + (hidden ? '<span>' + hidden + ' hidden' + (hideTests ? ' (tests' + (filterText ? ', filter' : '') + ')' : ' (filter)') + '</span>' : '')
-      + (diff.omitted ? '<span>' + diff.omitted + ' more files not listed</span>' : '') + '<span class="grow"></span>'
-      + (diff.files.length ? '<button class="icon" data-act="all" title="Open all in the diff editor"><span class="codicon codicon-diff-multiple"></span></button>' : '') + '</div>';
-    if (!files.length) h += '<div class="msg">' + (diff.files.length ? 'All files are hidden by the current filter.' : sel === WORKING ? 'Working tree clean.' : 'This commit has no file changes.') + '</div>';
-    files.forEach((f, idx) => {
-      const L = letter(f), i = f.path.lastIndexOf('/');
-      const name = f.path.slice(i + 1), dir = i >= 0 ? f.path.slice(0, i) : '';
-      h += '<div class="file' + (isCollapsed(f) ? ' collapsed' : '') + '" data-i="' + idx + '">'
-        + '<div class="fh" tabindex="0" title="' + esc(f.path + (f.from ? '\nrenamed from ' + f.from : '')) + '">'
-        + '<span class="codicon codicon-chevron-down chev"></span><span class="st st-' + L + '">' + L + '</span>'
-        + '<span class="name">' + esc(name) + '</span><span class="dir">‎' + esc(dir) + (f.from ? ' ← ' + esc(f.from) : '') + '‎</span>'
-        + '<span class="stat"><span class="plus">+' + f.adds + '</span><span class="minus">−' + f.dels + '</span>' + bar(f.adds, f.dels) + '</span>'
-        + '<span class="acts"><button class="icon" data-act="native" title="Open in diff editor"><span class="codicon codicon-diff"></span></button>'
-        + (f.status !== 'deleted' ? '<button class="icon" data-act="open" title="Open file"><span class="codicon codicon-go-to-file"></span></button>' : '') + '</span></div>'
-        + '<div class="fb">' + (isCollapsed(f) ? '' : fileBody(f)) + '</div></div>';
-    });
-    diffEl.innerHTML = h;
-    diffEl._files = files;
-    if (keepScroll) {
-      diffEl.scrollTop = y;
-      diffEl.querySelectorAll('.file').forEach((fe) => {
-        const f = files[+fe.dataset.i]; if (f && sx[f.path]) fe.querySelector('.fb').scrollLeft = sx[f.path];
-      });
-    } else diffEl.scrollTop = 0;
+    const nav = navFiles(), i = nav.indexOf(f), L = letter(f), d = dirOf(f.path);
+    dvEl.innerHTML = '<div class="fh" title="' + esc(f.path + (f.from ? '\nrenamed from ' + f.from : '')) + '">'
+      + '<span class="st st-' + L + '">' + L + '</span><span class="name">' + esc(baseOf(f.path)) + '</span>'
+      + '<span class="dir">&lrm;' + esc(d) + (f.from ? ' ← ' + esc(f.from) : '') + '&lrm;</span>'
+      + '<span class="stat"><span class="plus">+' + f.adds + '</span><span class="minus">−' + f.dels + '</span>' + bar(f.adds, f.dels) + '</span>'
+      + '<span class="nav"><button class="icon" data-act="prev" title="Previous file (K)"' + (i <= 0 ? ' disabled' : '') + '><span class="codicon codicon-chevron-left"></span></button>'
+      + '<span class="pos">' + (i + 1) + '/' + nav.length + '</span>'
+      + '<button class="icon" data-act="next" title="Next file (J)"' + (i >= nav.length - 1 ? ' disabled' : '') + '><span class="codicon codicon-chevron-right"></span></button></span>'
+      + '<button class="icon" data-act="native" title="Open in the diff editor"><span class="codicon codicon-diff"></span></button>'
+      + (f.status !== 'deleted' ? '<button class="tgl" data-act="open" title="Open file">Open file</button>' : '')
+      + '</div><div id="fb" data-path="' + esc(f.path) + '">' + fileBody(f) + '</div>';
+    const fb = $('fb'); fb.scrollTop = y; fb.scrollLeft = x;
   }
-  diffEl.addEventListener('click', (e) => {
-    const cp = e.target.closest('[data-copy]'); if (cp) { vs.postMessage({ cmd: 'copy', text: cp.dataset.copy }); return; }
-    const act = e.target.closest('[data-act]');
-    if (act && act.dataset.act === 'all') { vs.postMessage({ cmd: 'openAll', sel }); return; }
-    const fe = e.target.closest('.file'); if (!fe) return;
-    const f = diffEl._files[+fe.dataset.i]; if (!f) return;
-    if (act) { e.stopPropagation(); vs.postMessage({ cmd: act.dataset.act === 'open' ? 'openFile' : 'openNative', sel, file: { path: f.path, from: f.from, status: f.status, untracked: !!f.untracked } }); return; }
-    if (e.target.closest('.fh')) toggleFile(fe, f);
+  dvEl.addEventListener('click', (e) => {
+    const act = e.target.closest('[data-act]'); if (!act) return;
+    const a = act.dataset.act;
+    if (a === 'prev' || a === 'next') step(a === 'next' ? 1 : -1);
+    else post(a === 'open' ? 'openFile' : 'openNative', currentFile());
   });
-  diffEl.addEventListener('keydown', (e) => {
-    const fh = e.target.closest('.fh'); if (!fh || (e.key !== 'Enter' && e.key !== ' ')) return;
-    e.preventDefault(); const fe = fh.parentElement; toggleFile(fe, diffEl._files[+fe.dataset.i]);
-  });
-  function toggleFile(fe, f) {
-    const c = !fe.classList.contains('collapsed');
-    collapsed[key(f)] = c; fe.classList.toggle('collapsed', c);
-    const fb = fe.querySelector('.fb'); if (!c && !fb.innerHTML) fb.innerHTML = fileBody(f);
+
+  // ---------- bottom tabs ----------
+  let pendingTab = null;   // a tab to restore once this worktree's preview list arrives
+  function renderTabs() {
+    if (!list) { tabsEl.innerHTML = ''; return; }
+    const f = currentFile();
+    let h = '<button class="tab' + (tab === 'diff' ? ' on' : '') + '" role="tab" data-tab="diff" title="' + esc(f ? f.path : 'Diff') + '">'
+      + '<span class="codicon codicon-diff"></span><span class="t">Diff' + (f ? ' · ' + esc(baseOf(f.path)) : '') + '</span></button>';
+    for (const l of previews) h += '<button class="tab' + (tab === 'pv:' + l ? ' on' : '') + '" role="tab" data-tab="pv:' + esc(l) + '" title="Staged preview: ' + esc(l) + '">'
+      + '<span class="codicon codicon-file-media"></span><span class="t">' + esc(l) + '</span></button>';
+    tabsEl.innerHTML = h;
   }
-  // n / p jump between files (when focus isn't in the filter box)
-  document.addEventListener('keydown', (e) => {
-    if (e.target.tagName === 'INPUT' || !diffEl._files) return;
-    if (e.key !== 'n' && e.key !== 'p') return;
-    const hs = [...diffEl.querySelectorAll('.file')]; if (!hs.length) return;
-    const top = diffEl.scrollTop + 40;
-    let i = hs.findIndex((x) => x.offsetTop > top);
-    if (e.key === 'n') { if (i < 0) return; } else { i = (i < 0 ? hs.length : i) - 2; if (i < 0) i = 0; }
-    diffEl.scrollTop = hs[i].offsetTop - 30;
+  tabsEl.addEventListener('click', (e) => { const b = e.target.closest('.tab'); if (b) setTab(b.dataset.tab); });
+  function setTab(t) {
+    if (!t || (t !== 'diff' && !previews.includes(t.slice(3)))) t = 'diff';
+    tab = t;
+    if (list) { st.tabs[targetKey(list.target)] = t; save(); }
+    renderTabs();
+    const pv = t !== 'diff';
+    dvEl.hidden = pv; pvEl.hidden = !pv;
+    if (!pv) { renderDiff(true); return; }
+    busy(false);
+    const l = t.slice(3);
+    if (!pvShown || pvShown.label !== l) vs.postMessage({ cmd: 'preview', label: l });
+    else vs.postMessage({ cmd: 'preview', label: l, sig: pvShown.sig });   // tells the host which one to keep fresh
+  }
+
+  // ---------- previews: agent-authored HTML in an opaque-origin sandbox ----------
+  // The iframe can't reach this page's DOM or acquireVsCodeApi; it may only post the two bridge messages below.
+  pvEl.addEventListener('load', () => {
+    if (pvShown && pvEl.contentWindow) pvEl.contentWindow.postMessage({ __wtpv: 'scroll', y: pvY[pvShown.label] || 0 }, '*');
   });
+  function onBridge(d) {
+    if (!d || typeof d !== 'object' || !pvShown) return;
+    if (d.__wtpv === 'scroll' && typeof d.y === 'number') pvY[pvShown.label] = d.y;
+    else if (d.__wtpv === 'planAction' && d.title) vs.postMessage({ cmd: 'planAction', id: String(d.id || '').slice(0, 40), title: String(d.title).slice(0, 300) });
+  }
 
   // ---------- host messages ----------
   window.addEventListener('message', (ev) => {
+    // sandboxed frames (the preview and anything it nests) have the opaque origin "null"
+    if (ev.origin === 'null') { if (ev.source === pvEl.contentWindow) onBridge(ev.data); return; }
     const m = ev.data || {};
-    if (m.type === 'tests') { if (hideTests === !!m.hide) return; hideTests = !!m.hide; syncButtons(); renderDiff(true); }
-    else if (m.type === 'clear') { list = null; diff = null; $('wt').textContent = 'No session'; $('br').innerHTML = ''; $('sync').innerHTML = ''; renderList(); renderDiff(); }
+    const forUs = (t) => list && t && targetKey(t) === targetKey(list.target);
+    if (m.type === 'tests') { if (hideTests === !!m.hide) return; hideTests = !!m.hide; renderSide(); renderDiff(true); }
+    else if (m.type === 'clear') {
+      list = null; diff = null; previews = []; pvShown = null; pvEl.removeAttribute('srcdoc');
+      renderList(); renderTabs(); dvEl.innerHTML = '';
+    }
     else if (m.type === 'list') {
-      const newTarget = !list || list.target.slug !== m.target.slug || list.target.name !== m.target.name;
+      const newTarget = !list || targetKey(list.target) !== targetKey(m.target);
       list = m;
-      if (newTarget) { collapsed = {}; diff = null; sel = m.sel || (m.changes ? WORKING : (m.commits[0] && m.commits[0].sha) || WORKING); }
+      if (newTarget) {
+        diff = null; file = null; msgOpen = false; previews = []; pvShown = null; pvEl.removeAttribute('srcdoc');
+        for (const k of Object.keys(fileBySel)) delete fileBySel[k];
+        for (const k of Object.keys(folded)) delete folded[k];
+        sel = m.sel || (m.changes ? WORKING : (m.commits[0] && m.commits[0].sha) || WORKING);
+        pendingTab = st.tabs[targetKey(m.target)] || null;
+        setTab('diff'); dvEl.innerHTML = ''; metaEl.innerHTML = ''; treeEl.innerHTML = '';
+      }
       else if (m.sel) sel = m.sel;
       // selection vanished (commit amended away, working tree cleaned) → nearest sensible row
       const valid = (s) => (s === WORKING ? m.changes > 0 : m.commits.some((c) => c.sha === s));
       if (!valid(sel)) { sel = m.changes ? WORKING : (m.commits[0] && m.commits[0].sha) || WORKING; }
-      renderList();
+      renderList(); renderTabs();
       if (!diff || diff.sel !== sel || newTarget) { busy(true); vs.postMessage({ cmd: 'select', sel }); }
     }
     else if (m.type === 'diff') {
@@ -459,10 +663,30 @@
       const sig = JSON.stringify([m.files, m.meta, m.omitted]);
       if (same && sig === diffSig) { busy(false); return; }
       diffSig = sig;
-      diff = m; renderDiff(same);
+      diff = m; busy(false); renderSide(); renderDiff(same);
+    }
+    else if (m.type === 'previews') {
+      if (!forUs(m.target)) return;
+      previews = m.labels || [];
+      if (pendingTab && previews.includes(pendingTab.slice(3))) { const t = pendingTab; pendingTab = null; setTab(t); }
+      else if (tab !== 'diff' && !previews.includes(tab.slice(3))) setTab('diff');
+      else renderTabs();
+    }
+    else if (m.type === 'preview') {
+      if (!forUs(m.target)) return;
+      if (tab !== 'pv:' + m.label) { if (pvShown && pvShown.label === m.label) pvShown = null; return; }
+      if (pvShown && pvShown.label === m.label && pvShown.sig === m.sig) return;
+      pvShown = { label: m.label, sig: m.sig };
+      pvEl.srcdoc = m.html;
+    }
+    else if (m.type === 'tab') {
+      st.tabs[targetKey(m.target)] = m.tab; save();
+      if (!forUs(m.target)) return;
+      if (m.tab === 'diff' || previews.includes(m.tab.slice(3))) setTab(m.tab); else pendingTab = m.tab;
     }
   });
   syncButtons();
+  renderList();
   vs.postMessage({ cmd: 'ready' });
 })();
 </script>

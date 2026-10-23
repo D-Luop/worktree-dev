@@ -23,10 +23,13 @@ use crate::frontend::{self, Frontend};
 use crate::{paths, tray, win};
 
 const CLASS: &str = "wtd-flyout";
-const WIDTH: f32 = 360.0;
-const PAD: f32 = 16.0;
-const ROW_H: f32 = 32.0;
-const GROUP_H: f32 = 26.0;
+const WIDTH: f32 = 300.0;
+const PAD: f32 = 12.0;
+const ROW_H: f32 = 24.0;
+const GROUP_H: f32 = 20.0;
+const BTN_H: f32 = 24.0;
+const FOOT_BTN_H: f32 = 28.0;
+const BAR_H: f32 = 4.0;
 const MAX_ACCOUNTS: usize = 4;
 // winuser.h; windows-sys files it under UI::Controls
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -92,6 +95,7 @@ fn status_color(s: Status) -> Rgb {
     match s {
         Status::Input => Rgb(0xff, 0xb9, 0x00),
         Status::Working => Rgb(0x4a, 0xa3, 0xff),
+        Status::Limited => Rgb(0xff, 0x8c, 0x00),
         Status::Reviewing => Rgb(0xb3, 0x88, 0xff),
         Status::Pr => Rgb(0x60, 0xcd, 0xff),
         Status::Done => Rgb(0x6c, 0xcb, 0x5f),
@@ -99,8 +103,9 @@ fn status_color(s: Status) -> Rgb {
     }
 }
 
-fn status_word(w: &Worktree) -> &'static str {
+fn status_word(w: &Worktree) -> String {
     match w.status {
+        Status::Limited => return format!("⚠ {}", crate::limit::label_now(w.limit_resets_at)),
         Status::Input => "needs you",
         Status::Working => "working",
         Status::Reviewing => "reviewing",
@@ -108,6 +113,7 @@ fn status_word(w: &Worktree) -> &'static str {
         Status::Done => "done",
         Status::None | Status::Stopped => if w.live { "idle" } else { "stopped" },
     }
+    .into()
 }
 
 #[derive(Clone, PartialEq)]
@@ -120,8 +126,12 @@ enum Act {
     Gear,
 }
 
+/// x0, y0, x1, y1 in DIP; rounded only once scaled to device pixels.
+#[derive(Clone, Copy)]
+struct Rf(f32, f32, f32, f32);
+
 struct Hit {
-    r: RECT,
+    r: Rf,
     act: Act,
     /// inside the scrolling list (only clickable where the list is visible)
     in_list: bool,
@@ -130,7 +140,7 @@ struct Hit {
 enum Op {
     Round { x0: f32, y0: f32, x1: f32, y1: f32, r: f32, c: Rgb, clip: bool },
     Ring { cx: f32, cy: f32, r: f32, t: f32, c: Rgb, clip: bool },
-    Text { r: RECT, s: String, font: Font, c: Rgb, flags: u32, clip: bool },
+    Text { r: Rf, s: String, font: Font, c: Rgb, flags: u32, clip: bool },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -268,8 +278,8 @@ fn show() {
                 }
                 f.scale = scale;
                 f.dark = dark;
-                f.icon_face = pick_icon_face();
-                f.fonts = make_fonts(scale, f.icon_face);
+                f.icon_face = pick_face("Segoe Fluent Icons", "Segoe MDL2 Assets");
+                f.fonts = make_fonts(scale, pick_face("Segoe UI Variable Text", "Segoe UI"), f.icon_face);
             }
             f.scroll = 0.0;
         });
@@ -337,11 +347,12 @@ fn light_theme() -> bool {
     ok && v == 1
 }
 
-/// Windows 11 ships Segoe Fluent Icons; Windows 10 has the same glyphs in Segoe MDL2 Assets.
-fn pick_icon_face() -> &'static str {
+/// Windows 11 ships Segoe UI Variable and Segoe Fluent Icons; Windows 10 has Segoe UI and the same
+/// glyphs in Segoe MDL2 Assets.
+fn pick_face(want: &'static str, fallback: &'static str) -> &'static str {
     unsafe {
         let dc = GetDC(std::ptr::null_mut());
-        let f = CreateFontW(16, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0, 0, win::wide("Segoe Fluent Icons").as_ptr());
+        let f = CreateFontW(16, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0, 0, win::wide(want).as_ptr());
         let old = SelectObject(dc, f);
         let mut buf = [0u16; 64];
         let n = GetTextFaceW(dc, buf.len() as i32, buf.as_mut_ptr());
@@ -349,20 +360,20 @@ fn pick_icon_face() -> &'static str {
         DeleteObject(f);
         ReleaseDC(std::ptr::null_mut(), dc);
         let face = String::from_utf16_lossy(&buf[..(n.max(1) - 1) as usize]);
-        if face.eq_ignore_ascii_case("Segoe Fluent Icons") { "Segoe Fluent Icons" } else { "Segoe MDL2 Assets" }
+        if face.eq_ignore_ascii_case(want) { want } else { fallback }
     }
 }
 
-fn make_fonts(s: f32, icon_face: &str) -> Vec<(Font, HFONT)> {
+fn make_fonts(s: f32, text_face: &str, icon_face: &str) -> Vec<(Font, HFONT)> {
     let mk = |px: f32, weight: i32, face: &str| unsafe {
         CreateFontW(-(px * s).round() as i32, 0, 0, 0, weight, 0, 0, 0, 1, 0, 0, CLEARTYPE_QUALITY as u32, 0, win::wide(face).as_ptr())
     };
     vec![
-        (Font::Title, mk(15.0, 600, "Segoe UI")),
-        (Font::Body, mk(13.0, 400, "Segoe UI")),
-        (Font::Small, mk(12.0, 400, "Segoe UI")),
-        (Font::SmallBold, mk(11.0, 600, "Segoe UI")),
-        (Font::Icon, mk(13.0, 400, icon_face)),
+        (Font::Title, mk(14.0, 600, text_face)),
+        (Font::Body, mk(12.0, 400, text_face)),
+        (Font::Small, mk(11.0, 400, text_face)),
+        (Font::SmallBold, mk(10.0, 600, text_face)),
+        (Font::Icon, mk(12.0, 400, icon_face)),
     ]
 }
 
@@ -376,7 +387,7 @@ struct Data {
 
 fn data() -> Data {
     let rank = |s: Status| match s {
-        Status::Input => 0,
+        Status::Input | Status::Limited => 0,
         Status::Working => 1,
         Status::Reviewing => 2,
         Status::Pr => 3,
@@ -422,8 +433,8 @@ fn font_of(f: &Fly, font: Font) -> HFONT {
     f.fonts.iter().find(|(k, _)| *k == font).map(|(_, h)| *h).unwrap_or(std::ptr::null_mut())
 }
 
-fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> RECT {
-    RECT { left: x0.round() as i32, top: y0.round() as i32, right: x1.round() as i32, bottom: y1.round() as i32 }
+fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Rf {
+    Rf(x0, y0, x1, y1)
 }
 
 /// Everything to draw, in DIP; the hit areas; and the full content height (unscrolled).
@@ -438,13 +449,13 @@ fn layout(f: &mut Fly, t: &Theme) -> (Vec<Op>, Vec<Hit>, f32) {
     };
 
     // header
-    let mut y = 14.0;
-    txt(&mut ops, PAD, y, right, y + 22.0, "WorkTreeDev", Font::Title, t.text, DT_LEFT);
+    let mut y = 8.0;
+    txt(&mut ops, PAD, y, right, y + 20.0, "WorkTreeDev", Font::Title, t.text, DT_LEFT);
     let (state, sc) = if d.view.running { ("Running", Rgb(0x6c, 0xcb, 0x5f)) } else { ("Stopped", Rgb(0x8a, 0x8a, 0x8a)) };
     let sw = text_width(f, Font::Small, state);
-    txt(&mut ops, right - sw, y, right, y + 22.0, state, Font::Small, t.muted, DT_RIGHT);
-    ops.push(Op::Round { x0: right - sw - 14.0, y0: y + 7.0, x1: right - sw - 6.0, y1: y + 15.0, r: 4.0, c: sc, clip: false });
-    y += 22.0;
+    txt(&mut ops, right - sw, y, right, y + 20.0, state, Font::Small, t.muted, DT_RIGHT);
+    ops.push(Op::Round { x0: right - sw - 11.0, y0: y + 7.0, x1: right - sw - 5.0, y1: y + 13.0, r: 3.0, c: sc, clip: false });
+    y += 20.0;
     let summary = if !d.view.running {
         "The daemon is stopped".to_string()
     } else {
@@ -454,8 +465,8 @@ fn layout(f: &mut Fly, t: &Theme) -> (Vec<Op>, Vec<Hit>, f32) {
         }
         s
     };
-    txt(&mut ops, PAD, y, right, y + 18.0, &summary, Font::Small, t.muted, DT_LEFT);
-    y += 18.0 + 12.0;
+    txt(&mut ops, PAD, y, right, y + 16.0, &summary, Font::Small, t.muted, DT_LEFT);
+    y += 16.0 + 8.0;
 
     // daemon buttons: icon glyph + label
     let mut x = PAD;
@@ -468,96 +479,96 @@ fn layout(f: &mut Fly, t: &Theme) -> (Vec<Op>, Vec<Hit>, f32) {
     }
     buttons.push((Act::VsCode, "\u{E8A7}", "Open VS Code"));
     for (act, icon, label) in buttons {
-        let w = 12.0 + 14.0 + 6.0 + text_width(f, Font::Small, label) + 12.0;
-        let r = rect(x, y, x + w, y + 32.0);
-        ops.push(Op::Round { x0: x, y0: y, x1: x + w, y1: y + 32.0, r: 4.0, c: if hov(&act) { t.button_hover } else { t.button }, clip: false });
-        txt(&mut ops, x + 12.0, y, x + 26.0, y + 32.0, icon, Font::Icon, t.text, DT_CENTER);
-        txt(&mut ops, x + 32.0, y, x + w, y + 32.0, label, Font::Small, t.text, DT_LEFT);
-        hits.push(Hit { r, act, in_list: false });
-        x += w + 8.0;
+        let w = 8.0 + 12.0 + 6.0 + text_width(f, Font::Body, label) + 10.0;
+        ops.push(Op::Round { x0: x, y0: y, x1: x + w, y1: y + BTN_H, r: 4.0, c: if hov(&act) { t.button_hover } else { t.button }, clip: false });
+        txt(&mut ops, x + 8.0, y, x + 20.0, y + BTN_H, icon, Font::Icon, t.text, DT_CENTER);
+        txt(&mut ops, x + 26.0, y, x + w, y + BTN_H, label, Font::Body, t.text, DT_LEFT);
+        hits.push(Hit { r: rect(x, y, x + w, y + BTN_H), act, in_list: false });
+        x += w + 4.0;
     }
-    y += 32.0 + 14.0;
+    y += BTN_H + 8.0;
 
     let divider = |ops: &mut Vec<Op>, y: f32| ops.push(Op::Round { x0: 0.0, y0: y, x1: WIDTH, y1: y + 1.0, r: 0.0, c: t.divider, clip: false });
 
     // usage
     if !d.accounts.is_empty() {
         divider(&mut ops, y);
-        y += 1.0 + 10.0;
+        y += 1.0 + 4.0;
         for a in &d.accounts {
             let (provider, name) = match a.name.strip_prefix("codex:") {
                 Some(n) => ("Codex", n.to_string()),
                 None => (if a.provider == "codex" { "Codex" } else { "Claude" }, a.name.clone()),
             };
             let label = format!("{provider} · {name}");
-            let lw = text_width(f, Font::Small, &label);
-            txt(&mut ops, PAD, y, right, y + 18.0, &label, Font::Small, t.text, DT_LEFT);
-            txt(&mut ops, PAD + lw + 8.0, y, right, y + 18.0, &a.email, Font::Small, t.muted, DT_LEFT | DT_END_ELLIPSIS);
-            y += 20.0;
-            let half = (WIDTH - 2.0 * PAD - 16.0) / 2.0;
+            let lw = text_width(f, Font::Body, &label);
+            txt(&mut ops, PAD, y, right, y + 16.0, &label, Font::Body, t.text, DT_LEFT);
+            txt(&mut ops, PAD + lw + 6.0, y, right, y + 16.0, &a.email, Font::Small, t.muted, DT_LEFT | DT_END_ELLIPSIS);
+            y += 16.0;
+            let half = (WIDTH - 2.0 * PAD - 12.0) / 2.0;
             for (i, (tag, lim)) in [("5h", &a.five_hour), ("7d", &a.seven_day)].into_iter().enumerate() {
-                let x0 = PAD + i as f32 * (half + 16.0);
+                let x0 = PAD + i as f32 * (half + 12.0);
                 let used = lim.as_ref().and_then(|l| l.used);
                 let pct = used.map(|u| format!("{:.0}%", u)).unwrap_or_else(|| "--".into());
-                txt(&mut ops, x0, y, x0 + 20.0, y + 14.0, tag, Font::Small, t.muted, DT_LEFT);
-                let (bx0, bx1) = (x0 + 22.0, x0 + half - 38.0);
-                ops.push(Op::Round { x0: bx0, y0: y + 4.0, x1: bx1, y1: y + 10.0, r: 3.0, c: t.track, clip: false });
+                txt(&mut ops, x0, y, x0 + 16.0, y + 14.0, tag, Font::Small, t.muted, DT_LEFT);
+                let (bx0, bx1) = (x0 + 18.0, x0 + half - 32.0);
+                let (by0, by1) = (y + 7.0 - BAR_H / 2.0, y + 7.0 + BAR_H / 2.0);
+                ops.push(Op::Round { x0: bx0, y0: by0, x1: bx1, y1: by1, r: BAR_H / 2.0, c: t.track, clip: false });
                 if let Some(u) = used {
                     let c = if u >= 90.0 { Rgb(0xe8, 0x4a, 0x4a) } else if u >= 70.0 { Rgb(0xff, 0xb9, 0x00) } else { t.accent };
                     let fill = bx0 + (bx1 - bx0) * (u.clamp(0.0, 100.0) as f32 / 100.0);
                     if fill > bx0 + 1.0 {
-                        ops.push(Op::Round { x0: bx0, y0: y + 4.0, x1: fill.max(bx0 + 6.0), y1: y + 10.0, r: 3.0, c, clip: false });
+                        ops.push(Op::Round { x0: bx0, y0: by0, x1: fill.max(bx0 + BAR_H), y1: by1, r: BAR_H / 2.0, c, clip: false });
                     }
                 }
                 txt(&mut ops, bx1 + 4.0, y, x0 + half, y + 14.0, &pct, Font::Small, t.muted, DT_RIGHT);
             }
-            y += 14.0 + 12.0;
+            y += 14.0 + 6.0;
         }
         y -= 2.0;
     }
 
     // sessions
     divider(&mut ops, y);
-    y += 1.0 + 6.0;
+    y += 1.0 + 2.0;
     let list_top = y;
-    let footer_h = 1.0 + 10.0 + 32.0 + 12.0;
+    let footer_h = 1.0 + 8.0 + FOOT_BTN_H + 8.0;
     let mut ly = list_top - f.scroll;
     if d.rows.is_empty() {
         let msg = if d.view.running { "No worktrees yet" } else { "Start the daemon to see your sessions" };
-        ops.push(Op::Text { r: rect(PAD, ly, right, ly + 44.0), s: msg.into(), font: Font::Body, c: t.muted, flags: DT_SINGLELINE | DT_VCENTER | DT_CENTER, clip: true });
-        ly += 44.0;
+        ops.push(Op::Text { r: rect(PAD, ly, right, ly + 36.0), s: msg.into(), font: Font::Body, c: t.muted, flags: DT_SINGLELINE | DT_VCENTER | DT_CENTER, clip: true });
+        ly += 36.0;
     }
     for (group, rows) in &d.rows {
-        ops.push(Op::Text { r: rect(PAD, ly, right, ly + GROUP_H), s: group.to_uppercase(), font: Font::SmallBold, c: t.muted,
+        ops.push(Op::Text { r: rect(PAD, ly, right, ly + GROUP_H - 2.0), s: group.to_uppercase(), font: Font::SmallBold, c: t.muted,
             flags: DT_SINGLELINE | DT_BOTTOM | DT_NOPREFIX, clip: true });
-        ly += GROUP_H + 2.0;
+        ly += GROUP_H;
         for w in rows {
             let act = Act::Row(w.id.clone());
             if hov(&act) {
-                ops.push(Op::Round { x0: 8.0, y0: ly, x1: WIDTH - 8.0, y1: ly + ROW_H, r: 4.0, c: t.hover, clip: true });
+                ops.push(Op::Round { x0: 4.0, y0: ly, x1: WIDTH - 4.0, y1: ly + ROW_H, r: 4.0, c: t.hover, clip: true });
             }
-            let x = PAD + if w.parent.is_some() { 14.0 } else { 0.0 };
-            let (cx, cy) = (x + 4.0, ly + ROW_H / 2.0);
+            let x = PAD + if w.parent.is_some() { 12.0 } else { 0.0 };
+            let (cx, cy) = (x + 3.0, ly + ROW_H / 2.0);
             let c = status_color(w.status);
             if w.live || !matches!(w.status, Status::None | Status::Stopped) {
-                ops.push(Op::Round { x0: cx - 4.0, y0: cy - 4.0, x1: cx + 4.0, y1: cy + 4.0, r: 4.0, c, clip: true });
+                ops.push(Op::Round { x0: cx - 3.0, y0: cy - 3.0, x1: cx + 3.0, y1: cy + 3.0, r: 3.0, c, clip: true });
             } else {
-                ops.push(Op::Ring { cx, cy, r: 3.5, t: 1.3, c, clip: true });
+                ops.push(Op::Ring { cx, cy, r: 2.6, t: 1.1, c, clip: true });
             }
             let word = status_word(w);
-            let ww = text_width(f, Font::Small, word);
+            let ww = text_width(f, Font::Small, &word);
             let name = if w.kind == WorktreeKind::Delegate { "delegator".to_string() } else { w.name.clone() };
             let nc = if w.live { t.text } else { t.muted };
-            ops.push(Op::Text { r: rect(x + 16.0, ly, right - ww - 12.0, ly + ROW_H), s: name, font: Font::Body, c: nc,
+            ops.push(Op::Text { r: rect(x + 12.0, ly, right - ww - 10.0, ly + ROW_H), s: name, font: Font::Body, c: nc,
                 flags: DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX, clip: true });
-            ops.push(Op::Text { r: rect(right - ww - 4.0, ly, right, ly + ROW_H), s: word.into(), font: Font::Small,
-                c: if w.status == Status::Input { c } else { t.muted }, flags: DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX, clip: true });
-            hits.push(Hit { r: rect(8.0, ly, WIDTH - 8.0, ly + ROW_H), act, in_list: true });
+            ops.push(Op::Text { r: rect(right - ww - 4.0, ly, right, ly + ROW_H), s: word, font: Font::Small,
+                c: if matches!(w.status, Status::Input | Status::Limited) { c } else { t.muted }, flags: DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX, clip: true });
+            hits.push(Hit { r: rect(4.0, ly, WIDTH - 4.0, ly + ROW_H), act, in_list: true });
             ly += ROW_H;
         }
-        ly += 4.0;
+        ly += 2.0;
     }
-    let list_h = ly + f.scroll - list_top + 4.0;
+    let list_h = ly + f.scroll - list_top + 2.0;
     let content = list_top + list_h + footer_h;
     // the visible list band, given the window height place() settled on
     let height = if f.height > 0.0 { f.height } else { content };
@@ -568,29 +579,29 @@ fn layout(f: &mut Fly, t: &Theme) -> (Vec<Op>, Vec<Hit>, f32) {
     // footer, pinned to the bottom
     let mut y = list_bottom;
     divider(&mut ops, y);
-    y += 1.0 + 10.0;
+    y += 1.0 + 8.0;
     let act = Act::New;
-    let w = WIDTH - 2.0 * PAD - 40.0;
+    let w = WIDTH - 2.0 * PAD - FOOT_BTN_H - 6.0;
     let mut accent = t.accent;
     if hov(&act) {
         accent = Rgb(accent.0.saturating_add(18), accent.1.saturating_add(18), accent.2.saturating_add(18));
     }
     let enabled = d.view.running;
-    ops.push(Op::Round { x0: PAD, y0: y, x1: PAD + w, y1: y + 32.0, r: 4.0, c: if enabled { accent } else { t.button }, clip: false });
+    ops.push(Op::Round { x0: PAD, y0: y, x1: PAD + w, y1: y + FOOT_BTN_H, r: 4.0, c: if enabled { accent } else { t.button }, clip: false });
     let fg = if enabled { t.on_accent } else { t.muted };
     let label = "New session";
-    let lw = 14.0 + 8.0 + text_width(f, Font::Body, label);
+    let lw = 12.0 + 6.0 + text_width(f, Font::Body, label);
     let lx = PAD + (w - lw) / 2.0;
-    txt(&mut ops, lx, y, lx + 14.0, y + 32.0, "\u{E710}", Font::Icon, fg, DT_CENTER);
-    txt(&mut ops, lx + 22.0, y, PAD + w, y + 32.0, label, Font::Body, fg, DT_LEFT);
+    txt(&mut ops, lx, y, lx + 12.0, y + FOOT_BTN_H, "\u{E710}", Font::Icon, fg, DT_CENTER);
+    txt(&mut ops, lx + 18.0, y, PAD + w, y + FOOT_BTN_H, label, Font::Body, fg, DT_LEFT);
     if enabled {
-        hits.push(Hit { r: rect(PAD, y, PAD + w, y + 32.0), act, in_list: false });
+        hits.push(Hit { r: rect(PAD, y, PAD + w, y + FOOT_BTN_H), act, in_list: false });
     }
     let act = Act::Gear;
-    let gx = right - 32.0;
-    ops.push(Op::Round { x0: gx, y0: y, x1: right, y1: y + 32.0, r: 4.0, c: if hov(&act) { t.button_hover } else { t.button }, clip: false });
-    txt(&mut ops, gx, y, right, y + 32.0, "\u{E713}", Font::Icon, t.text, DT_CENTER);
-    hits.push(Hit { r: rect(gx, y, right, y + 32.0), act, in_list: false });
+    let gx = right - FOOT_BTN_H;
+    ops.push(Op::Round { x0: gx, y0: y, x1: right, y1: y + FOOT_BTN_H, r: 4.0, c: if hov(&act) { t.button_hover } else { t.button }, clip: false });
+    txt(&mut ops, gx, y, right, y + FOOT_BTN_H, "\u{E713}", Font::Icon, t.text, DT_CENTER);
+    hits.push(Hit { r: rect(gx, y, right, y + FOOT_BTN_H), act, in_list: false });
 
     (ops, hits, content)
 }
@@ -680,7 +691,7 @@ unsafe fn paint(hwnd: HWND) {
         SetBkMode(mem, TRANSPARENT as i32);
         for op in &ops {
             if let Op::Text { r, s: ref text, font, c, flags, clip: clipped } = *op {
-                let mut rr = RECT { left: (r.left as f32 * s) as i32, top: (r.top as f32 * s) as i32, right: (r.right as f32 * s) as i32, bottom: (r.bottom as f32 * s) as i32 };
+                let mut rr = RECT { left: (r.0 * s).round() as i32, top: (r.1 * s).round() as i32, right: (r.2 * s).round() as i32, bottom: (r.3 * s).round() as i32 };
                 if clipped && (rr.bottom <= clip.0 || rr.top >= clip.1) {
                     continue;
                 }
@@ -710,7 +721,7 @@ fn hit_at(f: &Fly, x: i32, y: i32) -> Option<Act> {
     f.hits
         .iter()
         .filter(|h| !h.in_list || (y >= f.list.0 && y < f.list.1))
-        .find(|h| x >= h.r.left as f32 && x < h.r.right as f32 && y >= h.r.top as f32 && y < h.r.bottom as f32)
+        .find(|h| x >= h.r.0 && x < h.r.2 && y >= h.r.1 && y < h.r.3)
         .map(|h| h.act.clone())
 }
 
