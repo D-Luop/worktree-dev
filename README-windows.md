@@ -9,7 +9,7 @@ plus CLI. It hosts every agent session and pushes fleet state to the VS Code ext
 winget install Git.Git                  # Git + Git Bash (Claude Code needs it; so does the installer)
 winget install Rustlang.Rustup          # Rust toolchain, to build wtd.exe
 winget install Microsoft.VisualStudio.2022.BuildTools   # pick "Desktop development with C++"
-winget install jqlang.jq                # the installer merges JSON config with jq
+winget install jqlang.jq                # the claude-pace statusline reads JSON with jq
 winget install Python.Python.3.12       # builds the VS Code extension's .vsix at install time
 winget install OpenJS.NodeJS.LTS        # checks the extension's webview scripts before packaging
 winget install GitHub.cli               # optional: GitHub issues / Projects in New Session
@@ -35,9 +35,10 @@ git clone https://github.com/D-Luop/worktree-dev /d/dev/worktree-dev   # this fo
 /d/dev/worktree-dev/.wtd/scripts/install.sh
 ```
 
-The installer is idempotent. Re-run it any time; it doesn't stop a running daemon. It:
+`install.sh` builds `wtd.exe` with cargo, then runs `wtd setup`, which does the rest.
+It is idempotent. Re-run it any time; it doesn't stop a running daemon. It:
 
-- builds `wtd.exe` and `wtd-tray.exe` into `.wtd/bin/`
+- copies `wtd.exe` and `wtd-tray.exe` into `.wtd/bin/`
 - writes `~/.local/bin` shims (`agent`, `archive`, `review`, …) that exec `wtd.exe`, and puts
   `~/.local/bin` on PATH in `~/.bashrc`
 - points Claude's status hooks at `wtd.exe hook <event>`, merged into `~/.claude/settings.json`
@@ -46,6 +47,11 @@ The installer is idempotent. Re-run it any time; it doesn't stop a running daemo
 - builds the VS Code extension from source (`build-vsix.py`) and installs it, plus the control-window settings (`.vscode/settings.json` in the
   dev root)
 - starts the tray icon and sets it to start at logon
+
+Options, passed through `install.sh` or to `wtd setup` directly: `--repair` re-applies every step
+(reinstalls the extension, re-registers MCP, restores a broken `~/.claude/settings.json` from its
+`.bak`); `--uninstall` reverses the install and asks before deleting the dev root (`--keep-data`
+keeps it, `--yes` deletes it without asking); `--skip <steps>` leaves steps out (`wtd setup --help`).
 
 **The daemon does not start at logon.** Start it yourself (step 3).
 

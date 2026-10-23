@@ -403,20 +403,21 @@ impl Setup {
 
     fn deps(&mut self) {
         let mut missing = vec![];
-        for (name, winget, required) in [
-            ("git", "Git.Git", true),
-            ("code", "Microsoft.VisualStudioCode", true),
-            ("claude", "Anthropic.ClaudeCode", true),
-            ("node", "OpenJS.NodeJS.LTS", false),
-            ("delta", "dandavison.delta", false),
+        for (name, hint, required) in [
+            ("git", "winget install Git.Git", true),
+            ("code", "winget install Microsoft.VisualStudioCode", true),
+            ("claude", "irm https://claude.ai/install.ps1 | iex   (PowerShell)", true),
+            ("jq", "winget install jqlang.jq   (the statusline uses it)", false),
+            ("node", "winget install OpenJS.NodeJS.LTS", false),
+            ("delta", "winget install dandavison.delta   (nicer diffs)", false),
         ] {
             match (find_on_path(name), required) {
                 (Some(_), _) => println!("    ok: {name}"),
                 (None, true) => {
-                    println!("    MISSING: {name}    winget install {winget}");
+                    println!("    MISSING: {name}    {hint}");
                     missing.push(name);
                 }
-                (None, false) => println!("    optional: {name}    winget install {winget}"),
+                (None, false) => println!("    optional: {name}    {hint}"),
             }
         }
         if !missing.is_empty() {
