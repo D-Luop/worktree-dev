@@ -118,6 +118,8 @@ pub mod method {
     pub const GROUP_REORDER: &str = "group.reorder";
     /// `{worktree, group: id|null}` → `{}`
     pub const GROUP_ASSIGN: &str = "group.assign";
+    /// `{worktree, parent: delegate-id|null}` → `{}`: nest a worktree under the delegator that started it
+    pub const WORKTREE_PARENT: &str = "worktree.parent";
 
     // --- agent messaging (Phase 2) ---
     /// `{from_dir, to, body}` → `{id, state}`. Always created `pending`: only the user releases it.

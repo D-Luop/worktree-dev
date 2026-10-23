@@ -13,9 +13,8 @@ use anyhow::{bail, Result};
 use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Registry::{RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW, HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ};
 use windows_sys::Win32::System::Threading::CreateMutexW;
-use windows_sys::Win32::UI::Shell::{Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW};
+use windows_sys::Win32::UI::Shell::{Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use wtd_core::model::{Account, Worktree};
 use wtd_core::protocol::{method, Push, ServerLine};
@@ -25,8 +24,18 @@ use crate::{client::Client, paths, win};
 
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_STATE: u32 = WM_APP + 2;
+const WM_PIN_HINT: u32 = WM_APP + 3;
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "WorkTreeDev";
+const WTD_KEY: &str = r"Software\WorkTreeDev";
+/// volatile: Windows drops it at sign-out, so what it records lasts for this sign-in only
+const SESSION_KEY: &str = r"Software\WorkTreeDev\Session";
+const LOGON_OFF: &str = "TrayLogonOff";
+const PROMOTED: &str = "TrayPromoted";
+const HINT_SHOWN: &str = "TrayPinHintShown";
+/// Windows 11's per-icon taskbar settings, one subkey per (exe path, uID), written by Explorer
+const NOTIFY_SETTINGS: &str = r"Control Panel\NotifyIconSettings";
+const CLASS: &str = "wtd-tray";
 
 #[derive(Clone, Copy, PartialEq, Default)]
 pub(crate) struct View {
@@ -58,7 +67,7 @@ pub(crate) fn hwnd() -> HWND {
     TRAY.lock().unwrap().as_ref().map(|t| t.hwnd).unwrap_or(std::ptr::null_mut())
 }
 
-/// `wtd tray [--spawn | --open | --quit | --logon on|off]`
+/// `wtd tray [--spawn | --ensure | --open | --quit | --logon on|off|refresh]`
 pub fn main(args: &[String]) -> Result<i32> {
     match args.first().map(String::as_str) {
         // start detached (from install / a terminal) so it doesn't die with the caller
@@ -68,9 +77,13 @@ pub fn main(args: &[String]) -> Result<i32> {
             win::spawn_detached(&mut cmd)?;
             return Ok(0);
         }
+        Some("--ensure") => {
+            ensure();
+            return Ok(0);
+        }
         // close a running tray (e.g. before replacing wtd.exe)
         Some("--quit") => unsafe {
-            let hwnd = FindWindowW(win::wide("wtd-tray").as_ptr(), std::ptr::null());
+            let hwnd = FindWindowW(win::wide(CLASS).as_ptr(), std::ptr::null());
             if !hwnd.is_null() {
                 PostMessageW(hwnd, WM_CLOSE, 0, 0);
             }
@@ -78,17 +91,21 @@ pub fn main(args: &[String]) -> Result<i32> {
         },
         // open the running tray's flyout, as a click on its icon would
         Some("--open") => unsafe {
-            let hwnd = FindWindowW(win::wide("wtd-tray").as_ptr(), std::ptr::null());
+            let hwnd = FindWindowW(win::wide(CLASS).as_ptr(), std::ptr::null());
             if !hwnd.is_null() {
                 PostMessageW(hwnd, WM_TRAY, 0, WM_LBUTTONUP as isize);
             }
             return Ok(0);
         },
         Some("--logon") => {
-            set_start_at_logon(args.get(1).map(String::as_str) != Some("off"));
+            match args.get(1).map(String::as_str) {
+                Some("off") => set_start_at_logon(false),
+                Some("refresh") => refresh_start_at_logon(),
+                _ => set_start_at_logon(true),
+            }
             return Ok(0);
         }
-        Some(a) => bail!("unknown option '{a}' (wtd tray [--spawn | --open | --quit | --logon on|off])"),
+        Some(a) => bail!("unknown option '{a}' (wtd tray [--spawn | --ensure | --open | --quit | --logon on|off|refresh])"),
         None => {}
     }
     unsafe {
@@ -98,8 +115,9 @@ pub fn main(args: &[String]) -> Result<i32> {
         if GetLastError() == ERROR_ALREADY_EXISTS {
             return Ok(0);
         }
+        set_session_state(SessionState::Running);
         let hinst = GetModuleHandleW(std::ptr::null());
-        let class = win::wide("wtd-tray");
+        let class = win::wide(CLASS);
         let wc = WNDCLASSW {
             lpfnWndProc: Some(wndproc),
             hInstance: hinst,
@@ -121,12 +139,14 @@ pub fn main(args: &[String]) -> Result<i32> {
 
         let hwnd_val = hwnd as isize;
         std::thread::spawn(move || watch_daemon(hwnd_val));
+        std::thread::spawn(move || pin_to_taskbar(hwnd_val));
 
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        set_session_state(SessionState::Quit);
         notify_icon(NIM_DELETE);
     }
     Ok(0)
@@ -208,6 +228,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             crate::flyout::refresh();
             0
         }
+        WM_PIN_HINT => {
+            show_pin_hint();
+            0
+        }
+        WM_CLOSE => {
+            // record the quit before the window goes, so the watchdog never sees "running" with no window
+            set_session_state(SessionState::Quit);
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
         WM_DESTROY => {
             PostQuitMessage(0);
             0
@@ -251,6 +280,71 @@ unsafe fn notify_icon(op: u32) {
     let tip: Vec<u16> = tooltip(t.view).encode_utf16().take(nid.szTip.len() - 1).collect();
     nid.szTip[..tip.len()].copy_from_slice(&tip);
     Shell_NotifyIconW(op, &nid);
+}
+
+/// New icons land in the ^ overflow. Once, on first run, show ours on the taskbar instead
+/// (`IsPromoted = 1`) unless the user already chose. Explorer writes the entry shortly after
+/// `NIM_ADD`; if it never appears (no such setting on this Windows), hint how to pin it by hand.
+fn pin_to_taskbar(hwnd: isize) {
+    if win::reg::exists(WTD_KEY, PROMOTED) {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else { return };
+    for _ in 0..15 {
+        std::thread::sleep(Duration::from_secs(1));
+        if let Some(key) = notify_settings_entry(&exe.to_string_lossy()) {
+            if should_promote(win::reg::get_dword(&key, "IsPromoted")) {
+                win::reg::set_dword(&key, "IsPromoted", 1);
+            }
+            win::reg::set_dword(WTD_KEY, PROMOTED, 1);
+            return;
+        }
+    }
+    if !win::reg::exists(WTD_KEY, HINT_SHOWN) {
+        unsafe { PostMessageW(hwnd as HWND, WM_PIN_HINT, 0, 0) };
+    }
+}
+
+/// Absent = the user hasn't chosen; 0 = they moved it to the overflow, which we leave alone.
+fn should_promote(is_promoted: Option<u32>) -> bool {
+    is_promoted.is_none()
+}
+
+fn notify_settings_entry(exe: &str) -> Option<String> {
+    win::reg::subkeys(NOTIFY_SETTINGS).into_iter().map(|k| format!(r"{NOTIFY_SETTINGS}\{k}")).find(|key| {
+        win::reg::get_dword(key, "UID") == Some(1) && win::reg::get_sz(key, "ExecutablePath").is_some_and(|p| same_exe(&p, exe))
+    })
+}
+
+/// Explorer stores paths under known folders as `{folder-guid}\rest`: match those by the rest.
+fn same_exe(stored: &str, exe: &str) -> bool {
+    let (stored, exe) = (stored.to_lowercase(), exe.to_lowercase());
+    match stored.strip_prefix('{').and_then(|s| s.split_once(r"}\")) {
+        Some((_, rest)) => exe.ends_with(&format!(r"\{rest}")),
+        None => stored == exe,
+    }
+}
+
+fn show_pin_hint() {
+    let t = TRAY.lock().unwrap();
+    let Some(t) = t.as_ref() else { return };
+    let fill = |dst: &mut [u16], s: &str| {
+        let w: Vec<u16> = s.encode_utf16().take(dst.len() - 1).collect();
+        dst[..w.len()].copy_from_slice(&w);
+    };
+    unsafe {
+        let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
+        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+        nid.hWnd = t.hwnd;
+        nid.uID = 1;
+        nid.uFlags = NIF_INFO;
+        nid.dwInfoFlags = NIIF_INFO;
+        fill(&mut nid.szInfoTitle, "Keep WorkTreeDev on the taskbar");
+        fill(&mut nid.szInfo, "Drag this icon out of the ^ overflow onto the taskbar, or turn it on under Settings → Personalization → Taskbar → Other system tray icons.");
+        if Shell_NotifyIconW(NIM_MODIFY, &nid) != 0 {
+            win::reg::set_dword(WTD_KEY, HINT_SHOWN, 1);
+        }
+    }
 }
 
 /// Stop one worktree's session (the daemon kills its process tree).
@@ -318,28 +412,79 @@ fn tray_command() -> Command {
     }
 }
 
-pub fn start_at_logon() -> bool {
-    unsafe {
-        let mut size: u32 = 0;
-        RegGetValueW(HKEY_CURRENT_USER, win::wide(RUN_KEY).as_ptr(), win::wide(RUN_VALUE).as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), std::ptr::null_mut(), &mut size) == 0
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum SessionState {
+    Running,
+    /// the user quit it (⚙ Quit / `wtd tray --quit`): leave it gone until the next sign-in
+    Quit,
+}
+
+fn session_state() -> Option<SessionState> {
+    match win::reg::get_sz(SESSION_KEY, "Tray")?.as_str() {
+        "running" => Some(SessionState::Running),
+        "quit" => Some(SessionState::Quit),
+        _ => None,
     }
 }
 
-pub fn set_start_at_logon(on: bool) {
-    unsafe {
-        if on {
-            // the windowless wtd-tray.exe, so signing in never opens a console window for the tray
-            let cmdline = match paths::tray_exe() {
-                Some(t) => format!("\"{}\"", t.display()),
-                None => format!("\"{}\" tray", paths::wtd_exe().display()),
-            };
-            let cmdline = win::wide(&cmdline);
-            RegSetKeyValueW(HKEY_CURRENT_USER, win::wide(RUN_KEY).as_ptr(), win::wide(RUN_VALUE).as_ptr(), REG_SZ,
-                cmdline.as_ptr() as *const _, (cmdline.len() * 2) as u32);
-        } else {
-            RegDeleteKeyValueW(HKEY_CURRENT_USER, win::wide(RUN_KEY).as_ptr(), win::wide(RUN_VALUE).as_ptr());
-        }
+fn set_session_state(s: SessionState) {
+    if win::reg::create(WTD_KEY, false) && win::reg::create(SESSION_KEY, true) {
+        win::reg::set_sz(SESSION_KEY, "Tray", if s == SessionState::Running { "running" } else { "quit" });
     }
+}
+
+fn tray_alive() -> bool {
+    unsafe { !FindWindowW(win::wide(CLASS).as_ptr(), std::ptr::null()).is_null() }
+}
+
+/// No state yet this sign-in means it never started (e.g. the Run entry was disabled in Task
+/// Manager): start it if it's meant to run at logon. "running" with no window means it died.
+fn should_relaunch(alive: bool, state: Option<SessionState>, logon: bool) -> bool {
+    !alive && match state {
+        Some(SessionState::Running) => true,
+        Some(SessionState::Quit) => false,
+        None => logon,
+    }
+}
+
+/// Relaunch the tray if it should be running and isn't (the daemon's watchdog calls this).
+pub fn ensure() {
+    if should_relaunch(tray_alive(), session_state(), start_at_logon()) {
+        let mut cmd = tray_command();
+        cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        let _ = win::spawn_detached(&mut cmd);
+    }
+}
+
+pub fn start_at_logon() -> bool {
+    win::reg::exists(RUN_KEY, RUN_VALUE)
+}
+
+/// The user's choice (⚙ menu, settings, `--logon on|off`). Off is remembered so installs don't undo it.
+pub fn set_start_at_logon(on: bool) {
+    if on {
+        win::reg::delete(WTD_KEY, LOGON_OFF);
+        write_run_entry();
+    } else {
+        win::reg::set_dword(WTD_KEY, LOGON_OFF, 1);
+        win::reg::delete(RUN_KEY, RUN_VALUE);
+    }
+}
+
+/// On install/update: start at logon by default, pointing at this install's exe, unless the user turned it off.
+pub fn refresh_start_at_logon() {
+    if !win::reg::exists(WTD_KEY, LOGON_OFF) {
+        write_run_entry();
+    }
+}
+
+fn write_run_entry() {
+    // the windowless wtd-tray.exe, so signing in never opens a console window for the tray
+    let cmdline = match paths::tray_exe() {
+        Some(t) => format!("\"{}\"", t.display()),
+        None => format!("\"{}\" tray", paths::wtd_exe().display()),
+    };
+    win::reg::set_sz(RUN_KEY, RUN_VALUE, &cmdline);
 }
 
 // --- icon drawing: a 32×32 ring glyph, coloured by state -------------------------------------------
@@ -404,4 +549,35 @@ fn argb(a: f32, r: u8, g: u8, b: u8) -> u32 {
     let a8 = (a * 255.0).round() as u32;
     let pm = |c: u8| ((c as f32) * a).round() as u32;
     (a8 << 24) | (pm(r) << 16) | (pm(g) << 8) | pm(b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{same_exe, should_promote, should_relaunch, SessionState::*};
+
+    #[test]
+    fn promotes_only_when_the_user_has_not_chosen() {
+        assert!(should_promote(None));
+        assert!(!should_promote(Some(0)), "the user hid it");
+        assert!(!should_promote(Some(1)));
+    }
+
+    #[test]
+    fn matches_explorer_exe_paths() {
+        let exe = r"D:\dev\worktree-dev\.wtd\bin\wtd-tray.exe";
+        assert!(same_exe(r"d:\dev\worktree-dev\.wtd\bin\WTD-TRAY.exe", exe));
+        assert!(!same_exe(r"D:\dev\worktree-dev\.wtd\bin\wtd.exe", exe));
+        let pf = r"C:\Program Files\WorkTreeDev\wtd-tray.exe";
+        assert!(same_exe(r"{6D809377-6AF0-444B-8957-A3773F02200E}\WorkTreeDev\wtd-tray.exe", pf));
+        assert!(!same_exe(r"{6D809377-6AF0-444B-8957-A3773F02200E}\Other\wtd-tray.exe", pf));
+    }
+
+    #[test]
+    fn relaunches_only_a_tray_that_died_or_never_started() {
+        assert!(should_relaunch(false, Some(Running), false), "crashed or killed");
+        assert!(!should_relaunch(false, Some(Quit), true), "the user quit it this sign-in");
+        assert!(should_relaunch(false, None, true), "not started yet this sign-in, logon on");
+        assert!(!should_relaunch(false, None, false), "never started, logon off");
+        assert!(!should_relaunch(true, Some(Running), true), "already running");
+    }
 }

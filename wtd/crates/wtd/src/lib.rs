@@ -75,6 +75,8 @@ Fleet & daemon
                                      branch commits / a diff as JSON (files → hunks → lines)
   wtd stop <slug/name>               end a worktree's live session (kills its process tree)
   wtd refresh [slug/name]            rescan worktrees and re-check git now
+  wtd worktree parent <slug/name> <delegate/slug|none>
+                                     nest a worktree under its delegator in the roster
   wtd hook <event>                   Claude Code hook handler (reads hook JSON on stdin)
   wtd mcp                            stdio MCP server: read-only fleet tools for agents
   wtd tray [--spawn|--quit|--logon on|off]
@@ -153,6 +155,15 @@ fn dispatch(cmd: &str, rest: &[String]) -> Result<i32> {
             Ok(0)
         }
         "group" => group(rest),
+        "worktree" => match rest {
+            [sub, wt, p] if sub == "parent" => {
+                let parent = if p == "none" { None } else { Some(p.as_str()) };
+                client::Client::connect_required()?.request(method::WORKTREE_PARENT, json!({ "worktree": wt, "parent": parent }))?;
+                println!("{}", match parent { Some(p) => format!("nested {wt} under {p}"), None => format!("{wt} is no longer nested") });
+                Ok(0)
+            }
+            _ => anyhow::bail!("usage: wtd worktree parent <slug/name> <delegate/slug|none>"),
+        },
         "issues" => issues::main(rest),
         "help" | "--help" | "-h" => {
             println!("{USAGE}");

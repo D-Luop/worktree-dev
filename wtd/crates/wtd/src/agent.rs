@@ -3,7 +3,7 @@
 //!
 //!   agent <slug> <name> [--from <ref>] [--account <a>|codex:<a>|default] [--issue-file <md>]
 //!                       [--no-claude] [--no-auto | --mode <m>] [--detach] [--prompt <text> | --prompt-file <md>]
-//!                       [ref-token…]
+//!                       [--parent <delegate-id|none>] [ref-token…]
 //!   agent delegate <slug>                        the repo's delegator (docs/research home; spawns worktrees)
 //!   agent ls | agent stop [<slug> <name>] | agent rm <slug> <name> [--branch] [--force] [-y]
 //!   agent done | agent pr | agent wip            (inside a worktree)
@@ -88,7 +88,7 @@ pub fn main(args: &[String]) -> Result<i32> {
         Some("rm") => rm(&dev, &args[1..]),
         Some(_) => launch(&dev, args),
         None => {
-            println!("usage: agent <slug> <name> [--from <ref>] [--account <a>] [--issue-file <md>] [--no-claude] [--detach] [--prompt <text>] [ref…]");
+            println!("usage: agent <slug> <name> [--from <ref>] [--account <a>] [--issue-file <md>] [--no-claude] [--detach] [--prompt <text>] [--parent <delegate-id|none>] [ref…]");
             println!("       agent delegate <slug>   (the repo's delegator: a docs/research folder whose agent starts worktrees)");
             println!("       agent ls | agent stop [<slug> <name>] | agent rm <slug> <name> [--branch] [--force] [-y]");
             println!("       agent done | agent pr | agent wip   (inside a worktree)");
@@ -345,7 +345,7 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
     let (mut from, mut account, mut issue, mut ticket) = (None::<String>, None::<String>, None::<PathBuf>, None::<String>);
     let mut launch_agent = std::env::var_os("AGENT_NO_CLAUDE").is_none();
     let mut pmode = std::env::var("AGENT_PERMISSION_MODE").unwrap_or_else(|_| "auto".into());
-    let (mut detach, mut prompt) = (false, None::<String>);
+    let (mut detach, mut prompt, mut parent) = (false, None::<String>, None::<String>);
     let mut pos: Vec<String> = vec![];
     let mut i = 0;
     while i < args.len() {
@@ -361,6 +361,7 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
             "--no-claude" => { launch_agent = false; i += 1; }
             "--detach" => { detach = true; i += 1; }
             "--prompt" => { prompt = Some(val(i)?); i += 2; }
+            "--parent" => { parent = Some(val(i)?); i += 2; }
             "--prompt-file" => { prompt = Some(std::fs::read_to_string(paths::normalize(&val(i)?))?); i += 2; }
             _ if a.starts_with("--from=") => { from = Some(a[7..].into()); i += 1; }
             _ if a.starts_with("--account=") => { account = Some(a[10..].into()); i += 1; }
@@ -369,6 +370,7 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
     }
     let (Some(slug), Some(name)) = (pos.first().cloned(), pos.get(1).cloned()) else { bail!("usage: agent <slug> <name> [options] [ref…]") };
     let ref_tokens = pos[2..].to_vec();
+    let started_from = delegator_of(dev, std::env::var("WTD_WORKTREE").ok().as_deref(), &std::env::current_dir()?);
     let is_delegate = slug == paths::DELEGATE;
     let repo_less = paths::repo_less(&slug);
     // a delegator's name is the repo it delegates for
@@ -518,6 +520,16 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
         }
     }
     wt::write_state(dev, "session-accounts", &key, &acct.label)?;
+    match parent.as_deref() {
+        Some("none") => record_parent(&id, None),
+        Some(p) => record_parent(&id, Some(p)),
+        None if created && !is_delegate => {
+            if let Some(p) = &started_from {
+                record_parent(&id, Some(p));
+            }
+        }
+        None => {}
+    }
 
     std::env::set_current_dir(&wtp)?;
     if !launch_agent {
@@ -536,6 +548,7 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
         std::env::set_var("CODEX_HOME", h);
     }
     std::env::set_var("WTD_SESSION", &session);
+    std::env::set_var("WTD_WORKTREE", &id);
     // custom tools (.wtd/custom/tools, …/repos/<slug>/tools) on the session's PATH
     let tools = crate::custom::tool_dirs(dev, &slug);
     if !tools.is_empty() {
@@ -581,6 +594,31 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
         return Ok(0);
     }
     crate::attach::host_main(&hargs)
+}
+
+/// The delegator `agent` is being run from. `WTD_WORKTREE` (set on every session `agent` launches,
+/// inherited by its tool calls) wins, since the agent may have `cd`'d elsewhere; without it, the cwd
+/// covers delegator sessions started before the variable existed.
+fn delegator_of(dev: &Path, session_wt: Option<&str>, cwd: &Path) -> Option<String> {
+    let id = match session_wt.filter(|s| !s.is_empty()) {
+        Some(id) => id.to_string(),
+        None => paths::resolve_worktree(dev, cwd)?.id,
+    };
+    paths::is_delegate_id(&id).then_some(id)
+}
+
+/// Best effort: a worktree that can't be nested still opens.
+fn record_parent(id: &str, parent: Option<&str>) {
+    let res = match Client::connect() {
+        Ok(Some(mut c)) => c.request(method::WORKTREE_PARENT, json!({ "worktree": id, "parent": parent })).map(|_| ()),
+        Ok(None) => Err(anyhow::anyhow!("the daemon isn't running")),
+        Err(e) => Err(e),
+    };
+    match (res, parent) {
+        (Ok(()), Some(p)) => println!("nested {id} under {p}"),
+        (Ok(()), None) => println!("{id} is no longer nested"),
+        (Err(e), _) => eprintln!("warning: couldn't record {id}'s delegator ({e:#}); set it later with: wtd worktree parent {id} {}", parent.unwrap_or("none")),
+    }
 }
 
 const WORKER_PROMPT: &str = "Your task is in CLAUDE.md under Context / scope (also .claude/issue.md).     Write your active plan, then start the work.";
@@ -648,6 +686,7 @@ pub fn assistant_main(args: &[String]) -> Result<i32> {
     };
     std::env::set_current_dir(&dev)?;
     std::env::set_var("WTD_SESSION", "assistant");
+    std::env::set_var("WTD_WORKTREE", wtd_core::model::DEV_ID);
     let mut hargs = vec!["--kind".to_string(), "assistant".into(), "--account".into(), account.clone().unwrap_or_else(|| "default".into()), "--".into(),
         "claude".into(), "--permission-mode".into(), pmode, "--append-system-prompt".into(), ASSISTANT_PROMPT.into()];
     hargs.extend(claude_session_args(&dev, "assistant", &dev, &cfg)?);
@@ -664,6 +703,24 @@ mod tests {
         assert_eq!(u.len(), 36);
         assert_eq!(&u[14..15], "4");
         assert_ne!(uuid4(), uuid4());
+    }
+
+    #[test]
+    fn delegator_from_env_then_cwd() {
+        let t = std::env::temp_dir().join(format!("wtd-delegator-{}", std::process::id()));
+        let (del, wk) = (paths::worktree_path(&t, "delegate/luop"), paths::worktree_path(&t, "luop/feat/x"));
+        for d in [&del, &wk] {
+            std::fs::create_dir_all(d.join("docs")).unwrap();
+            std::fs::write(d.join(".git"), "gitdir: x").unwrap();
+        }
+        assert_eq!(delegator_of(&t, Some("delegate/luop"), &wk).as_deref(), Some("delegate/luop"));
+        // the env names a non-delegator session: don't fall back to the cwd
+        assert_eq!(delegator_of(&t, Some("luop/feat/x"), &del.join("docs")), None);
+        assert_eq!(delegator_of(&t, None, &del.join("docs")).as_deref(), Some("delegate/luop"));
+        assert_eq!(delegator_of(&t, Some(""), &del).as_deref(), Some("delegate/luop"));
+        assert_eq!(delegator_of(&t, None, &wk), None);
+        assert_eq!(delegator_of(&t, None, Path::new(r"C:\elsewhere")), None);
+        std::fs::remove_dir_all(&t).ok();
     }
 
     #[test]

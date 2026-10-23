@@ -1,4 +1,5 @@
-//! The daemon's durable state: user-defined groups, group membership, and agent messages.
+//! The daemon's durable state: user-defined groups, group membership, delegator parents, and agent
+//! messages.
 //! Small enough for a JSON file (`.wtd/state/store.json`), written atomically on every change.
 
 use std::collections::BTreeMap;
@@ -17,6 +18,9 @@ pub struct Store {
     /// worktree id → group id
     #[serde(default)]
     pub membership: BTreeMap<String, String>,
+    /// worktree id → id of the delegator that started it
+    #[serde(default)]
+    pub parents: BTreeMap<String, String>,
     #[serde(default)]
     pub messages: Vec<Message>,
     #[serde(default)]

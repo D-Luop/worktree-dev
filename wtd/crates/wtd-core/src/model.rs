@@ -59,6 +59,9 @@ pub struct Worktree {
     /// User-defined group id (None = Ungrouped).
     #[serde(default)]
     pub group: Option<String>,
+    /// Id of the delegator (`delegate/<slug>`) that started this worktree; the roster nests it there.
+    #[serde(default)]
+    pub parent: Option<String>,
     /// The live session is hosted by the daemon (a pseudo console that survives VSCode reloads),
     /// as opposed to running inside a terminal under `wtd run`.
     #[serde(default)]
@@ -159,6 +162,33 @@ pub struct Snapshot {
     pub messages: Vec<Message>,
 }
 
+/// Reorder an already-sorted list so each delegator's workers follow it, keeping list order among
+/// them. `parent` is cleared on every row left unnested (its delegator isn't in the list), so a
+/// frontend can indent on `parent.is_some()`.
+pub fn nest_under_parents(rows: Vec<Worktree>) -> Vec<Worktree> {
+    let ids: std::collections::HashSet<String> = rows.iter().map(|w| w.id.clone()).collect();
+    let mut kids: std::collections::BTreeMap<String, Vec<Worktree>> = Default::default();
+    let mut out = Vec::with_capacity(rows.len());
+    for mut w in rows {
+        match w.parent.clone().filter(|p| *p != w.id && ids.contains(p)) {
+            Some(p) => kids.entry(p).or_default().push(w),
+            None => {
+                w.parent = None;
+                out.push(w);
+            }
+        }
+    }
+    let top = std::mem::take(&mut out);
+    for w in top {
+        let id = w.id.clone();
+        out.push(w);
+        out.extend(kids.remove(&id).unwrap_or_default());
+    }
+    // a parent that is itself nested (never recorded: parents are delegators): show its rows unnested
+    out.extend(kids.into_values().flatten().map(|w| Worktree { parent: None, ..w }));
+    out
+}
+
 /// Encode a worktree id as a single path segment (`luop/feat/x` → `luop__feat__x`).
 pub fn id_to_key(id: &str) -> String {
     id.replace('/', "__")
@@ -178,5 +208,22 @@ mod tests {
             assert_eq!(key_to_id(&id_to_key(id)), id);
         }
         assert_eq!(id_to_key("luop/feat/x"), "luop__feat__x");
+    }
+
+    #[test]
+    fn nests_children_after_their_parent() {
+        let wt = |id: &str, parent: Option<&str>| Worktree { id: id.into(), parent: parent.map(String::from), ..Default::default() };
+        let rows = vec![
+            wt("luop/a", Some("delegate/luop")),
+            wt("other/b", None),
+            wt("delegate/luop", None),
+            wt("luop/c", Some("delegate/luop")),
+            wt("luop/orphan", Some("delegate/gone")),
+        ];
+        let out = nest_under_parents(rows);
+        let ids: Vec<&str> = out.iter().map(|w| w.id.as_str()).collect();
+        assert_eq!(ids, ["other/b", "delegate/luop", "luop/a", "luop/c", "luop/orphan"]);
+        let nested: Vec<bool> = out.iter().map(|w| w.parent.is_some()).collect();
+        assert_eq!(nested, [false, false, true, true, false]);
     }
 }
