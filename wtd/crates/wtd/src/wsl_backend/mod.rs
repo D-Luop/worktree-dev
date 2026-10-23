@@ -4,6 +4,7 @@
 //! Contract: docs/wsl-platform-contract.md.
 
 pub mod path;
+pub mod repo;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -261,6 +262,76 @@ pub fn resolve(dev: &Path, distro: &str, linux: &str) -> Option<Entry> {
 pub fn resolve_host_path(dev: &Path, p: &Path) -> Option<Entry> {
     let (distro, linux) = path::from_unc(&p.to_string_lossy())?;
     resolve(dev, &distro, &linux)
+}
+
+// --- lifecycle ---------------------------------------------------------------------------------------
+
+pub fn layout(dev: &Path, distro: &str) -> Result<Layout> {
+    Ok(Layout { root: dev_root(dev, distro)? })
+}
+
+/// Clone the repo into the distro if needed and check out `<slug>/<name>` there; registers it.
+/// Returns the entry and whether the worktree was just created.
+pub fn create(dev: &Path, distro: &str, slug: &str, name: &str, base: Option<&str>) -> Result<(Entry, bool)> {
+    let id = format!("{slug}/{name}");
+    if crate::paths::repo_less(slug) {
+        bail!("planning agents and delegators run on Windows; only repo worktrees can live in WSL");
+    }
+    if crate::paths::worktree_path(dev, &id).exists() {
+        bail!("'{id}' already has a Windows worktree; one branch can't have both a Windows and a WSL worktree");
+    }
+    if let Some(e) = find_any(dev, &id).filter(|e| !e.distro.eq_ignore_ascii_case(distro)) {
+        bail!("'{id}' is already a WSL worktree in '{}'", e.distro);
+    }
+    let r = crate::repos::require(dev, slug)?;
+    let remote = repo::remote_for(&r.url)?;
+    let layout = layout(dev, distro)?;
+    let sh = repo::Sh::Wsl(distro.to_string());
+    repo::ensure_repo(&sh, dev, &layout, slug, &remote)?;
+    let created = repo::create_worktree(&sh, &layout, slug, name, base)?;
+    let e = Entry { id, slug: slug.into(), name: name.into(), distro: distro.into(), wsl_path: layout.worktree(slug, name), archived: false };
+    upsert(dev, e.clone())?;
+    Ok((e, created))
+}
+
+pub fn remove(dev: &Path, e: &Entry, force: bool, delete_branch: bool) -> Result<Vec<String>> {
+    let layout = layout(dev, &e.distro)?;
+    let log = repo::remove(&repo::Sh::Wsl(e.distro.clone()), &layout, e, force, delete_branch)?;
+    unregister(dev, &e.id)?;
+    crate::wt::forget_worktree_state(dev, &e.slug, &e.name);
+    Ok(log)
+}
+
+/// Move to `worktrees/<slug>/archive/<name>` inside the distro (branch kept); it leaves the roster.
+pub fn archive(dev: &Path, e: &Entry) -> Result<Entry> {
+    let layout = layout(dev, &e.distro)?;
+    let to = layout.archived(&e.slug, &e.name);
+    repo::move_worktree(&repo::Sh::Wsl(e.distro.clone()), &layout, &e.slug, &e.wsl_path, &to)?;
+    let arc = Entry { wsl_path: to, archived: true, ..e.clone() };
+    upsert(dev, arc.clone())?;
+    crate::wt::forget_state(dev, "status", &wtd_core::model::id_to_key(&e.id));
+    Ok(arc)
+}
+
+pub fn restore(dev: &Path, e: &Entry) -> Result<Entry> {
+    let layout = layout(dev, &e.distro)?;
+    let to = layout.worktree(&e.slug, &e.name);
+    repo::move_worktree(&repo::Sh::Wsl(e.distro.clone()), &layout, &e.slug, &e.wsl_path, &to)?;
+    let back = Entry { wsl_path: to, archived: false, ..e.clone() };
+    upsert(dev, back.clone())?;
+    Ok(back)
+}
+
+/// A read-only checkout of `slug@branch` inside the distro (`<root>/refs/<slug>/<branch>`), cloning the
+/// repo there first if needed. Returns its Linux path.
+pub fn ensure_ref(dev: &Path, distro: &str, slug: &str, branch: Option<&str>) -> Result<(String, String)> {
+    let r = crate::repos::require(dev, slug)?;
+    let layout = layout(dev, distro)?;
+    let sh = repo::Sh::Wsl(distro.to_string());
+    repo::ensure_repo(&sh, dev, &layout, slug, &repo::remote_for(&r.url)?)?;
+    let branch = branch.map(String::from).unwrap_or_else(|| repo::default_branch(&sh, &layout, slug));
+    let p = repo::ensure_ref(&sh, &layout, slug, &branch)?;
+    Ok((branch, p))
 }
 
 #[cfg(test)]
