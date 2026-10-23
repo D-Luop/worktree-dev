@@ -49,7 +49,7 @@ fn apply_status(dev: &Path, r: &paths::WtRef, ev: Event, word: &str) -> Result<w
         statusfile::write(dev, &r.id, &r.root, old, new)?;
     }
     if let Ok(Some(mut c)) = Client::connect() {
-        let _ = c.notify(method::HOOK, wtd_core::protocol::HookParams { dir: s(&r.root), event: word.into(), status: new.status, changed: new != old });
+        let _ = c.notify(method::HOOK, wtd_core::protocol::HookParams { dir: s(&r.root), event: word.into(), status: new.status, resets_at: new.resets_at, changed: new != old });
     }
     Ok(new.status)
 }

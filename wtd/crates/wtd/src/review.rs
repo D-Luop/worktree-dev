@@ -392,7 +392,7 @@ Then print a short summary with the verdict, finding counts, and the report path
             let _ = statusfile::write(&dev, &wref.id, &wt, old, new);
         }
         if let Ok(Some(mut c)) = Client::connect() {
-            let _ = c.notify(method::HOOK, wtd_core::protocol::HookParams { dir: s(&wt), event: word.into(), status: new.status, changed: new != old });
+            let _ = c.notify(method::HOOK, wtd_core::protocol::HookParams { dir: s(&wt), event: word.into(), status: new.status, resets_at: new.resets_at, changed: new != old });
         }
     };
     if reviewing {

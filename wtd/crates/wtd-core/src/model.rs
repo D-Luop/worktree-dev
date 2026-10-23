@@ -44,6 +44,9 @@ pub struct Worktree {
     /// Absolute Windows path.
     pub path: String,
     pub status: Status,
+    /// While `limited`: unix seconds the usage limit resets (0 = unknown).
+    #[serde(default)]
+    pub limit_resets_at: i64,
     /// A `wtd run` session is attached (an agent process is alive).
     pub live: bool,
     /// Claude account the live session runs under (`default` = ~/.claude).

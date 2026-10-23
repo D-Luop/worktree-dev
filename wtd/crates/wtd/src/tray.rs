@@ -327,7 +327,7 @@ unsafe fn show_menu(hwnd: HWND) {
 /// Worktrees for the menu: needs-you first, then by activity rank, then name; the dev base excluded.
 fn session_rows() -> Vec<Worktree> {
     let rank = |s: Status| match s {
-        Status::Input => 0,
+        Status::Input | Status::Limited => 0,
         Status::Working => 1,
         Status::Reviewing => 2,
         Status::Pr => 3,
@@ -344,13 +344,15 @@ fn row_label(w: &Worktree) -> String {
     let glyph = match w.status {
         Status::Input => "●",
         Status::Working => "◐",
+        Status::Limited => "⚠",
         Status::Reviewing => "◆",
         Status::Pr => "◇",
         Status::Done => "✓",
         Status::None | Status::Stopped => if w.live { "○" } else { "·" },
     };
     // `&` is a menu mnemonic marker; `	` right-aligns the repo
-    format!("{glyph}  {}	{}", w.name.replace('&', "&&"), w.slug.replace('&', "&&"))
+    let limit = if w.status == Status::Limited { format!(" · {}", crate::limit::label_now(w.limit_resets_at)) } else { String::new() };
+    format!("{glyph}  {}{limit}	{}", w.name.replace('&', "&&"), w.slug.replace('&', "&&"))
 }
 
 fn row_command(off: usize) {

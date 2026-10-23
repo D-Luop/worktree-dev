@@ -87,10 +87,11 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             event: word.into(),
             status: new.status,
             changed,
+            resets_at: new.resets_at,
         });
     }
     // Turn ended: ring the terminal bell so VSCode badges the session's tab while it's unfocused.
-    if matches!(ev, Event::Stop) {
+    if matches!(ev, Event::Stop | Event::Limited { .. }) {
         if let Ok(mut con) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
             let _ = con.write_all(b"\x07");
         }

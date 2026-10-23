@@ -138,6 +138,9 @@ pub struct HookParams {
     pub status: crate::status::Status,
     /// Whether the event changed the persisted state.
     pub changed: bool,
+    /// While `limited`: unix seconds the limit resets (0 = unknown).
+    #[serde(default)]
+    pub resets_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

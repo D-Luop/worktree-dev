@@ -1,9 +1,11 @@
 //! A worktree's Claude status: the state machine formerly in `.wtd/hooks/wt-status.sh`.
 //!
-//! States: working (busy) · input (your turn) · reviewing · pr · done · stopped · none.
+//! States: working (busy) · input (your turn) · limited (waiting for a usage-limit reset) · reviewing
+//! · pr · done · stopped · none.
 //! `pr` and `done` are sticky milestones that don't freeze live activity: a new turn shows `working`
 //! while stashing the milestone, a read-only turn restores it, and a real source edit drops it.
-//! `reviewing` is owned by the reviewer and survives agent turns.
+//! `reviewing` is owned by the reviewer and survives agent turns. `limited` is live like `working`: it
+//! holds through turn-end notifications and clears on the next prompt or tool call.
 
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +16,7 @@ pub enum Status {
     None,
     Working,
     Input,
+    Limited,
     Reviewing,
     Pr,
     Done,
@@ -25,6 +28,7 @@ impl Status {
         match s.trim() {
             "working" => Status::Working,
             "input" => Status::Input,
+            "limited" => Status::Limited,
             "reviewing" => Status::Reviewing,
             "pr" => Status::Pr,
             "done" => Status::Done,
@@ -39,6 +43,7 @@ impl Status {
             Status::None => "",
             Status::Working => "working",
             Status::Input => "input",
+            Status::Limited => "limited",
             Status::Reviewing => "reviewing",
             Status::Pr => "pr",
             Status::Done => "done",
@@ -69,6 +74,8 @@ pub enum Event {
     Working,
     /// Any tool call (PreToolUse).
     Tool,
+    /// Turn died on a usage limit (StopFailure `rate_limit`). `resets_at`: unix seconds, 0 = unknown.
+    Limited { resets_at: i64 },
     /// Turn ended (Stop / Notification).
     Stop,
     /// Session ended (SessionEnd).
@@ -88,6 +95,7 @@ impl Event {
             "pr" => Event::Pr,
             "working" => Event::Working,
             "tool" => Event::Tool,
+            "limited" => Event::Limited { resets_at: 0 },
             "stop" => Event::Stop,
             "sessionend" => Event::SessionEnd,
             _ => return None,
@@ -95,11 +103,13 @@ impl Event {
     }
 }
 
-/// Persisted state: the visible status plus the stashed milestone (`.claude-status.resume`).
+/// Persisted state: the visible status, the stashed milestone (`.claude-status.resume`) and, while
+/// `limited`, when the limit resets (`.claude-status.limit`; 0 = unknown).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct StatusState {
     pub status: Status,
     pub stash: Status,
+    pub resets_at: i64,
 }
 
 /// Edits to these don't count as "real source edits" (they don't invalidate a milestone).
@@ -116,38 +126,53 @@ fn is_scratch_path(path: &str) -> bool {
 
 /// Apply one event. Returns the new state; callers persist only when it differs.
 pub fn apply(cur: StatusState, ev: &Event) -> StatusState {
-    let StatusState { status, stash } = cur;
+    let (status, stash) = transition(cur.status, cur.stash, ev);
+    let resets_at = match (status, ev) {
+        (Status::Limited, Event::Limited { resets_at }) => *resets_at,
+        (Status::Limited, _) => cur.resets_at,
+        _ => 0,
+    };
+    StatusState { status, stash, resets_at }
+}
+
+fn transition(status: Status, stash: Status, ev: &Event) -> (Status, Status) {
+    let cur = (status, stash);
     let none = Status::None;
     match ev {
         Event::Sync => cur,
-        Event::Wip => StatusState { status: Status::Working, stash: none },
+        Event::Wip => (Status::Working, none),
         Event::Edit { path } => {
             if is_scratch_path(path) {
                 cur
             } else {
-                StatusState { status: Status::Working, stash: none }
+                (Status::Working, none)
             }
         }
         Event::Reviewing if status.is_milestone() => cur,
-        Event::Reviewing => StatusState { status: Status::Reviewing, stash },
+        Event::Reviewing => (Status::Reviewing, stash),
         Event::Reviewed if status.is_milestone() => cur,
-        Event::Reviewed => StatusState { status: Status::Input, stash },
-        Event::Done => StatusState { status: Status::Done, stash: none },
-        Event::Pr => StatusState { status: Status::Pr, stash: none },
-        Event::Working | Event::Tool => match status {
-            s if s.is_milestone() => StatusState { status: Status::Working, stash: s },
-            Status::Reviewing => cur,
-            _ => StatusState { status: Status::Working, stash },
-        },
+        Event::Reviewed => (Status::Input, stash),
+        Event::Done => (Status::Done, none),
+        Event::Pr => (Status::Pr, none),
+        Event::Working | Event::Tool | Event::Limited { .. } => {
+            let next = if matches!(ev, Event::Limited { .. }) { Status::Limited } else { Status::Working };
+            match status {
+                s if s.is_milestone() => (next, s),
+                Status::Reviewing => cur,
+                _ => (next, stash),
+            }
+        }
+        // a turn-end notification (e.g. idle) after the limit hit must not hide it
+        Event::Stop if status == Status::Limited => cur,
         Event::Stop | Event::SessionEnd => {
             if stash != none {
-                return StatusState { status: stash, stash: none };
+                return (stash, none);
             }
             let keep = matches!(status, Status::Reviewing | Status::Done | Status::Pr);
             match (ev, keep) {
                 (_, true) => cur,
-                (Event::Stop, false) => StatusState { status: Status::Input, stash },
-                _ => StatusState { status: Status::Stopped, stash },
+                (Event::Stop, false) => (Status::Input, stash),
+                _ => (Status::Stopped, stash),
             }
         }
     }
@@ -165,7 +190,13 @@ mod tests {
         Event::Edit { path: p.into() }
     }
     fn st(status: Status, stash: Status) -> StatusState {
-        StatusState { status, stash }
+        StatusState { status, stash, resets_at: 0 }
+    }
+    fn limited(resets_at: i64) -> Event {
+        Event::Limited { resets_at }
+    }
+    fn lim(resets_at: i64, stash: Status) -> StatusState {
+        StatusState { status: Limited, stash, resets_at }
     }
 
     #[test]
@@ -224,6 +255,46 @@ mod tests {
         assert_eq!(apply(st(Working, Done), &Event::Pr), st(Pr, None));
         assert_eq!(apply(st(Working, Pr), &Event::Done), st(Done, None));
         assert_eq!(apply(st(Done, None), &Event::Wip), st(Working, None));
+    }
+
+    #[test]
+    fn limit_then_new_turn() {
+        let s = run(StatusState::default(), &[Event::Working, Event::Tool, limited(1_800_000_000)]);
+        assert_eq!(s, lim(1_800_000_000, None));
+        assert_eq!(apply(s, &Event::Stop), s, "idle notification keeps it limited");
+        assert_eq!(apply(s, &Event::Sync), s);
+        assert_eq!(apply(s, &edit("/w/pr-notes.md")), s);
+        assert_eq!(apply(s, &Event::Working), st(Working, None));
+        assert_eq!(apply(s, &Event::Tool), st(Working, None));
+        assert_eq!(apply(s, &edit("/w/src/a.rs")), st(Working, None));
+        assert_eq!(apply(s, &Event::SessionEnd), st(Stopped, None));
+        assert_eq!(apply(lim(0, None), &limited(5)), lim(5, None), "a later hit updates the reset");
+    }
+
+    #[test]
+    fn limit_stashes_milestone_like_working() {
+        for m in [Done, Pr] {
+            assert_eq!(apply(st(m, None), &limited(7)), lim(7, m));
+            let s = run(st(m, None), &[Event::Working, limited(7)]);
+            assert_eq!(s, lim(7, m));
+            assert_eq!(apply(s, &Event::Stop), s);
+            assert_eq!(apply(s, &Event::Working), st(Working, m));
+            assert_eq!(run(s, &[Event::Working, Event::Stop]), st(m, None));
+            assert_eq!(apply(s, &Event::SessionEnd), st(m, None));
+            assert_eq!(apply(s, &Event::Done), st(Done, None));
+            assert_eq!(apply(s, &Event::Pr), st(Pr, None));
+        }
+    }
+
+    #[test]
+    fn limit_leaves_review_alone() {
+        assert_eq!(apply(st(Reviewing, None), &limited(7)), st(Reviewing, None));
+    }
+
+    #[test]
+    fn limited_word_roundtrip() {
+        assert_eq!(Status::parse(Limited.as_str()), Limited);
+        assert_eq!(Event::from_word("limited", ""), Some(limited(0)));
     }
 
     // Sequences the bash differential test found worth pinning (old vs new hook, 400 transitions).
