@@ -52,6 +52,9 @@ pub enum Push {
     /// A worktree is about to be archived or removed: clients close anything holding it open
     /// (terminals cwd'd in it, editors, file watches) before the daemon moves/deletes the folder.
     Release { id: String },
+    /// The updater's state changed (see `wtd update status`): available / downloading / staged /
+    /// applied, plus the update settings.
+    Update { update: Value },
     /// The daemon is shutting down (clients should show "stopped").
     Shutdown,
     /// Sent to a `wtd run` connection: end your session (terminate its job).
@@ -129,6 +132,16 @@ pub mod method {
     pub const MESSAGE_DECIDE: &str = "message.decide";
     /// `{worktree?}` → `[Message]` (sent and received, most recent first)
     pub const MESSAGE_LIST: &str = "message.list";
+
+    // --- updates (installed builds) ---
+    /// `{}` → the update status (also pushed to subscribers as `{"event":"update"}`).
+    pub const UPDATE_STATUS: &str = "update.status";
+    /// `{wait?: bool}` → the update status: check now (and download anything newer). With `wait`,
+    /// answers once the check and download finish.
+    pub const UPDATE_CHECK: &str = "update.check";
+    /// `{force?: bool}` → `{}`: apply the staged update now (restarts the daemon). Without `force`,
+    /// refused while hosted sessions are live.
+    pub const UPDATE_APPLY: &str = "update.apply";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

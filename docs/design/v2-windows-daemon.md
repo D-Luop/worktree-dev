@@ -199,6 +199,32 @@ and the `WorkTreeDev: Start Daemon` / `Stop Daemon` palette commands do the same
 - CLI commands that need the daemon say *"daemon not running — start it from the tray or the panel"*.
   They never start it themselves.
 
+### 3.9 Automatic updates (installed builds)
+Only a build running from the program dir (`%LOCALAPPDATA%\WorkTreeDev\current\bin`, see
+`docs/distribution-contract.md`) updates itself. A source checkout is a *dev build*: no checks, and the
+tray, panel and Settings say so.
+- **Check:** the daemon reads `latest.json` (beta: also the newest prerelease's `latest-beta.json`)
+  30 s after start and every 6 h ± 30 min. `WTD_UPDATE_URL` (http(s) or `file://`) overrides the URL.
+- **Stage:** a newer version that hasn't failed before is downloaded to `pending\<ver>\payload.zip`
+  (resumed with HTTP Range, retried), its sha256 checked, and — when the running exe is
+  Authenticode-signed — the new exes' signatures too. It's unpacked to `versions\<ver>\`.
+  State (`latest`, `staged`, `failed`, `last_apply`) lives in `update-state.json`.
+- **Apply** at a safe point: no hosted session is live, or `update.restartWithLiveSessions` is `auto`;
+  also at tray start / sign-in; or now via *Restart to update* (tray ⚙, panel banner, toast,
+  `wtd update --apply-now`). A helper — a copy of the running `wtd.exe` at `update-helper.exe`, so
+  known-good code runs the rollback — stops the daemon and tray, re-points the `current` junction (a
+  plain-copy `current\` gets its running exes renamed to `*.old-<ts>` and the new files copied over),
+  reinstalls the vsix if its bytes changed, and starts the daemon and tray from `current\`.
+- **Rollback:** if the new daemon doesn't answer `hello` with the new version and `wtd version` within
+  30 s, the helper switches `current` back, restarts the old build and adds the version to `failed`
+  (never retried). The previous version stays in `versions\`; older ones are pruned.
+- **Settings** (`.wtd/config.json` → `update`): `auto` (default on), `channel` (`stable` | `beta`),
+  `restartWithLiveSessions` (`never` | `ask` (default) | `auto`). Set them from the tray ⚙, the
+  Settings page, or `wtd update config`.
+- **Protocol:** `update.status`, `update.check {wait?}`, `update.apply {force?}`, and an `update` push.
+  After an apply that changed the vsix, each VS Code window offers *Reload window*.
+  Log: `%LOCALAPPDATA%\WorkTreeDev\update.log`.
+
 ## 4. New UX
 
 ### 4.1 Fleet panel (modelled on the Claude extension's session list)

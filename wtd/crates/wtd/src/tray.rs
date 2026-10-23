@@ -59,6 +59,10 @@ static TRAY: Mutex<Option<Tray>> = Mutex::new(None);
 /// the daemon's worktrees and account usage, kept by the watcher thread for the flyout
 pub(crate) static FLEET: Mutex<Vec<Worktree>> = Mutex::new(Vec::new());
 pub(crate) static ACCOUNTS: Mutex<Vec<Account>> = Mutex::new(Vec::new());
+/// the daemon's update status (`wtd update status`), for the ⚙ menu
+pub(crate) static UPDATE: Mutex<Option<serde_json::Value>> = Mutex::new(None);
+/// the staged version a "ready to update" balloon was last shown for
+static UPDATE_BALLOON: Mutex<String> = Mutex::new(String::new());
 
 pub(crate) fn view() -> View {
     TRAY.lock().unwrap().as_ref().map(|t| t.view).unwrap_or_default()
@@ -83,13 +87,10 @@ pub fn main(args: &[String]) -> Result<i32> {
             return Ok(0);
         }
         // close a running tray (e.g. before replacing wtd.exe)
-        Some("--quit") => unsafe {
-            let hwnd = FindWindowW(win::wide(CLASS).as_ptr(), std::ptr::null());
-            if !hwnd.is_null() {
-                PostMessageW(hwnd, WM_CLOSE, 0, 0);
-            }
+        Some("--quit") => {
+            quit();
             return Ok(0);
-        },
+        }
         // open the running tray's flyout, as a click on its icon would
         Some("--open") => unsafe {
             let hwnd = FindWindowW(win::wide(CLASS).as_ptr(), std::ptr::null());
@@ -140,6 +141,8 @@ pub fn main(args: &[String]) -> Result<i32> {
 
         let hwnd_val = hwnd as isize;
         std::thread::spawn(move || watch_daemon(hwnd_val));
+        // a sign-in / tray start is a safe point for an update that was waiting on live sessions
+        std::thread::spawn(crate::updater::apply_at_tray_start);
         std::thread::spawn(move || pin_to_taskbar(hwnd_val));
 
         let mut msg: MSG = std::mem::zeroed();
@@ -161,7 +164,11 @@ fn watch_daemon(hwnd: isize) {
     };
     loop {
         if let Ok(Some(mut c)) = Client::connect() {
-            if c.hello("tray").is_ok() && c.request(method::SUBSCRIBE, serde_json::json!({})).is_ok() {
+            if c.hello("tray").is_ok() {
+                // before subscribing: a request on a subscribed connection drops the pushes it skips
+                set_update(c.request(method::UPDATE_STATUS, serde_json::json!({})).ok());
+            }
+            if c.request(method::SUBSCRIBE, serde_json::json!({})).is_ok() {
                 let mut wts: std::collections::BTreeMap<String, Worktree> = Default::default();
                 let mut approvals: u32 = 0; // agent messages waiting for the user's approval
                 let summarize = |wts: &std::collections::BTreeMap<String, Worktree>, approvals: u32| View {
@@ -185,6 +192,10 @@ fn watch_daemon(hwnd: isize) {
                                 Push::Upsert { worktree, .. } => { wts.insert(worktree.id.clone(), worktree); }
                                 Push::Remove { id, .. } => { wts.remove(&id); }
                                 Push::Accounts { accounts, .. } => { *ACCOUNTS.lock().unwrap() = accounts; }
+                                Push::Update { update } => {
+                                    set_update(Some(update));
+                                    continue;
+                                }
                                 Push::Shutdown => break,
                                 _ => continue,
                             }
@@ -199,6 +210,7 @@ fn watch_daemon(hwnd: isize) {
         }
         FLEET.lock().unwrap().clear();
         ACCOUNTS.lock().unwrap().clear();
+        set_update(None);
         post(View::default());
         std::thread::sleep(Duration::from_secs(2));
     }
@@ -327,8 +339,33 @@ fn same_exe(stored: &str, exe: &str) -> bool {
 }
 
 fn show_pin_hint() {
+    if balloon("Keep WorkTreeDev on the taskbar", "Drag this icon out of the ^ overflow onto the taskbar, or turn it on under Settings → Personalization → Taskbar → Other system tray icons.") {
+        win::reg::set_dword(WTD_KEY, HINT_SHOWN, 1);
+    }
+}
+
+fn set_update(u: Option<serde_json::Value>) {
+    if let Some(v) = &u {
+        update_balloon(v);
+    }
+    *UPDATE.lock().unwrap() = u;
+}
+
+/// Once per version: an update is ready but waits on the user (live sessions, policy `ask`/`never`).
+fn update_balloon(u: &serde_json::Value) {
+    let (Some(ver), hosted) = (u["staged"].as_str(), u["hosted_sessions"].as_u64().unwrap_or(0)) else { return };
+    if hosted == 0 || u["settings"]["restartWithLiveSessions"] == "auto" {
+        return;
+    }
+    let mut last = UPDATE_BALLOON.lock().unwrap();
+    if *last != ver && balloon(&format!("WorkTreeDev {ver} is ready"), &format!("Restart to update from the ⚙ menu ({hosted} live session{} will end), or it installs once they've closed.", if hosted == 1 { "" } else { "s" })) {
+        *last = ver.to_string();
+    }
+}
+
+fn balloon(title: &str, text: &str) -> bool {
     let t = TRAY.lock().unwrap();
-    let Some(t) = t.as_ref() else { return };
+    let Some(t) = t.as_ref() else { return false };
     let fill = |dst: &mut [u16], s: &str| {
         let w: Vec<u16> = s.encode_utf16().take(dst.len() - 1).collect();
         dst[..w.len()].copy_from_slice(&w);
@@ -340,11 +377,9 @@ fn show_pin_hint() {
         nid.uID = 1;
         nid.uFlags = NIF_INFO;
         nid.dwInfoFlags = NIIF_INFO;
-        fill(&mut nid.szInfoTitle, "Keep WorkTreeDev on the taskbar");
-        fill(&mut nid.szInfo, "Drag this icon out of the ^ overflow onto the taskbar, or turn it on under Settings → Personalization → Taskbar → Other system tray icons.");
-        if Shell_NotifyIconW(NIM_MODIFY, &nid) != 0 {
-            win::reg::set_dword(WTD_KEY, HINT_SHOWN, 1);
-        }
+        fill(&mut nid.szInfoTitle, title);
+        fill(&mut nid.szInfo, text);
+        Shell_NotifyIconW(NIM_MODIFY, &nid) != 0
     }
 }
 
@@ -394,6 +429,17 @@ pub(crate) fn restart_daemon(owner: HWND) {
     }
 }
 
+/// Apply the staged update now (the CLI hands it to the apply helper, which restarts the daemon and tray).
+pub(crate) fn restart_to_update(owner: HWND) {
+    if confirm_end_sessions(owner, "Restart to update?") {
+        spawn_hidden(Command::new(paths::wtd_exe()).args(["update", "--apply-now", "--yes"]));
+    }
+}
+
+pub(crate) fn wtd_detached(args: &[&str]) {
+    spawn_hidden(Command::new(paths::wtd_exe()).args(args));
+}
+
 pub(crate) fn open_vscode() {
     if let Ok(dev) = paths::dev_root() {
         // `code <folder>` focuses the window already showing that folder rather than opening another
@@ -436,6 +482,20 @@ fn set_session_state(s: SessionState) {
 
 fn tray_alive() -> bool {
     unsafe { !FindWindowW(win::wide(CLASS).as_ptr(), std::ptr::null()).is_null() }
+}
+
+pub(crate) fn is_running() -> bool {
+    tray_alive()
+}
+
+/// Close a running tray (e.g. before replacing wtd.exe).
+pub(crate) fn quit() {
+    unsafe {
+        let hwnd = FindWindowW(win::wide(CLASS).as_ptr(), std::ptr::null());
+        if !hwnd.is_null() {
+            PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        }
+    }
 }
 
 /// No state yet this sign-in means it never started (e.g. the Run entry was disabled in Task

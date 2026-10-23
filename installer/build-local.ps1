@@ -35,6 +35,7 @@ if (-not $SkipBuild) {
     foreach ($f in 'Cargo.toml', 'Cargo.lock') { $saved[$f] = [IO.File]::ReadAllBytes((Join-Path $wtd $f)) }
     try {
         & (Join-Path $PSScriptRoot 'set-crate-version.ps1') -Version $Version
+        $env:WTD_COMMIT = (& git -C $root rev-parse HEAD)
         & cargo build --release --manifest-path (Join-Path $wtd 'Cargo.toml')
         if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)" }
     } finally {

@@ -33,6 +33,7 @@ pub mod ticket;
 pub mod tools;
 pub mod tray;
 pub mod tui;
+pub mod updater;
 pub mod win;
 pub mod wt;
 
@@ -66,7 +67,10 @@ Worktrees & sessions (also on PATH as plain `agent`, `archive`, … via ~/.local
                                      per platform and repo (.wtd/custom)
   wtd tokens                         token usage across sessions
   wtd ship                           package the toolkit for another machine
-  wtd version                        version, channel, program dir and dev root (JSON)
+  wtd update [--check] [--channel stable|beta] [--apply-now [--yes]]
+                                     check for / download / apply a new release (installed builds)
+  wtd update status|config …         update state as JSON; auto / channel / restart-with-live-sessions
+  wtd version                        version, channel, program dir, dev root, commit (JSON)
   wtd setup [--repair] [--uninstall [--keep-data]] [--dev-root d] [--from payload] [--yes] [--skip steps]
                                      install / repair / remove WorkTreeDev for this user (idempotent)
   wtd setup --migrate                move a checkout install's program files to the program dir
@@ -152,7 +156,8 @@ fn dispatch(cmd: &str, rest: &[String]) -> Result<i32> {
         "preview" => tools::preview_main(rest),
         "tokens" => tools::tokens_main(rest),
         "ship" => tools::ship_main(rest),
-        "version" | "--version" => program::version_main(rest),
+        "update" => updater::cli::main(rest),
+        "version" | "--version" | "-V" => program::version_main(rest),
         "setup" if rest.iter().any(|a| a == "--migrate") => program::setup_main(rest),
         "setup" => setup::main(rest),
         "stop" => {
