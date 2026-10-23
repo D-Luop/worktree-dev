@@ -288,6 +288,7 @@ async fn request(method: &str, params: Value) -> Result<(PipeRead, PipeWrite)> {
 }
 
 async fn relay_async(method: &str, params: Value) -> Result<i32> {
+    let sent_size = params["cols"].as_u64().zip(params["rows"].as_u64()).map(|(c, r)| (c as u16, r as u16));
     let (mut rd, mut w) = request(method, params).await?;
     let mut line = String::new();
     rd.read_line(&mut line).await?;
@@ -319,13 +320,13 @@ async fn relay_async(method: &str, params: Value) -> Result<i32> {
             }
         }
     });
-    // window size → resize frames (Windows has no SIGWINCH: poll)
+    // window size → resize frames (Windows has no SIGWINCH: poll). Compared against the size the
+    // daemon was given, so a resize while the request was in flight still gets sent.
     let tx_sz = tx.clone();
     let stop_sz = stop.clone();
     std::thread::spawn(move || {
-        let mut last = console_size();
+        let mut last = sent_size;
         while !stop_sz.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(200));
             let now = console_size();
             if now.is_some() && now != last {
                 let (c, r) = now.unwrap();
@@ -336,6 +337,7 @@ async fn relay_async(method: &str, params: Value) -> Result<i32> {
                 }
                 last = now;
             }
+            std::thread::sleep(Duration::from_millis(50));
         }
     });
     drop(tx);
