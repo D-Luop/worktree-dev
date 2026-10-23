@@ -681,6 +681,18 @@ fn account_dir(home: &Path, provider: &str, name: &str) -> Result<PathBuf> {
     })
 }
 
+/// The session-binding form of an account: `<name>` for Claude (`default` = ~/.claude), `codex:<name>`.
+fn session_label(s: &str) -> String {
+    s.strip_prefix("claude:").unwrap_or(s).to_string()
+}
+
+fn split_label(label: &str) -> (&'static str, &str) {
+    match label.strip_prefix("codex:") {
+        Some(n) => ("codex", n),
+        None => ("claude", label),
+    }
+}
+
 pub fn account_main(args: &[String]) -> Result<i32> {
     let home = paths::home_dir()?;
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -768,20 +780,22 @@ pub fn account_main(args: &[String]) -> Result<i32> {
             }
         }
         ["switch", slug, wtname, rest @ ..] => {
-            // move a worktree's session to another Claude account (`--to <name>`, else the logged-in one
-            // with the most headroom): copy its transcript there so reopening resumes the same chat,
-            // and rebind the session. Prints the target name (the extension then relaunches + compacts).
+            // move a worktree's session to any other Claude or Codex account (`--to <name|codex:name>`,
+            // else the Claude login with the most headroom). Claude → Claude copies the transcript so the
+            // reopened session resumes the same chat; any other move writes a handoff brief that the next
+            // agent starts from. Prints {to, mode: resume|handoff}; the extension then relaunches.
             let dev = paths::dev_root()?;
             let session = crate::wt::session_name(slug, wtname);
             let key = crate::wt::session_key(&session);
-            let cur = crate::wt::read_state(&dev, "session-accounts", &key).unwrap_or_else(|| "default".into());
-            let dir_of = |n: &str| if n == "default" { home.join(".claude") } else { home.join(".claude-accounts").join(n) };
+            let cur = session_label(&crate::wt::read_state(&dev, "session-accounts", &key).unwrap_or_else(|| "default".into()));
+            let accounts = account_list(&home);
             let to = match rest {
-                ["--to", t, ..] => t.to_string(),
+                ["--to", t, ..] => session_label(t),
+                [t, ..] if t.starts_with("--to=") => session_label(&t[5..]),
                 _ => {
                     let mut best: Option<(f64, String)> = None;
-                    for acc in account_list(&home).into_iter().filter(|x| x.provider == "claude" && x.logged_in && x.name != cur) {
-                        if let Some(u) = crate::daemon::usage_fetch_dir(&dir_of(&acc.name), &mut Default::default()) {
+                    for acc in accounts.iter().filter(|x| x.provider == "claude" && x.logged_in && x.name != cur) {
+                        if let Some(u) = crate::daemon::usage_fetch_dir(Path::new(&acc.dir), &mut Default::default()) {
                             let util = [u.five_hour, u.seven_day].iter().filter_map(|l| l.as_ref().and_then(|l| l.used)).fold(0.0, f64::max);
                             if util < 100.0 && best.as_ref().is_none_or(|(b, _)| util < *b) {
                                 best = Some((util, acc.name.clone()));
@@ -794,24 +808,47 @@ pub fn account_main(args: &[String]) -> Result<i32> {
             if to == cur {
                 bail!("the session is already on '{to}'");
             }
-            let tdir = dir_of(&to);
-            if !tdir.join(".credentials.json").is_file() {
-                bail!("'{to}' isn't a logged-in Claude account");
+            let (from_provider, from_name) = split_label(&cur);
+            let (to_provider, to_name) = split_label(&to);
+            if !accounts.iter().any(|a| a.provider == to_provider && a.name == to_name && a.logged_in) {
+                bail!("'{to}' isn't a logged-in {to_provider} account");
             }
             let wtp = paths::worktree_path(&dev, &format!("{slug}/{wtname}"));
-            if let Some(id) = crate::wt::read_state(&dev, "session-ids", &key) {
-                let enc: String = wtp.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-                let src = dir_of(&cur).join("projects").join(&enc).join(format!("{id}.jsonl"));
-                let dst = tdir.join("projects").join(&enc).join(format!("{id}.jsonl"));
-                if src.is_file() {
-                    std::fs::create_dir_all(dst.parent().unwrap())?;
-                    std::fs::copy(&src, &dst)?;
-                    eprintln!("copied the conversation into '{to}' (reopening resumes the same chat)");
+            // the freshest copy of this session's Claude transcript, whichever login wrote it
+            let claude_src = crate::wt::read_state(&dev, "session-ids", &key).filter(|_| from_provider == "claude").and_then(|id| {
+                accounts
+                    .iter()
+                    .filter(|a| a.provider == "claude")
+                    .map(|a| crate::agent::transcript(Path::new(&a.dir), &wtp, &id))
+                    .filter(|p| p.is_file())
+                    .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+            });
+            let mode = match &claude_src {
+                Some(src) if to_provider == "claude" => {
+                    let id = crate::wt::read_state(&dev, "session-ids", &key).unwrap_or_default();
+                    let dst = crate::agent::transcript(&account_dir(&home, "claude", to_name)?, &wtp, &id);
+                    if *src != dst {
+                        std::fs::create_dir_all(dst.parent().unwrap())?;
+                        std::fs::copy(src, &dst)?;
+                    }
+                    crate::wt::forget_state(&dev, crate::handoff::PENDING, &key);
+                    "resume"
                 }
-            }
+                _ => {
+                    let digest = match &claude_src {
+                        Some(src) => crate::handoff::digest_claude(src),
+                        None if from_provider == "codex" => crate::handoff::codex_rollout(&account_dir(&home, "codex", from_name)?, &wtp)
+                            .map(|p| crate::handoff::digest_codex(&p))
+                            .unwrap_or_default(),
+                        None => Default::default(),
+                    };
+                    let brief = crate::handoff::write(&dev, &key, &crate::handoff::render(&digest, &wtp, &cur, &to))?;
+                    eprintln!("wrote a handoff brief for the next agent: {}", brief.display());
+                    "handoff"
+                }
+            };
             crate::wt::write_state(&dev, "session-accounts", &key, &to)?;
-            println!("{to}");
-            Ok(0)
+            out(json!({ "to": to, "mode": mode }))
         }
         ["use", role, target] => {
             if !ROLES.contains(role) {
@@ -833,7 +870,7 @@ pub fn account_main(args: &[String]) -> Result<i32> {
             write_roles(&home, &roles)?;
             out(json!({ "ok": true }))
         }
-        _ => bail!("usage: wtd account ls | add <claude|codex> <name> | rm <claude|codex> <name> | use <dev|review|assistant> <provider:name|default>"),
+        _ => bail!("usage: wtd account ls | add <claude|codex> <name> | rm <claude|codex> <name> | use <dev|review|assistant> <provider:name|default> | switch <slug> <name> [--to <name|codex:name>]"),
     }
 }
 

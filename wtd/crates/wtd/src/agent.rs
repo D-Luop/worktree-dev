@@ -218,7 +218,7 @@ fn resolve_account(dev: &Path, flag: Option<&str>, session: &str) -> Result<Acco
 }
 
 /// ~/.claude/projects/<cwd, non-alphanumerics → '-'>/<id>.jsonl — where Claude keeps a transcript.
-fn transcript(config_dir: &Path, cwd: &Path, id: &str) -> PathBuf {
+pub(crate) fn transcript(config_dir: &Path, cwd: &Path, id: &str) -> PathBuf {
     let enc: String = cwd.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
     config_dir.join("projects").join(enc).join(format!("{id}.jsonl"))
 }
@@ -514,19 +514,32 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
         let joined = std::env::join_paths(tools.iter().cloned().chain(std::env::split_paths(&cur)))?;
         std::env::set_var("PATH", joined);
     }
+    // an `account switch` that couldn't carry the conversation over: start fresh, seeded with its brief
+    let handoff = wt::read_state(dev, crate::handoff::PENDING, &key).map(PathBuf::from).filter(|p| p.is_file());
+    wt::forget_state(dev, crate::handoff::PENDING, &key);
+    let seed = handoff.as_ref().map(|p| crate::handoff::prompt(p));
     let host_args: Vec<String> = if acct.codex_home.is_some() {
         let mark = format!("{key}.codex");
         let resume = wt::read_state(dev, "session-ids", &mark).is_some() || wt::state(dev, "session-ids").join(&mark).exists();
         wt::write_state(dev, "session-ids", &mark, "codex")?;
         let mut v = vec!["codex".to_string()];
-        if resume {
-            v.extend(["resume".into(), "--last".into()]);
+        match seed {
+            Some(p) => v.push(p),
+            None if resume => v.extend(["resume".into(), "--last".into()]),
+            None => {}
         }
         v
     } else {
         let cfg = acct.claude_dir.clone().unwrap_or(paths::home_dir()?.join(".claude"));
         let mut v = vec!["claude".to_string(), "--permission-mode".into(), pmode];
-        v.extend(claude_session_args(dev, &key, &wtp, &cfg)?);
+        match seed {
+            Some(p) => {
+                let id = uuid4();
+                wt::write_state(dev, "session-ids", &key, &id)?;
+                v.extend(["--session-id".into(), id, p]);
+            }
+            None => v.extend(claude_session_args(dev, &key, &wtp, &cfg)?),
+        }
         v
     };
     let mut hargs = vec!["--kind".to_string(), "agent".into(), "--account".into(), acct.label.clone(), "--".into()];

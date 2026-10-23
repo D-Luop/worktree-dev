@@ -348,44 +348,62 @@ class DevSummaryProvider {
     }
     return best;
   }
-  // Roster ⇄ action: move this session to the account with the most capacity, then reopen it there and
-  // compact. Claude can't hot-swap accounts in place, so `account switch` copies the transcript into the
-  // target account's store + records the binding; we then relaunch (agent resumes under the new account)
-  // and auto-/compact to shrink context. Compaction runs on the TARGET account because the source is
-  // typically exhausted (can't compact) — end state is: new account, compacted chat.
+  // Roster ⇄ action: continue this worktree on any other logged-in Claude or Codex account, live or
+  // stopped. `account switch` carries the chat over for Claude → Claude (transcript copy; we /compact on
+  // the target, since the source is usually exhausted), and otherwise writes a handoff brief that the
+  // relaunched agent starts from.
   switchAccount(slug, name) {
     const cur = this._bindingAccount(slug, name);
-    const target = this._pickSwitchTarget(cur);
-    if (!target) {
-      vscode.window.showWarningMessage('No other logged-in account with remaining capacity to switch to. Add one with `account add <name>` (then log in), or check `account ls`.');
-      return;
-    }
-    const pct = (n) => { const u = this._utilOf(n); return u === null ? 'usage unknown' : u + '% used'; };
-    vscode.window.showWarningMessage(
-      'Switch ' + slug + ' ' + name + " from '" + cur + "' to '" + target + "'?",
-      { modal: true, detail: cur + ': ' + pct(cur) + '  →  ' + target + ': ' + pct(target)
-        + '\n\nThe session reopens under ' + target + " (same conversation, via transcript copy) and auto-compacts to shrink context. Claude can't swap accounts in place, so the terminal restarts." },
-      'Switch account'
-    ).then((ch) => {
-      if (ch !== 'Switch account') return;
-      wtdRun(['account', 'switch', slug, name, '--to', target], { timeout: 60000 }, (e, so, se) => {
-        const out = ((se || '') + (so || '')).trim();
-        if (e) { vscode.window.showErrorMessage('account switch failed: ' + (out || e.message)); return; }
-        vscode.window.showInformationMessage('Switched ' + name + " → '" + target + "'. Reopening under it and compacting…");
-        this._relaunchAndCompact(slug, name);
+    wtdRun(['account', 'ls', '--json'], { timeout: 15000 }, (e, so) => {
+      let list = [];
+      try { list = JSON.parse(so); } catch {}
+      if (e || !Array.isArray(list)) { vscode.window.showErrorMessage('account switch: could not list accounts' + (e ? ': ' + e.message : '')); return; }
+      const label = (a) => a.provider === 'codex' ? 'codex:' + a.name : a.name;
+      const best = this._pickSwitchTarget(cur);
+      const items = list.filter((a) => a.logged_in && label(a) !== cur).map((a) => {
+        const util = a.provider === 'claude' ? this._utilOf(a.name) : null;
+        const sameChat = a.provider === 'claude' && !cur.startsWith('codex:');
+        return {
+          label: (a.provider === 'codex' ? '$(hubot) ' : '$(sparkle) ') + a.name + (label(a) === best ? '  $(star-full) most headroom' : ''),
+          description: [a.provider, a.email].filter(Boolean).join(' · '),
+          detail: (util === null ? (a.provider === 'codex' ? 'usage not tracked' : 'usage unknown') : util + '% used')
+            + ' — ' + (sameChat ? 'resumes the same conversation' : 'new session, seeded with a handoff brief'),
+          target: label(a), util: util === null ? 50 : util, sameChat,
+        };
+      }).sort((x, y) => (y.target === best) - (x.target === best) || x.util - y.util);
+      if (!items.length) {
+        vscode.window.showWarningMessage('No other logged-in Claude or Codex account. Add one in Settings → Accounts.');
+        return;
+      }
+      vscode.window.showQuickPick(items, {
+        title: 'Continue ' + name + ' on another account (now: ' + cur + ')',
+        placeHolder: 'Pick the account to continue on. Reopening restarts the session.',
+        matchOnDescription: true,
+      }).then((pick) => {
+        if (!pick) return;
+        wtdRun(['account', 'switch', slug, name, '--to', pick.target], { timeout: 60000 }, (e2, so2, se2) => {
+          if (e2) { vscode.window.showErrorMessage('account switch failed: ' + ((se2 || '').trim() || e2.message)); return; }
+          let res = {};
+          try { res = JSON.parse(so2); } catch {}
+          const resume = res.mode === 'resume';
+          vscode.window.showInformationMessage(name + ' → ' + pick.target + (resume ? ': resuming the same chat and compacting…' : ': starting a new session from a handoff brief…'));
+          this._relaunch(slug, name, resume ? '/compact' : null);
+        });
       });
     });
   }
-  // Kill the session's terminal and reopen it (agent.sh now reads the new binding → resumes under the
-  // target account), then send /compact once it's back up.
-  _relaunchAndCompact(slug, name) {
+  // End the session (a daemon-hosted one outlives its terminal tab), then reopen it: `agent` reads the
+  // new binding and launches under the target account. `after` is typed in once it's back up.
+  _relaunch(slug, name, after) {
     const key = this._key(slug, name);
-    const t = this._terms.get(key) || vscode.window.terminals.find((x) => termName(x) === name);
-    if (t) { try { t.dispose(); } catch {} this._terms.delete(key); }
-    setTimeout(() => {
-      this.openOrFocus(slug, name);
-      setTimeout(() => { const nt = this._terms.get(key); if (nt && nt.exitStatus === undefined) nt.sendText('/compact', true); }, 7000);
-    }, 1400);
+    wtdRun(['agent', 'stop', slug, name], { timeout: 15000 }, () => {
+      const t = this._terms.get(key) || vscode.window.terminals.find((x) => termName(x) === name);
+      if (t) { try { t.dispose(); } catch {} this._terms.delete(key); }
+      setTimeout(() => {
+        this.openOrFocus(slug, name);
+        if (after) setTimeout(() => { const nt = this._terms.get(key); if (nt && nt.exitStatus === undefined) nt.sendText(after, true); }, 7000);
+      }, 1400);
+    });
   }
   // a roster row was opened: focus the existing terminal if we have one (incl. a reload-revived tab
   // matched by name), otherwise launch a new one.
@@ -1119,6 +1137,12 @@ class DevSummaryProvider {
       .then(() => this._postBell(), (e) => vscode.window.showErrorMessage('claude-status: toggle bell failed: ' + (e && e.message)));
   }
 
+  // how many Codex logins exist: ~/.codex (once signed in) + each ~/.codex-accounts/<name>
+  _codexAccounts() {
+    let n = fs.existsSync(path.join(HOME, '.codex', 'auth.json')) ? 1 : 0;
+    try { n += fs.readdirSync(path.join(HOME, '.codex-accounts'), { withFileTypes: true }).filter((d) => d.isDirectory()).length; } catch {}
+    return n;
+  }
   // every configured account: the default (~/.claude) + each ~/.claude-accounts/<name>
   _accounts() {
     const list = [{ name: 'default', dir: path.join(HOME, '.claude'), json: path.join(HOME, '.claude.json') }];
@@ -1155,8 +1179,8 @@ class DevSummaryProvider {
         const tgt = this._pickSwitchTarget(a.name);
         vscode.window.showWarningMessage(
           'Claude account "' + a.name + '" is at ' + Math.round(util) + '% of its limit. ' +
-          (tgt ? 'Click ⇄ on a session to move it to "' + tgt + '" (reopens there + compacts).'
-               : 'No other logged-in account has capacity to switch to.')
+          (tgt ? 'Click ⇄ on a session to continue it on another account ("' + tgt + '" has the most headroom).'
+               : 'Click ⇄ on a session to continue it on another Claude or Codex account.')
         );
       }
     } catch {}
@@ -1227,7 +1251,7 @@ class DevSummaryProvider {
     // pinned plain-terminal row state (same idea, for the "terminal" row above the assistant)
     const plainTerm = vscode.window.terminals.find((x) => termName(x) === TERM_NAME);
     const terminal = { active: !!plainTerm, current: !!cur && termName(cur) === TERM_NAME };
-    let multiAccount = false; try { multiAccount = this._accounts().length > 1; } catch {}
+    let multiAccount = false; try { multiAccount = this._accounts().length + this._codexAccounts() > 1; } catch {}
     // groups: null = legacy grouping by repo (no daemon installed); edits need the daemon running
     const groups = this.daemon.groups || [];
     const canEditGroups = this.daemon.running;
@@ -1524,7 +1548,7 @@ class DevSummaryProvider {
       +'<i class="codicon codicon-issues tkt" title="Linked ticket (.claude-ticket.md)…"></i>'
       +(groupsData&&canEditGroups?'<i class="codicon codicon-folder mv" title="Move to group…"></i>':'')
       +(w.active&&!w.unread?'<i class="codicon codicon-mail unr" title="Mark unread"></i>':'')
-      +(w.active&&multiAcct?'<i class="codicon codicon-arrow-swap acc" title="Switch account (reopens under the one with most capacity)"></i>':'')
+      +(multiAcct?'<i class="codicon codicon-arrow-swap acc" title="Continue on another account (Claude or Codex)…"></i>':'')
       +(w.active?'<i class="codicon codicon-debug-stop term danger" title="End session (worktree stays)"></i>':'')
       +'<i class="codicon codicon-archive arch" title="Archive"></i>'
       +'<i class="codicon codicon-trash del danger" title="Delete worktree"></i>'

@@ -9,6 +9,7 @@ pub mod custom;
 pub mod daemon;
 pub mod gitx;
 pub mod guard;
+pub mod handoff;
 pub mod hook;
 pub mod issues;
 pub mod mcp;
