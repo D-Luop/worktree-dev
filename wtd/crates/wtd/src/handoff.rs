@@ -155,16 +155,79 @@ fn tail<T>(v: &[T], n: usize) -> &[T] {
     &v[v.len().saturating_sub(n)..]
 }
 
+const PLAN_MAX: usize = 12_000;
+const HANDOFF_MAX: usize = 4_000;
+
+/// Like `clip`, but cuts at a line boundary when one is reasonably close.
+fn clip_lines(s: &str, max: usize) -> String {
+    let c = clip(s, max);
+    let Some(body) = c.strip_suffix('…') else { return c };
+    let body = match body.rfind('\n') {
+        Some(i) if i > max / 2 => &body[..i],
+        _ => body,
+    };
+    format!("{body}\n…")
+}
+
+/// The plan's `## Handoff` section (heading included), and everything else.
+fn split_handoff(plan: &str) -> (Option<String>, String) {
+    let (mut handoff, mut rest) = (Vec::new(), Vec::new());
+    let (mut in_handoff, mut fence) = (false, false);
+    for l in plan.lines() {
+        if l.trim_start().starts_with("```") {
+            fence = !fence;
+        } else if !fence && (l.starts_with("# ") || l.starts_with("## ")) {
+            in_handoff = l.strip_prefix("## ").is_some_and(|h| h.trim().to_lowercase().starts_with("handoff"));
+        }
+        if in_handoff { &mut handoff } else { &mut rest }.push(l);
+    }
+    ((!handoff.is_empty()).then(|| handoff.join("\n")), rest.join("\n"))
+}
+
+/// A markdown block fenced so that fences inside the plan can't close it.
+fn fenced(body: &str) -> String {
+    let longest = body.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let f = "`".repeat((longest + 1).max(3));
+    format!("{f}markdown\n{body}\n{f}\n\n")
+}
+
+fn plan_section(wtp: &Path) -> String {
+    let path = wtp.join(".claude").join("plans").join("active-plan.md");
+    let Ok(plan) = std::fs::read_to_string(&path) else {
+        return "## Active plan\n\nNone: `.claude/plans/active-plan.md` doesn't exist. Reconstruct the intent from the transcript below, \
+                and write one (`/blueprint`) before editing source.\n\n"
+            .to_string();
+    };
+    let (handoff, rest) = split_handoff(&plan);
+    let mut s = format!(
+        "## Active plan (the source of truth; read this first)\n\nInlined from `{}`, Handoff section first. Long plans are clipped, so open the file for the full text.\n\n",
+        path.display()
+    );
+    let budget = match &handoff {
+        Some(h) => {
+            let h = clip_lines(h, HANDOFF_MAX);
+            s.push_str(&fenced(&h));
+            PLAN_MAX.saturating_sub(h.len())
+        }
+        None => {
+            s.push_str(
+                "The plan has no `## Handoff` section. Work out the current step and next action from its steps, its Progress Log \
+                 and the transcript below, then add one.\n\n",
+            );
+            PLAN_MAX
+        }
+    };
+    s.push_str(&fenced(&clip_lines(&rest, budget)));
+    s
+}
+
 pub fn render(d: &Digest, wtp: &Path, from: &str, to: &str) -> String {
     let mut s = format!(
         "# Handoff brief\n\nThis worktree's previous agent session (`{from}`) stopped, most likely at its usage limit. You (`{to}`) are taking over. \
-         This brief was extracted from its transcript, so it's raw notes, not a summary.\n\n## Where things stand\n\n{}",
+         Below: the active plan, the git state, then raw notes extracted from its transcript (not a summary).\n\n{}## Where things stand\n\n{}",
+        plan_section(wtp),
         git_section(wtp)
     );
-    let plan = wtp.join(".claude").join("plans").join("active-plan.md");
-    if plan.is_file() {
-        s.push_str(&format!("- Active plan (read it first; the source of truth): `{}`\n", plan.display()));
-    }
     if let Some(sum) = &d.summary {
         s.push_str(&format!("\n## Earlier context (the previous session's compaction summary)\n\n{}\n", clip(sum, 6000)));
     }
@@ -193,7 +256,7 @@ pub fn render(d: &Digest, wtp: &Path, from: &str, to: &str) -> String {
 pub fn prompt(brief: &Path) -> String {
     format!(
         "You are taking over this worktree from a previous agent session that stopped, most likely at its usage limit. \
-         Read the handoff brief at {} and the active plan, check the git state, then tell me in two or three lines where the work stands \
+         Read the handoff brief at {} (it starts with the active plan's Handoff section), check the git state, then tell me in two or three lines where the work stands \
          and what you'll do next, and continue from there.",
         brief.display()
     )
@@ -261,6 +324,68 @@ mod tests {
         assert_eq!(d.actions, vec![r#"shell: ["cargo","test"]"#]);
         assert!(codex_rollout(&home, Path::new(r"D:\dev\wt\c")).is_none());
         std::fs::remove_dir_all(home).ok();
+    }
+
+    fn worktree(name: &str, plan: Option<&str>) -> PathBuf {
+        let wt = std::env::temp_dir().join(format!("wtd-handoff-wt-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&wt);
+        std::fs::create_dir_all(wt.join(".claude").join("plans")).unwrap();
+        if let Some(p) = plan {
+            std::fs::write(wt.join(".claude").join("plans").join("active-plan.md"), p).unwrap();
+        }
+        wt
+    }
+
+    fn digest() -> Digest {
+        Digest { asks: vec!["add a login page".into()], replies: vec!["On it.".into()], ..Digest::default() }
+    }
+
+    #[test]
+    fn brief_inlines_plan_handoff_first() {
+        let wt = worktree("present", Some(concat!(
+            "# Plan: login\n\n## Sequential Steps\n- [x] Step 1\n- [ ] Step 2 — form\n\n",
+            "## Handoff\n- **Next action:** wire `submit()`\n### Gotchas\n```\n## not a heading\n```\n\n",
+            "## Progress Log\n- Step 1 done\n",
+        )));
+        let b = render(&digest(), &wt, "a", "b");
+        let at = |needle: &str| b.find(needle).unwrap_or_else(|| panic!("missing {needle:?} in\n{b}"));
+        assert!(at("## Handoff") < at("# Plan: login"), "Handoff before the rest of the plan");
+        assert!(at("wire `submit()`") < at("# Plan: login"));
+        assert!(at("## not a heading") < at("# Plan: login"), "fenced lines stay in the Handoff section");
+        assert!(at("## Progress Log") < at("## Where things stand"));
+        assert!(at("## Where things stand") < at("What the user asked"), "transcript tail below the plan");
+        assert!(b.contains("````markdown"), "fence longer than the plan's own");
+        assert_eq!(b.matches("## Handoff\n").count(), 1);
+        std::fs::remove_dir_all(wt).ok();
+    }
+
+    #[test]
+    fn brief_without_plan() {
+        let wt = worktree("absent", None);
+        let b = render(&digest(), &wt, "a", "b");
+        assert!(b.contains("## Active plan\n\nNone:"), "{b}");
+        assert!(!b.contains("```markdown"));
+        assert!(b.find("## Active plan").unwrap() < b.find("What the user asked").unwrap());
+        std::fs::remove_dir_all(wt).ok();
+    }
+
+    #[test]
+    fn brief_with_plan_missing_handoff() {
+        let wt = worktree("nohandoff", Some("# Plan: x\n\n## Sequential Steps\n- [ ] Step 1\n"));
+        let b = render(&digest(), &wt, "a", "b");
+        assert!(b.contains("no `## Handoff` section"), "{b}");
+        assert!(b.contains("- [ ] Step 1"));
+        std::fs::remove_dir_all(wt).ok();
+    }
+
+    #[test]
+    fn long_plan_is_clipped_at_a_line() {
+        let log: String = (0..2000).map(|i| format!("- entry {i}\n")).collect();
+        let wt = worktree("long", Some(&format!("# Plan: x\n\n## Handoff\n- next: y\n\n## Progress Log\n{log}")));
+        let s = plan_section(&wt);
+        assert!(s.len() < PLAN_MAX + 1000, "{}", s.len());
+        assert!(s.contains("- next: y") && s.contains("- entry 0\n") && s.contains("\n…\n"));
+        std::fs::remove_dir_all(wt).ok();
     }
 
     #[test]
