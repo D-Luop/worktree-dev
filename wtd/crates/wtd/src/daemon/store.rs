@@ -86,5 +86,5 @@ impl Store {
 }
 
 fn is_closed(m: &Message) -> bool {
-    matches!(m.state, MessageState::Delivered | MessageState::Denied)
+    matches!(m.state, MessageState::Delivered | MessageState::Denied | MessageState::Expired)
 }

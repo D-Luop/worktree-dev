@@ -44,7 +44,7 @@ pub fn main() -> Result<i32> {
                 "protocolVersion": params.get("protocolVersion").cloned().unwrap_or(json!("2025-06-18")),
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "wtd", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "WorkTreeDev fleet tools. Other worktrees (parallel agents on other branches/repos) can be inspected read-only — never modify another worktree. To message another worktree's agent, first propose the message and the reason to the user in chat; only call fleet_send if they agree. The user then approves it again in VS Code before anything is delivered.",
+                "instructions": "WorkTreeDev fleet tools. Other worktrees (parallel agents on other branches/repos) can be inspected read-only — never modify another worktree. To message another worktree's agent, first propose the message and the reason to the user in chat; only call fleet_send if they agree. The user then approves it again in VS Code before anything is delivered — approval said in chat doesn't release it.",
             }),
             "ping" => json!({}),
             "tools/list" => json!({ "tools": tools() }),
@@ -93,7 +93,7 @@ fn tools() -> Value {
         },
         {
             "name": "fleet_inbox",
-            "description": "Messages this worktree sent or received through fleet_send, with their state (pending = waiting for the user's approval, queued = approved and waiting for the target's turn to end, delivered, denied). Read-only.",
+            "description": "Messages this worktree sent or received through fleet_send, with their state (pending = waiting for the user's approval in VS Code, queued = approved and waiting for the target's turn to end, delivered, denied, expired = the target worktree was removed first). Read-only.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
             "annotations": { "readOnlyHint": true }
         },
@@ -159,7 +159,7 @@ fn call(dev: &Path, me: Option<&str>, name: &str, args: &Value) -> Result<String
             let mut c = Client::connect()?.context("the WorkTreeDev daemon isn't running, so messages can't be sent — ask the user to start it (tray icon or fleet panel)")?;
             let r = c.request(method::MESSAGE_SEND, json!({ "from_dir": paths::worktree_path(dev, me).to_string_lossy(), "to": to, "body": body }))?;
             Ok(format!(
-                "Message #{} to {to} is waiting for the user's approval in VS Code (they can edit or deny it). Once approved it's delivered when {to}'s agent finishes its current turn. Let the user know it's waiting for them.",
+                "Message #{} to {to} is waiting for the user's approval in VS Code: the notification, the \"awaiting approval\" status-bar item, or the 💬 on your row in the Fleet panel (Approve / Edit / Deny). Saying \"approved\" in chat doesn't release it. Once approved it's delivered when {to}'s agent finishes its current turn. Tell the user where to approve it.",
                 r["id"]
             ))
         }
@@ -173,7 +173,14 @@ fn call(dev: &Path, me: Option<&str>, name: &str, args: &Value) -> Result<String
             }
             Ok(msgs.iter().map(|m| {
                 let dir = if m["from"] == me { format!("→ to {}", m["to"].as_str().unwrap_or("?")) } else { format!("← from {}", m["from"].as_str().unwrap_or("?")) };
-                format!("#{} {dir} [{}]\n{}", m["id"], m["state"].as_str().unwrap_or("?"), m["body"].as_str().unwrap_or(""))
+                let state = match m["state"].as_str().unwrap_or("?") {
+                    "pending" => "pending — awaiting the user's approval in VS Code",
+                    "queued" => "queued — approved, delivered when the target's turn ends",
+                    "expired" => "expired — the target worktree was removed",
+                    s => s,
+                };
+                let sent = crate::daemon::fmt_local(m["created"].as_i64().unwrap_or(0));
+                format!("#{} {dir} [{state}] · sent {sent}\n{}", m["id"], m["body"].as_str().unwrap_or(""))
             }).collect::<Vec<_>>().join("\n\n"))
         }
         "preset_list" => {

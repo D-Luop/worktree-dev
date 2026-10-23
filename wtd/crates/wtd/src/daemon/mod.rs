@@ -692,6 +692,7 @@ async fn rescan(d: &Arc<Daemon>) {
     for id in &gone {
         d.remove(&mut inner, id);
     }
+    messages::expire_orphans(d, &mut inner);
     let want: Vec<(String, PathBuf)> = inner.worktrees.values().filter(|w| w.id != DEV_ID).map(|w| (w.id.clone(), PathBuf::from(&w.path))).collect();
     drop(inner);
     for id in &gone {
