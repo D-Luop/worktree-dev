@@ -75,7 +75,7 @@ fn ensure_hooks(codex_home: &Path, exe: &Path) -> Result<()> {
     };
     let wanted: Vec<(&str, Vec<Value>)> = vec![
         ("UserPromptSubmit", vec![ours("working", None)]),
-        ("PreToolUse", vec![ours("tool", Some("*")), ours("edit", Some("apply_patch|Edit|Write"))]),
+        ("PreToolUse", vec![ours("tool", Some("*")), ours("edit", Some("apply_patch|Edit|Write")), ours("plan-nudge", Some("apply_patch|Edit|Write"))]),
         ("PermissionRequest", vec![ours("stop", None)]), // waiting on the user, like Claude's Notification
         ("Stop", vec![ours("stop", None)]),
         ("SessionEnd", vec![ours("sessionend", None)]),
@@ -224,7 +224,7 @@ mod tests {
         let stop = hooks["hooks"]["Stop"].as_array().unwrap();
         assert_eq!(stop.len(), 2, "user's own Stop hook kept + ours");
         assert!(stop[0]["hooks"][0]["command"] == "notify-send done");
-        assert_eq!(hooks["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
+        assert_eq!(hooks["hooks"]["PreToolUse"].as_array().unwrap().len(), 3);
         std::fs::remove_dir_all(&t).ok();
     }
 }

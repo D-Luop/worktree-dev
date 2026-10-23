@@ -18,6 +18,7 @@ pub mod issues;
 pub mod limit;
 pub mod mcp;
 pub mod new;
+pub mod nudge;
 pub mod paths;
 pub mod proposal;
 pub mod repos;
@@ -79,6 +80,7 @@ Fleet & daemon
   wtd worktree parent <slug/name> <delegate/slug|none>
                                      nest a worktree under its delegator in the roster
   wtd hook <event>                   Claude Code hook handler (reads hook JSON on stdin)
+  wtd hook plan-nudge                PreToolUse reminder to write / update the active plan
   wtd mcp                            stdio MCP server: read-only fleet tools for agents
   wtd tray [--spawn|--quit|--logon on|off]
                                      notification-area icon: sessions, new session, start/stop the daemon
@@ -95,7 +97,7 @@ Fleet & daemon
 pub fn cli_main() -> ! {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
-        // the hook must never fail or print: it runs inside every agent's tool calls
+        // the hook must never fail, and prints only hook JSON: it runs inside every agent's tool calls
         Some("hook") => hook::main(&args[1..]),
         Some(cmd) => match dispatch(cmd, &args[1..]) {
             Ok(c) => c,

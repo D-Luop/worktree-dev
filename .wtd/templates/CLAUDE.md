@@ -18,7 +18,16 @@ to scaffold it). It is the **source of truth** for the work in this session — 
 first, work to it, and **revise it as the work progresses**. Check off steps as you complete them,
 append to the Progress Log, and update the plan whenever scope or approach changes. After each step:
 commit + push, update the plan, then ask the user before continuing. If a plan already exists when you
-start, read it and resume from the last unchecked step (or the bottom of the Progress Log).
+start, read its `## Handoff` section and resume from it (else the last unchecked step / the bottom of
+the Progress Log).
+
+**Write the plan before your first source edit — no exceptions.** Then keep it **handoff-ready**:
+another agent (another account, or Codex) may take over at any moment with only this file and the
+transcript. At **every step boundary** and **before any long-running command** (full build, test
+suite, deploy, long script), append to the Progress Log and **overwrite `## Handoff`**: current step,
+the exact next action, open questions, decisions made and why, gotchas found, and files in flux /
+uncommitted state. A hook reminds you if you edit source with no plan, or go many edits without
+touching it.
 
 (Double-click the `view_active_plan` button in the commit pane to render the plan in the diff pane.)
 
