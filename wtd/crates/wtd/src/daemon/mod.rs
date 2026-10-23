@@ -46,9 +46,13 @@ pub fn main(args: &[String]) -> Result<i32> {
     match args.first().map(String::as_str) {
         Some("start") => start(),
         Some("stop") => stop(args.iter().any(|a| a == "--force" || a == "-f")),
+        Some("restart") => {
+            stop(true)?;
+            start()
+        }
         Some("status") => status(),
         Some("run") => run_foreground(),
-        _ => bail!("usage: wtd daemon start|stop|status|run"),
+        _ => bail!("usage: wtd daemon start|stop|restart|status|run"),
     }
 }
 

@@ -237,3 +237,113 @@ pub fn no_window(cmd: &mut Command) -> &mut Command {
 pub fn is_null(h: HANDLE) -> bool {
     h.is_null()
 }
+
+// --- processes holding a folder as their working directory ------------------------------------------
+
+#[repr(C)]
+struct ProcessBasicInformation {
+    exit_status: isize,
+    peb: usize,
+    affinity: usize,
+    base_priority: isize,
+    pid: usize,
+    parent: usize,
+}
+
+#[link(name = "ntdll")]
+extern "system" {
+    fn NtQueryInformationProcess(h: HANDLE, class: u32, info: *mut c_void, len: u32, ret: *mut u32) -> i32;
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn ReadProcessMemory(h: HANDLE, addr: *const c_void, buf: *mut c_void, size: usize, read: *mut usize) -> BOOL;
+}
+
+unsafe fn read<T: Copy>(h: HANDLE, addr: usize) -> Option<T> {
+    let mut v = std::mem::MaybeUninit::<T>::uninit();
+    let mut n = 0usize;
+    (ReadProcessMemory(h, addr as *const c_void, v.as_mut_ptr() as *mut c_void, std::mem::size_of::<T>(), &mut n) != FALSE
+        && n == std::mem::size_of::<T>())
+    .then(|| v.assume_init())
+}
+
+/// A 64-bit process's current directory, read from its PEB (None for 32-bit or inaccessible ones).
+fn process_cwd(pid: u32) -> Option<String> {
+    use windows_sys::Win32::System::Threading::{IsWow64Process, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+        if h.is_null() {
+            return None;
+        }
+        let _close = Handle(h);
+        let mut wow: BOOL = FALSE;
+        if IsWow64Process(h, &mut wow) == FALSE || wow != FALSE {
+            return None;
+        }
+        let mut pbi: ProcessBasicInformation = std::mem::zeroed();
+        let mut ret = 0u32;
+        if NtQueryInformationProcess(h, 0, &mut pbi as *mut _ as *mut c_void, std::mem::size_of::<ProcessBasicInformation>() as u32, &mut ret) != 0 {
+            return None;
+        }
+        // PEB.ProcessParameters @0x20; RTL_USER_PROCESS_PARAMETERS.CurrentDirectory.DosPath @0x38
+        let params: usize = read(h, pbi.peb + 0x20)?;
+        let len: u16 = read(h, params + 0x38)?;
+        let buf: usize = read(h, params + 0x40)?;
+        let mut s = vec![0u16; len as usize / 2];
+        let mut n = 0usize;
+        if ReadProcessMemory(h, buf as *const c_void, s.as_mut_ptr() as *mut c_void, len as usize, &mut n) == FALSE {
+            return None;
+        }
+        Some(String::from_utf16_lossy(&s))
+    }
+}
+
+/// End every process whose working directory is `dir` or inside it (e.g. a shell left in a worktree
+/// being archived): on Windows that alone blocks moving or deleting the folder. Returns their pids.
+pub fn kill_processes_in(dir: &std::path::Path) -> Vec<u32> {
+    use windows_sys::Win32::System::ProcessStatus::K32EnumProcesses;
+    use windows_sys::Win32::System::Threading::{TerminateProcess, PROCESS_TERMINATE};
+    let norm = |s: &str| s.replace('/', "\\").trim_end_matches('\\').to_lowercase();
+    let root = norm(&dir.to_string_lossy());
+    let mut pids = vec![0u32; 4096];
+    let mut bytes = 0u32;
+    if unsafe { K32EnumProcesses(pids.as_mut_ptr(), (pids.len() * 4) as u32, &mut bytes) } == FALSE {
+        return vec![];
+    }
+    pids.truncate(bytes as usize / 4);
+    let me = std::process::id();
+    let mut killed = vec![];
+    for pid in pids.into_iter().filter(|p| *p != 0 && *p != me) {
+        let Some(cwd) = process_cwd(pid) else { continue };
+        let c = norm(&cwd);
+        if c == root || c.starts_with(&format!("{root}\\")) {
+            unsafe {
+                let h = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+                if !h.is_null() {
+                    let _close = Handle(h);
+                    if TerminateProcess(h, 1) != FALSE {
+                        killed.push(pid);
+                    }
+                }
+            }
+        }
+    }
+    killed
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn kills_processes_working_in_a_folder() {
+        let dir = std::env::temp_dir().join(format!("wtd-hold-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let mut child = std::process::Command::new("cmd").args(["/c", "ping -n 30 127.0.0.1 >nul"]).current_dir(dir.join("sub")).spawn().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let killed = super::kill_processes_in(&dir);
+        assert!(killed.contains(&child.id()), "{killed:?}");
+        child.wait().unwrap();
+        assert!(super::kill_processes_in(&dir.join("elsewhere")).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
