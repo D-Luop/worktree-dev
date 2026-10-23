@@ -57,6 +57,7 @@ function refreshDevRoot() {
   WTD = path.join(DEV, '.wtd');
 }
 const IS_WIN = process.platform === 'win32';
+const PASTE_IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'];
 const ASST_NAME = 'assistant';   // the reserved terminal name of the pinned fleet-management session
 const TERM_NAME = 'terminal';    // the reserved name of the pinned plain shell row (above assistant)
 // The shell each worktree terminal runs. On Windows that's Git Bash (so the .wtd bash scripts run);
@@ -471,36 +472,24 @@ class DevSummaryProvider {
   pasteImage() {
     const target = vscode.window.activeTerminal || this._current;
     if (!target) { vscode.window.showInformationMessage('claude-status: open a session first, then add an image.'); return; }
-    const dir = path.join(WTD, 'state', 'pasted-images');
-    try { fs.mkdirSync(dir, { recursive: true }); } catch {}
-    const insert = (file) => { target.show(); target.sendText((IS_WIN ? file.replace(/\//g, '\\') : file) + ' ', false); };
     const pick = () => {
-      vscode.window.showOpenDialog({ canSelectMany: false, openLabel: 'Add image',
-        filters: { Images: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'] } }).then((uris) => {
+      vscode.window.showOpenDialog({ canSelectMany: true, openLabel: 'Add image',
+        filters: { Images: PASTE_IMAGE_EXTS } }).then((uris) => {
         if (!uris || !uris.length) return;
-        const src = uris[0].fsPath;
-        // copy into the space-free staging dir so the inserted path can't trip Claude's path auto-detect
-        const staged = path.join(dir, 'img-' + Date.now() + (path.extname(src) || '.png'));
-        try { fs.copyFileSync(src, staged); insert(staged); }
+        try { this._insertImages(target, uris.map((u, i) => this._stageImageFile(u.fsPath, i))); }
         catch (e) { vscode.window.showErrorMessage('claude-status: image copy failed: ' + e.message); }
       });
     };
     if (!IS_WIN) return pick();
-    // Windows: try the clipboard image first (the case native paste can't handle); else pick a file.
-    const dest = path.join(dir, 'img-' + Date.now() + '.png');
-    const psPath = dest.replace(/\//g, '\\').replace(/'/g, "''");
-    const ps = "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $i=[System.Windows.Forms.Clipboard]::GetImage(); if($i){ $i.Save('" + psPath + "',[System.Drawing.Imaging.ImageFormat]::Png); $i.Dispose(); exit 0 } else { exit 3 }";
-    cp.execFile('powershell.exe', ['-NoProfile', '-STA', '-Command', ps], { timeout: 8000 }, (e) => {
-      if (!e) insert(dest);   // clipboard held an image → staged + inserted
-      else pick();            // nothing on the clipboard → fall back to a file picker
-    });
+    // Windows: try the clipboard first (the case native paste can't handle); else pick a file.
+    this._stageClipboardImages((files) => (files.length ? this._insertImages(target, files) : pick()));
   }
 
-  // Ctrl+V into a focused session: paste TEXT normally, but if the clipboard holds an IMAGE (and no
-  // text), stage it to a space-free path and INSERT that path so Claude Code loads the picture — the
-  // same trick as the 📷 button, minus the file-picker fallback. Bound to ctrl+v when a terminal is
-  // focused (Windows only; tmux/native paste handles it elsewhere). We check clipboard text first so
-  // the common text paste stays instant and never spawns powershell.
+  // Ctrl+V into a focused session: paste TEXT normally, but if the clipboard holds an IMAGE or copied
+  // image FILES (and no text), stage them to space-free paths and INSERT those so Claude Code loads the
+  // pictures — the same trick as the 📷 button, minus the file-picker fallback. Bound to ctrl+v when a
+  // terminal is focused (Windows only; tmux/native paste handles it elsewhere). We check clipboard text
+  // first so the common text paste stays instant and never spawns powershell.
   async smartPaste() {
     const normalPaste = () => vscode.commands.executeCommand('workbench.action.terminal.paste');
     let text = '';
@@ -509,14 +498,40 @@ class DevSummaryProvider {
     if (!IS_WIN) return normalPaste();
     const target = vscode.window.activeTerminal || this._current;
     if (!target) return normalPaste();
+    this._stageClipboardImages((files) => (files.length ? this._insertImages(target, files) : normalPaste()));
+  }
+
+  // insert staged image paths (no Enter); Claude Code / Codex pick up an image path on submit
+  _insertImages(target, files) {
+    target.show();
+    target.sendText(files.map((f) => (IS_WIN ? f.replace(/\//g, '\\') : f)).join(' ') + ' ', false);
+  }
+
+  // copy into the space-free staging dir so the inserted path can't trip Claude's path auto-detect
+  _stageImageFile(src, i = 0) {
+    const dir = path.join(WTD, 'state', 'pasted-images');
+    fs.mkdirSync(dir, { recursive: true });
+    const staged = path.join(dir, 'img-' + Date.now() + (i ? '-' + i : '') + (path.extname(src) || '.png'));
+    fs.copyFileSync(src, staged);
+    return staged;
+  }
+
+  // Windows clipboard → staged image paths: a bitmap (screenshot) is saved as png; copied files
+  // (Explorer Ctrl+C) are staged only if every one is an image. [] when there's nothing to stage.
+  _stageClipboardImages(cb) {
     const dir = path.join(WTD, 'state', 'pasted-images');
     try { fs.mkdirSync(dir, { recursive: true }); } catch {}
     const dest = path.join(dir, 'img-' + Date.now() + '.png');
     const psPath = dest.replace(/\//g, '\\').replace(/'/g, "''");
-    const ps = "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $i=[System.Windows.Forms.Clipboard]::GetImage(); if($i){ $i.Save('" + psPath + "',[System.Drawing.Imaging.ImageFormat]::Png); $i.Dispose(); exit 0 } else { exit 3 }";
-    cp.execFile('powershell.exe', ['-NoProfile', '-STA', '-Command', ps], { timeout: 8000 }, (e) => {
-      if (!e) { target.show(); target.sendText(dest.replace(/\//g, '\\') + ' ', false); }  // image → insert path
-      else normalPaste();   // nothing pasteable as an image → ordinary paste
+    const ps = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $i=[System.Windows.Forms.Clipboard]::GetImage(); if($i){ $i.Save('" + psPath + "',[System.Drawing.Imaging.ImageFormat]::Png); $i.Dispose(); exit 0 }; $f=[System.Windows.Forms.Clipboard]::GetFileDropList(); if($f.Count){ $f; exit 4 }; exit 3";
+    cp.execFile('powershell.exe', ['-NoProfile', '-STA', '-Command', ps], { timeout: 8000 }, (e, out) => {
+      if (!e) return cb([dest]);
+      if (e.code !== 4) return cb([]);
+      const files = String(out).split(/\r?\n/).filter(Boolean);
+      if (!files.every((f) => PASTE_IMAGE_EXTS.includes(path.extname(f).slice(1).toLowerCase()))) return cb([]);
+      let staged = [];
+      try { staged = files.map((f, i) => this._stageImageFile(f, i)); } catch {}
+      cb(staged);
     });
   }
 
