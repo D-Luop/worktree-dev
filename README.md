@@ -238,6 +238,11 @@ the daemon is up, and reopening the row re-attaches to it.
 
   It renders what the daemon pushes and calls `wtd.exe` for actions; it does no polling of its
   own.
+
+  `install.sh` builds it from source with `build-vsix.py` (stdlib Python, no vsce/npm) and installs
+  the result. The version is derived from `package.json` plus the number of commits that touched the
+  folder, so it changes with every source change. **Don't bump `package.json` or commit a `.vsix`**
+  (it's gitignored); to try a change, re-run `install.sh` or `python build-vsix.py` and reload.
 - **Claude Code / Codex:** run interactively in each session, and headless for review, skeptic and
   ask. Status hooks come from `~/.claude/settings.json` (and the account's `CODEX_HOME/hooks.json`),
   skills from `.wtd/templates/.claude/skills`, and subagent definitions for the reviewer, skeptic

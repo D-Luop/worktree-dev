@@ -44,3 +44,5 @@ wtd/target/
 .wtd/config.json
 # your own skills/tools/CLAUDE.md additions/hooks (Settings → Customizations)
 .wtd/custom/
+# The claude-status extension is built from source at install time (build-vsix.py) — never commit it.
+.wtd/templates/vscode-claude-status/*.vsix

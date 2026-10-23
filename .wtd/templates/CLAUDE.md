@@ -87,6 +87,10 @@ raise it with the user — don't quietly edit a generated file.
 
 <!-- Repo-specific build/test/deploy commands. Fill in for your codebase, or delete. -->
 
+In the worktree-dev repo: the claude-status VS Code extension's `.vsix` is built from source by
+`install.sh`. Don't bump its `package.json` version or commit a `.vsix`; to try a change, run
+`python .wtd/templates/vscode-claude-status/build-vsix.py` and install the result.
+
 ## Showing the user a design (HTML preview)
 
 When you build something **visual** the user should look at (a page/component/theme mockup, a
