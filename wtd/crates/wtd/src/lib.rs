@@ -20,6 +20,7 @@ pub mod mcp;
 pub mod new;
 pub mod nudge;
 pub mod paths;
+pub mod platforms;
 pub mod program;
 pub mod proposal;
 pub mod repos;
@@ -79,6 +80,7 @@ Fleet & daemon
   wtd daemon start|stop [--force]|status|run
                                      control the background daemon (--force: also end hosted sessions)
   wtd ls [--json]                    list worktrees (status, git, live session)
+  wtd platforms [--refresh]          where worktrees can run: windows + WSL distros and their tools (JSON)
   wtd open <slug/name> [--in vscode|zed|terminal]
                                      show a worktree's session (default: `wtd frontend`)
   wtd frontend [vscode|zed|terminal] show or set the default frontend
@@ -140,6 +142,7 @@ fn dispatch(cmd: &str, rest: &[String]) -> Result<i32> {
         "repo" => settings::repo_main(rest),
         "account" => settings::account_main(rest),
         "env" => settings::env_main(rest),
+        "platforms" => platforms::main(rest),
         "ls" => ls_cmd(rest.iter().any(|a| a == "--json")),
         "agent" => agent::main(rest),
         "archive" => agent::archive_main(rest),

@@ -164,6 +164,7 @@ struct Daemon {
     /// worktree id → its file watcher (dropping it releases the directory handles)
     watchers: Mutex<HashMap<String, notify::RecommendedWatcher>>,
     updates: update::Updates,
+    platforms: Mutex<crate::platforms::Cache>,
 }
 
 impl Daemon {
@@ -272,7 +273,7 @@ async fn serve(dev: PathBuf) -> Result<()> {
 
     let (tx, _) = broadcast::channel(1024);
     let inner = Inner { store: store::Store::load(&dev), ..Default::default() };
-    let d = Arc::new(Daemon { dev: dev.clone(), inner: Mutex::new(inner), tx, next_conn: AtomicU64::new(1), watchers: Mutex::new(HashMap::new()), updates: Default::default() });
+    let d = Arc::new(Daemon { dev: dev.clone(), inner: Mutex::new(inner), tx, next_conn: AtomicU64::new(1), watchers: Mutex::new(HashMap::new()), updates: Default::default(), platforms: Default::default() });
     eprintln!("[{}] wtd daemon {} up: pid {}, dev {}", now(), env!("CARGO_PKG_VERSION"), std::process::id(), dev.display());
 
     rescan(&d).await;
@@ -624,6 +625,15 @@ async fn dispatch(d: &Arc<Daemon>, conn: u64, req: &Request, out: &mpsc::Unbound
         method::MESSAGE_SEND => messages::send(d, p),
         method::MESSAGE_DECIDE => messages::decide(d, p),
         method::MESSAGE_LIST => messages::list(d, p),
+        method::PLATFORMS_LIST => {
+            let refresh = p.get("refresh").and_then(Value::as_bool).unwrap_or(false);
+            if let Some(v) = d.platforms.lock().unwrap_or_else(|p| p.into_inner()).fresh().filter(|_| !refresh) {
+                return Ok(v);
+            }
+            let v = serde_json::to_value(tokio::task::spawn_blocking(crate::platforms::detect).await?)?;
+            d.platforms.lock().unwrap_or_else(|p| p.into_inner()).store(v.clone());
+            Ok(v)
+        }
         method::UPDATE_STATUS => Ok(update::broadcast(d)),
         method::UPDATE_CHECK => {
             if p.get("wait").and_then(Value::as_bool).unwrap_or(false) {
