@@ -3,6 +3,8 @@
 //! review.sh: pass 1 (reviewer, Sonnet) writes review.md + highlights.md; pass 2 (adversarial skeptic,
 //! Opus) appends what pass 1 missed. Both run headless, READ-ONLY on the worktree, from a neutral
 //! workspace (.wtd/reviews). Reports land in <worktree>/.claude/reviews/<timestamp>/.
+//! A WSL worktree is reviewed inside its distro: git and both passes run there through `wsl.exe`,
+//! reading the Windows-side inputs through `/mnt`.
 
 use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -15,6 +17,7 @@ use wtd_core::status::{apply, Event, Status};
 
 use crate::client::Client;
 use crate::gitx::{self, s};
+use crate::wsl_backend::{self, path};
 use crate::{paths, statusfile};
 
 /// Local time formatted with a small strftime subset (%Y %m %d %H %M %S).
@@ -26,22 +29,92 @@ pub fn local_stamp(fmt: &str) -> String {
         .replace("%H", &format!("{:02}", t.wHour)).replace("%M", &format!("{:02}", t.wMinute)).replace("%S", &format!("{:02}", t.wSecond))
 }
 
-fn git_in(wt: &Path, args: &[&str]) -> String {
-    let mut a = vec!["-C", wt.to_str().unwrap_or(".")];
-    a.extend_from_slice(args);
-    gitx::out(&a).unwrap_or_default()
+/// Where the review runs: on Windows, or inside the distro holding a WSL worktree.
+#[derive(Debug, Clone, PartialEq)]
+enum Host {
+    Windows,
+    Wsl { distro: String, wsl_path: String },
+}
+
+impl Host {
+    /// A Windows path as the reviewer sees it: a worktree's `\wsl.localhost` view → its Linux path,
+    /// `D:\x` → `/mnt/d/x`.
+    fn path(&self, p: &Path) -> String {
+        match self {
+            Host::Windows => s(p),
+            Host::Wsl { .. } => {
+                let w = s(p);
+                wsl_backend::path::from_unc(&w).map(|(_, l)| l).or_else(|| wsl_backend::path::to_mnt(p)).unwrap_or(w)
+            }
+        }
+    }
+
+    fn git(&self, wt: &Path, args: &[&str]) -> String {
+        match self {
+            Host::Windows => {
+                let mut a = vec!["-C", wt.to_str().unwrap_or(".")];
+                a.extend_from_slice(args);
+                gitx::out(&a).unwrap_or_default()
+            }
+            Host::Wsl { distro, wsl_path } => {
+                let argv: Vec<&str> = ["git", "--no-optional-locks"].into_iter().chain(args.iter().copied()).collect();
+                wsl_backend::run(&wsl_backend::exec_args(distro, Some(wsl_path), &argv)).unwrap_or_default()
+            }
+        }
+    }
+
+    /// `claude <argv>` started in `cwd`, with `config_dir` as its CLAUDE_CONFIG_DIR (None: the default
+    /// login of that side).
+    fn claude(&self, argv: &[String], cwd: &Path, config_dir: Option<&str>) -> Command {
+        match self {
+            Host::Windows => {
+                let (exe, prefix) = crate::run::command_for("claude");
+                let mut c = Command::new(exe);
+                c.args(&prefix).args(argv).current_dir(cwd);
+                match config_dir {
+                    Some(d) => c.env("CLAUDE_CONFIG_DIR", d),
+                    None => c.env_remove("CLAUDE_CONFIG_DIR"),
+                };
+                c
+            }
+            Host::Wsl { distro, .. } => {
+                let mut full = vec!["claude".to_string()];
+                full.extend_from_slice(argv);
+                let vars: Vec<(&str, String)> = config_dir.map(|d| ("CLAUDE_CONFIG_DIR", d.to_string())).into_iter().collect();
+                let mut c = Command::new(wsl_backend::wsl_exe());
+                c.args(wsl_backend::login_args(distro, Some(&self.path(cwd)), &full));
+                c.env_clear().envs(wsl_backend::session_env(crate::session_env::current(), &vars));
+                crate::win::no_window(&mut c);
+                c
+            }
+        }
+    }
+}
+
+/// `claude` args shared by both passes and the interactive reviewer.
+fn reviewer_args(agent: &str, model: &str, add_dirs: &[String]) -> Vec<String> {
+    let mut v: Vec<String> = ["--agent", agent, "--model", model].map(String::from).to_vec();
+    for d in add_dirs {
+        v.extend(["--add-dir".to_string(), d.clone()]);
+    }
+    v
+}
+
+/// Write/Edit denied on the worktree and the reference checkouts, in the reviewer's own paths.
+fn deny_rules(wt: &str, refs: &str) -> Vec<String> {
+    vec![format!("Write({wt}/**)"), format!("Edit({wt}/**)"), format!("Edit({refs}/**)")]
 }
 
 /// Files that are generated (linguist-generated, or a "Code generated … DO NOT EDIT" / "@generated"
 /// header) — excluded from the diff the reviewer reads, listed separately.
-fn generated(wt: &Path, files: &[String]) -> Vec<String> {
+fn generated(host: &Host, wt: &Path, files: &[String]) -> Vec<String> {
     if files.is_empty() {
         return vec![];
     }
     let mut gen: std::collections::HashSet<String> = Default::default();
     let mut args = vec!["check-attr", "linguist-generated", "--"];
     args.extend(files.iter().map(String::as_str));
-    for line in git_in(wt, &args).lines() {
+    for line in host.git(wt, &args).lines() {
         if let Some((path, val)) = line.rsplit_once(": ") {
             if val.trim() == "true" {
                 gen.insert(path.trim_end_matches(": linguist-generated").to_string());
@@ -160,16 +233,14 @@ struct PassResult {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_pass(label: &str, model: &str, agent: &str, prompt: &str, add_dirs: &[PathBuf], deny: &[String], cwd: &Path, stream_file: &Path) -> Result<PassResult> {
-    let (exe, prefix) = crate::run::command_for("claude");
-    let mut c = Command::new(exe);
-    c.args(&prefix).args(["-p", prompt, "--agent", agent, "--model", model]);
-    for d in add_dirs {
-        c.arg("--add-dir").arg(d);
-    }
-    c.args(["--permission-mode", "acceptEdits", "--allowedTools", "Read", "Grep", "Glob", "Bash", "TodoWrite", "Write", "Edit", "--disallowedTools"]);
-    c.args(deny);
-    c.args(["--output-format", "stream-json", "--verbose"]).current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+fn run_pass(host: &Host, config_dir: Option<&str>, label: &str, model: &str, agent: &str, prompt: &str, add_dirs: &[String], deny: &[String], cwd: &Path, stream_file: &Path) -> Result<PassResult> {
+    let mut argv = vec!["-p".to_string(), prompt.to_string()];
+    argv.extend(reviewer_args(agent, model, add_dirs));
+    argv.extend(["--permission-mode", "acceptEdits", "--allowedTools", "Read", "Grep", "Glob", "Bash", "TodoWrite", "Write", "Edit", "--disallowedTools"].map(String::from));
+    argv.extend_from_slice(deny);
+    argv.extend(["--output-format", "stream-json", "--verbose"].map(String::from));
+    let mut c = host.claude(&argv, cwd, config_dir);
+    c.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = c.spawn().context("starting claude")?;
     let stderr = child.stderr.take().unwrap();
     let err_thread = std::thread::spawn(move || {
@@ -246,8 +317,11 @@ pub fn main(args: &[String]) -> Result<i32> {
         bail!("usage: review <slug> <name> [-i] [--main] [--base <ref>] [--model <m>] [--deep] [--account <a>] [ref…]");
     };
     let refs = pos[2..].to_vec();
-    let bare = gitx::require_repo(&dev, &slug)?;
-    let wt = paths::worktree_path(&dev, &format!("{slug}/{name}"));
+    let id = format!("{slug}/{name}");
+    let (host, wt) = match wsl_backend::find(&dev, &id) {
+        Some(e) => (Host::Wsl { distro: e.distro.clone(), wsl_path: e.wsl_path.clone() }, e.unc()),
+        None => (Host::Windows, paths::worktree_path(&dev, &id)),
+    };
     if !wt.is_dir() {
         bail!("no worktree at {} (create one with: agent {slug} {name})", wt.display());
     }
@@ -256,29 +330,53 @@ pub fn main(args: &[String]) -> Result<i32> {
     let racc = account.or_else(|| std::env::var("REVIEW_ACCOUNT").ok().filter(|v| !v.is_empty()))
         .or_else(|| roles.get("review").and_then(|r| r.strip_prefix("claude:")).map(String::from))
         .filter(|a| a != "default");
-    std::env::remove_var("CLAUDE_CONFIG_DIR");
-    if let Some(a) = &racc {
-        let d = home.join(".claude-accounts").join(a);
-        if !d.is_dir() {
-            bail!("no Claude account '{a}'");
+    // the reviewer's CLAUDE_CONFIG_DIR as it sees it (None: that side's default login), its Windows
+    // view (for the usage-limit reset), and where reference checkouts live
+    let (config_dir, usage_dir, refs_root) = match &host {
+        Host::Windows => {
+            let d = racc.as_ref().map(|a| home.join(".claude-accounts").join(a));
+            if let (Some(a), Some(d)) = (&racc, &d) {
+                if !d.is_dir() {
+                    bail!("no Claude account '{a}'");
+                }
+            }
+            (d.as_deref().map(s), d.unwrap_or_else(|| home.join(".claude")), s(&dev.join("refs")))
         }
-        std::env::set_var("CLAUDE_CONFIG_DIR", d);
-    }
+        Host::Wsl { distro, .. } => {
+            let lhome = wsl_backend::home(&dev, distro)?;
+            let a = wsl_backend::launch::account_for(distro, &lhome, racc.as_deref().unwrap_or("default"));
+            let dir = a.claude_dir.clone().unwrap_or_else(|| path::join(&lhome, ".claude"));
+            if a.claude_dir.is_some() && !path::unc(distro, &dir).is_dir() {
+                bail!("no Claude account '{}' in '{distro}' (log in there first: wsl -d {distro} -- claude /login)", a.label);
+            }
+            (a.claude_dir, path::unc(distro, &dir), path::join(&wsl_backend::layout(&dev, distro)?.root, "refs"))
+        }
+    };
 
     // base: --base, else --main → the default branch, else the upstream, else the default branch
-    let _ = gitx::ok(&["-C", &s(&bare), "fetch", "--quiet", "origin"]);
-    let default_br = gitx::default_branch(&bare);
+    let (default_br, has_origin) = match &host {
+        Host::Windows => {
+            let bare = gitx::require_repo(&dev, &slug)?;
+            let _ = gitx::ok(&["-C", &s(&bare), "fetch", "--quiet", "origin"]);
+            (gitx::default_branch(&bare), gitx::has_origin(&bare))
+        }
+        // the distro's clone always has the origin it was cloned from
+        Host::Wsl { distro, .. } => {
+            host.git(&wt, &["fetch", "--quiet", "origin"]);
+            (wsl_backend::repo::default_branch(&wsl_backend::repo::Sh::Wsl(distro.clone()), &wsl_backend::layout(&dev, distro)?, &slug), true)
+        }
+    };
     // local-only repos (New local repo, no remote yet) diff against their local default branch
-    let default_ref = if gitx::has_origin(&bare) { format!("origin/{default_br}") } else { default_br.clone() };
+    let default_ref = if has_origin { format!("origin/{default_br}") } else { default_br.clone() };
     let base_ref = base_override.unwrap_or_else(|| {
         if vs_default {
             return default_ref.clone();
         }
-        let up = git_in(&wt, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
+        let up = host.git(&wt, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
         if up.is_empty() { default_ref.clone() } else { up }
     });
-    let base = { let b = git_in(&wt, &["merge-base", "HEAD", &base_ref]); if b.is_empty() { base_ref.clone() } else { b } };
-    let branch = { let b = git_in(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]); if b.is_empty() { "(detached)".into() } else { b } };
+    let base = { let b = host.git(&wt, &["merge-base", "HEAD", &base_ref]); if b.is_empty() { base_ref.clone() } else { b } };
+    let branch = { let b = host.git(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]); if b.is_empty() { "(detached)".into() } else { b } };
 
     // per-run dirs: staging under .wtd/reviews/.scratch, final reports inside the worktree
     let mut ts = local_stamp("%Y-%m-%d__%H.%M");
@@ -295,17 +393,17 @@ pub fn main(args: &[String]) -> Result<i32> {
     std::fs::create_dir_all(&indir)?;
     std::fs::create_dir_all(&outdir)?;
     std::fs::write(indir.join("meta.txt"), format!(
-        "repo_slug:      {slug}\nworktree_name:  {name}\nbranch:         {branch}\nworktree_path:  {}\ndefault_branch: {default_br}\nbase_ref:       {base_ref}\nbase_commit:    {base}\n", wt.display()))?;
-    std::fs::write(indir.join("stat.txt"), git_in(&wt, &["diff", "--stat", &base]))?;
-    std::fs::write(indir.join("commits.txt"), git_in(&wt, &["log", "--oneline", &format!("{base}..HEAD")]))?;
-    let untracked = git_in(&wt, &["ls-files", "--others", "--exclude-standard"]);
+        "repo_slug:      {slug}\nworktree_name:  {name}\nbranch:         {branch}\nworktree_path:  {}\ndefault_branch: {default_br}\nbase_ref:       {base_ref}\nbase_commit:    {base}\n", host.path(&wt)))?;
+    std::fs::write(indir.join("stat.txt"), host.git(&wt, &["diff", "--stat", &base]))?;
+    std::fs::write(indir.join("commits.txt"), host.git(&wt, &["log", "--oneline", &format!("{base}..HEAD")]))?;
+    let untracked = host.git(&wt, &["ls-files", "--others", "--exclude-standard"]);
     std::fs::write(indir.join("untracked.txt"), &untracked)?;
-    let changed: Vec<String> = git_in(&wt, &["diff", "--name-only", &base]).lines().map(String::from).collect();
-    let gen = generated(&wt, &changed);
+    let changed: Vec<String> = host.git(&wt, &["diff", "--name-only", &base]).lines().map(String::from).collect();
+    let gen = generated(&host, &wt, &changed);
     let mut diff_args = vec!["diff".to_string(), base.clone(), "--".into(), ".".into()];
     diff_args.extend(gen.iter().map(|g| format!(":(exclude){g}")));
     let diff_refs: Vec<&str> = diff_args.iter().map(String::as_str).collect();
-    let patch = git_in(&wt, &diff_refs);
+    let patch = host.git(&wt, &diff_refs);
     std::fs::write(indir.join("diff.patch"), &patch)?;
     if !gen.is_empty() {
         std::fs::write(indir.join("generated-excluded.txt"), gen.join("\n"))?;
@@ -327,17 +425,21 @@ pub fn main(args: &[String]) -> Result<i32> {
         let _ = crate::settings::remove_tree(&scratch);
         return Ok(0);
     }
-    let mut add_dirs = vec![wt.clone()];
+    let wts = host.path(&wt);
+    let mut add_dirs = vec![wts.clone()];
     for t in &refs {
         let (rs, rb) = gitx::parse_ref_token(&dev, t);
-        match gitx::ensure_ref(&dev, &rs, &rb) {
+        let checkout = match &host {
+            Host::Windows => gitx::ensure_ref(&dev, &rs, &rb).map(|p| s(&p)),
+            Host::Wsl { distro, .. } => wsl_backend::ensure_ref(&dev, distro, &rs, Some(&rb)).map(|(_, p)| p),
+        };
+        match checkout {
             Ok(p) => add_dirs.push(p),
             Err(e) => eprintln!("warning: skipping reference '{t}': {e:#}"),
         }
     }
-    let wts = s(&wt);
-    let deny: Vec<String> = vec![format!("Write({wts}/**)"), format!("Edit({wts}/**)"), format!("Edit({}/**)", s(&dev.join("refs")))];
-    let opt = |p: &Option<PathBuf>, f: &dyn Fn(&str) -> String| p.as_ref().map(|p| f(&s(p))).unwrap_or_default();
+    let deny = deny_rules(&wts, &refs_root);
+    let opt = |p: &Option<PathBuf>, f: &dyn Fn(&str) -> String| p.as_ref().map(|p| f(&host.path(p))).unwrap_or_default();
     let prompt = format!(
 "Review the unpushed changes for worktree '{name}' of repo '{slug}' before it is pushed.
 
@@ -358,24 +460,22 @@ Then print a short summary with the verdict, finding counts, and the report path
         opt(&ctx, &|p| format!("READ FIRST — repo orientation (generated paths, codegen flow, conventions): {p}\n")),
         opt(&ledger, &|p| format!("CONVENTIONS LEDGER (already-counted standards, trust + spot-check per your rubric): {p}\n")),
         opt(&lessons, &|p| format!("BLIND SPOTS — issues a past adversarial pass caught that first passes MISSED; actively CHECK every one this run: {p}\n")),
-        s(&indir),
+        host.path(&indir),
         if focus.is_some() { ", focus.md" } else { "" }, if ctx.is_some() { ", repo-context.md" } else { "" },
         if ledger.is_some() { ", conventions-ledger.md" } else { "" }, if lessons.is_some() { ", reviewer-lessons.md" } else { "" },
         if gen.is_empty() { String::new() } else { format!(" (listed in generated-excluded.txt). Treat them as regenerated artifacts — note that they changed, do not review line-by-line. If an excluded file looks hand-edited, pull its diff yourself with `git -C '{wts}' diff '{base}' -- <file>`") },
         if add_dirs.len() > 1 { "Read-only reference checkouts for precedent-hunting are also granted (see --add-dir).\n" } else { "" },
-        s(&outdir.join("review.md")), s(&outdir.join("highlights.md")),
+        host.path(&outdir.join("review.md")), host.path(&outdir.join("highlights.md")),
         if focus.is_some() { "Organize highlights.md under the headings in focus.md and emphasize exactly what it asks for.\n" } else { "" },
-        s(&outdir.join("ledger-delta.md")),
+        host.path(&outdir.join("ledger-delta.md")),
     );
 
     if interactive {
-        let (exe, prefix) = crate::run::command_for("claude");
-        let mut c = Command::new(exe);
-        c.args(&prefix).args(["--agent", "reviewer", "--model", &review_model]);
-        for d in &add_dirs {
-            c.arg("--add-dir").arg(d);
-        }
-        c.args(["--permission-mode", "acceptEdits", "--disallowedTools"]).args(&deny).arg(&prompt).current_dir(&revdir);
+        let mut argv = reviewer_args("reviewer", &review_model, &add_dirs);
+        argv.extend(["--permission-mode", "acceptEdits", "--disallowedTools"].map(String::from));
+        argv.extend(deny.iter().cloned());
+        argv.push(prompt.clone());
+        let mut c = host.claude(&argv, &revdir, config_dir.as_deref());
         println!("interactive reviewer — reports will land in {}", outdir.display());
         return Ok(c.status()?.code().unwrap_or(1));
     }
@@ -409,12 +509,12 @@ Then print a short summary with the verdict, finding counts, and the report path
     let stream = indir.join("activity.jsonl");
     let mut usage_rows: Vec<(String, String, [f64; 5])> = vec![];
     println!("\x1b[1;36m── pass 1: review ({review_model}) ──\x1b[0m");
-    let p1 = run_pass("pass 1", &review_model, "reviewer", &prompt, &add_dirs, &deny, &revdir, &stream)?;
+    let p1 = run_pass(&host, config_dir.as_deref(), "pass 1", &review_model, "reviewer", &prompt, &add_dirs, &deny, &revdir, &stream)?;
     println!("\n{}\n", p1.text);
     usage_rows.push(("pass 1 · review".into(), review_model.clone(), p1.usage));
     if p1.limit_hit && !outdir.join("review.md").is_file() {
         println!("\x1b[1;33m── review incomplete: the reviewer's account is out of usage ──\x1b[0m");
-        let at = p1.reset_epoch.or_else(|| reset_epoch(&home)).map(|e| e + 120);
+        let at = p1.reset_epoch.or_else(|| reset_epoch(&usage_dir)).map(|e| e + 120);
         schedule_retry(args, &wt, at);
         let _ = crate::settings::remove_tree(&scratch);
         return Ok(75);
@@ -437,13 +537,13 @@ For every MATERIAL issue you found that pass 1 MISSED, also append a generalized
 check next time + a terse pointer to this example (file:line). These feed future first-pass reviewers
 so the same class of miss isn't repeated. Skip NITs/trivia; only real, recurring-risk misses. Omit
 the file if pass 1 missed nothing material.",
-            s(&outdir.join("review.md")), if focus.is_some() { ", focus" } else { "" }, if ctx.is_some() { ", repo-context" } else { "" }, s(&indir),
+            host.path(&outdir.join("review.md")), if focus.is_some() { ", focus" } else { "" }, if ctx.is_some() { ", repo-context" } else { "" }, host.path(&indir),
             opt(&ctx, &|p| format!("Read {p} for repo orientation (generated paths, codegen flow, conventions) before judging.\n")),
-            opt(&ledger, &|p| format!("Conventions ledger: {p} — if an entry pass 1 relied on is STALE or wrong, add a corrected \"## <convention>\" section to {}.\n", s(&outdir.join("ledger-delta.md")))),
-            s(&outdir.join("review.md")), s(&outdir.join("lessons-delta.md")),
+            opt(&ledger, &|p| format!("Conventions ledger: {p} — if an entry pass 1 relied on is STALE or wrong, add a corrected \"## <convention>\" section to {}.\n", host.path(&outdir.join("ledger-delta.md")))),
+            host.path(&outdir.join("review.md")), host.path(&outdir.join("lessons-delta.md")),
         );
         println!("\x1b[1;35m── pass 2: adversarial ({skeptic_model}) ──\x1b[0m");
-        let p2 = run_pass("pass 2", &skeptic_model, "skeptic", &sk, &add_dirs, &deny, &revdir, &stream)?;
+        let p2 = run_pass(&host, config_dir.as_deref(), "pass 2", &skeptic_model, "skeptic", &sk, &add_dirs, &deny, &revdir, &stream)?;
         println!("\n{}\n", p2.text);
         usage_rows.push(("pass 2 · adversarial".into(), skeptic_model.clone(), p2.usage));
     }
@@ -497,10 +597,9 @@ the file if pass 1 missed nothing material.",
 }
 
 /// The reviewer account's 5-hour window reset (unix seconds), from the live usage endpoint.
-fn reset_epoch(home: &Path) -> Option<i64> {
-    let dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).unwrap_or(home.join(".claude"));
+fn reset_epoch(config_dir: &Path) -> Option<i64> {
     let mut last = std::collections::HashMap::new();
-    let accts = crate::daemon::usage_fetch_dir(&dir, &mut last);
+    let accts = crate::daemon::usage_fetch_dir(config_dir, &mut last);
     accts.and_then(|a| a.five_hour).map(|l| l.resets_at).filter(|e| *e > 0)
 }
 
@@ -527,7 +626,36 @@ fn cancel_retry(wt: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::merge_sections;
+    use super::*;
+
+    fn wsl() -> Host {
+        Host::Wsl { distro: "Ubuntu".into(), wsl_path: "/home/u/dev/worktree-dev/worktrees/r/feat/x".into() }
+    }
+
+    #[test]
+    fn paths_as_the_reviewer_sees_them() {
+        let unc = wsl_backend::path::unc("Ubuntu", "/home/u/dev/worktree-dev/worktrees/r/feat/x");
+        assert_eq!(wsl().path(&unc), "/home/u/dev/worktree-dev/worktrees/r/feat/x");
+        assert_eq!(wsl().path(Path::new(r"D:\dev\worktree-dev\.wtd\reviews\.scratch\in")), "/mnt/d/dev/worktree-dev/.wtd/reviews/.scratch/in");
+        assert_eq!(Host::Windows.path(Path::new(r"D:\dev\x")), s(Path::new(r"D:\dev\x")));
+    }
+
+    #[test]
+    fn wsl_reviewer_runs_claude_in_the_distro() {
+        let argv: Vec<String> = ["-p", "review it", "--agent", "reviewer"].map(String::from).to_vec();
+        let c = wsl().claude(&argv, Path::new(r"D:\dev\worktree-dev\.wtd\reviews"), Some("/home/u/.claude-accounts/rev"));
+        let args: Vec<String> = c.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args[..5], ["-d", "Ubuntu", "--cd", "/mnt/d/dev/worktree-dev/.wtd/reviews", "--exec"]);
+        assert_eq!(args[args.len() - 5..], ["claude", "-p", "review it", "--agent", "reviewer"]);
+        let env: Vec<(String, String)> = c.get_envs().filter_map(|(k, v)| Some((k.to_string_lossy().into(), v?.to_string_lossy().into()))).collect();
+        assert!(env.contains(&("CLAUDE_CONFIG_DIR".into(), "/home/u/.claude-accounts/rev".into())));
+        assert!(env.iter().any(|(k, v)| k == "WSLENV" && v.contains("CLAUDE_CONFIG_DIR")));
+    }
+
+    #[test]
+    fn deny_covers_worktree_and_refs() {
+        assert_eq!(deny_rules("/w", "/r/refs"), ["Write(/w/**)", "Edit(/w/**)", "Edit(/r/refs/**)"]);
+    }
 
     #[test]
     fn ledger_upsert() {
