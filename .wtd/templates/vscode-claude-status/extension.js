@@ -85,11 +85,41 @@ function _termDump() {
 // The name a terminal was CREATED with. Terminal.name tracks the tab title, and Claude Code rewrites
 // that title as it works ("✳ Thinking…"), so matching a session by t.name silently stops working the
 // moment its agent starts — the roster then can't find, focus, reap, or highlight it. creationOptions
-// is fixed at creation and survives a window reload, so it's the stable identity. Falls back to
-// t.name for terminals we didn't create (a user's own shell).
+// is fixed at creation, so it's the stable identity. A reload-revived terminal comes back WITHOUT
+// creationOptions, and its title can match any worktree (a row then focuses the wrong tab forever), so
+// the creation name is also recorded by process id — the pty process outlives a reload. Terminals we
+// didn't create have no name.
+const _termPid = new WeakMap();   // Terminal -> processId
+let _pidNames = {};               // processId -> creation name (workspaceState, survives reloads)
+let _pidStore = null;
+let _termsReady = null;           // resolves once the open terminals' pids are known
 function termName(t) {
-  try { const n = t && t.creationOptions && t.creationOptions.name; if (n) return n; } catch {}
-  return (t && t.name) || '';
+  if (!t) return '';
+  try { const n = t.creationOptions && t.creationOptions.name; if (n) return n; } catch {}
+  const pid = _termPid.get(t);
+  return (pid && _pidNames[pid]) || '';
+}
+function trackTerminal(t) {
+  return Promise.resolve(t.processId).then((pid) => {
+    if (!pid) return;
+    _termPid.set(t, pid);
+    let n; try { n = t.creationOptions && t.creationOptions.name; } catch {}
+    if (n && _pidNames[pid] !== n) { _pidNames[pid] = n; if (_pidStore) _pidStore.update(PID_NAMES_KEY, _pidNames); }
+  }, () => {});
+}
+const PID_NAMES_KEY = 'claudeStatus.terminalNamesByPid';
+// load the recorded names, resolve every open terminal, and forget pids no terminal holds any more
+function initTerminalNames(context) {
+  _pidStore = context.workspaceState;
+  _pidNames = Object.assign({}, _pidStore.get(PID_NAMES_KEY, {}));
+  context.subscriptions.push(vscode.window.onDidOpenTerminal(trackTerminal));
+  const all = Promise.all(vscode.window.terminals.map(trackTerminal)).then(() => {
+    const live = new Set(vscode.window.terminals.map((t) => String(_termPid.get(t))));
+    for (const pid of Object.keys(_pidNames)) if (!live.has(pid)) delete _pidNames[pid];
+    _pidStore.update(PID_NAMES_KEY, _pidNames);
+  });
+  const settle = new Promise((r) => setTimeout(r, 3000));   // a processId that never resolves can't block opening
+  _termsReady = Promise.race([all, settle]).then(() => { _termsReady = null; });
 }
 
 // Dispose any terminals with this name whose process has already exited (exitStatus set). A window
@@ -401,6 +431,7 @@ class DevSummaryProvider {
   // a roster row was opened: focus the existing terminal if we have one (incl. a reload-revived tab
   // matched by name), otherwise launch a new one.
   openOrFocus(slug, name, glyph) {
+    if (_termsReady) { _termsReady.then(() => this.openOrFocus(slug, name, glyph)); return; }   // just reloaded: don't miss a revived tab
     const key = this._key(slug, name);
     let branch = '?';
     try {
@@ -1915,6 +1946,7 @@ async function launchSession(dev, st) {
 
 function activate(context) {
   refreshDevRoot();   // resolve the real dev base (the tree is relocatable) before anything scans it
+  initTerminalNames(context);
 
   const provider = new ClaudeStatusProvider();
   context.subscriptions.push(vscode.window.registerFileDecorationProvider(provider));
