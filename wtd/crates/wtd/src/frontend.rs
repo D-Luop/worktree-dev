@@ -109,7 +109,8 @@ pub const ZED_TASK: &str = "WorkTreeDev: session";
 pub const ZED_KEY: &str = "alt-shift-w";
 
 /// Zed won't run anything when a folder opens, so the session is a task in the worktree's
-/// `.zed/tasks.json` (upserted by label, other tasks kept) that ZED_KEY spawns in Zed's terminal.
+/// `.zed/tasks.json` (upserted by label, other tasks kept) that ZED_KEY spawns in Zed's terminal:
+/// `wtd tui` on this worktree, i.e. its session plus the roster and diffs.
 pub fn ensure_zed_task(wt: &Path, slug: &str, name: &str) -> Result<()> {
     let path = wt.join(".zed").join("tasks.json");
     let mut tasks: Vec<Value> = match std::fs::read_to_string(&path) {
@@ -122,7 +123,7 @@ pub fn ensure_zed_task(wt: &Path, slug: &str, name: &str) -> Result<()> {
     let task = serde_json::json!({
         "label": ZED_TASK,
         "command": paths::wtd_exe().to_string_lossy().replace('\\', "/"),
-        "args": ["agent", slug, name],
+        "args": ["tui", format!("{slug}/{name}")],
         "use_new_terminal": false,
         "allow_concurrent_runs": false,
         "reveal": "always",
@@ -222,7 +223,7 @@ mod tests {
         let v: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(&tasks).unwrap()).unwrap();
         assert_eq!(v.len(), 2);
         assert_eq!(v[1]["label"], ZED_TASK);
-        assert_eq!(v[1]["args"], serde_json::json!(["agent", "luop", "feat/x"]));
+        assert_eq!(v[1]["args"], serde_json::json!(["tui", "luop/feat/x"]));
         std::fs::write(&tasks, "// comment\n[]").unwrap();
         assert!(ensure_zed_task(&wt, "luop", "feat/x").is_err());
         let _ = std::fs::remove_dir_all(&wt);

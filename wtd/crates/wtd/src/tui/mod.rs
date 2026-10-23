@@ -68,7 +68,7 @@ enum Bg {
 
 struct App {
     dev: PathBuf,
-    fleet: Arc<Mutex<(bool, BTreeMap<String, Worktree>)>>,
+    fleet: Arc<Mutex<(bool, BTreeMap<String, Worktree>, u64)>>,
     roster: ListState,
     focus: Focus,
     view: View,
@@ -91,7 +91,7 @@ pub fn main(args: &[String]) -> Result<i32> {
     if Client::connect()?.is_none() {
         bail!("the WorkTreeDev daemon isn't running — start it (`wtd daemon start` or the tray) and retry");
     }
-    let fleet = Arc::new(Mutex::new((false, BTreeMap::new())));
+    let fleet = Arc::new(Mutex::new((false, BTreeMap::new(), 0)));
     let f2 = fleet.clone();
     std::thread::spawn(move || watch(f2));
     let (bg_tx, bg_rx) = mpsc::channel();
@@ -112,7 +112,7 @@ pub fn main(args: &[String]) -> Result<i32> {
 }
 
 /// Mirror the daemon's worktrees (like the tray's watcher).
-fn watch(fleet: Arc<Mutex<(bool, BTreeMap<String, Worktree>)>>) {
+fn watch(fleet: Arc<Mutex<(bool, BTreeMap<String, Worktree>, u64)>>) {
     loop {
         if let Ok(Some(mut c)) = Client::connect() {
             if c.hello("tui").is_ok() && c.request(method::SUBSCRIBE, serde_json::json!({})).is_ok() {
@@ -121,6 +121,7 @@ fn watch(fleet: Arc<Mutex<(bool, BTreeMap<String, Worktree>)>>) {
                         Ok(Some(ServerLine::Push(p))) => {
                             let mut f = fleet.lock().unwrap();
                             f.0 = true;
+                            f.2 += 1;
                             match p {
                                 Push::Snapshot { snapshot, .. } => f.1 = snapshot.worktrees.into_iter().map(|w| (w.id.clone(), w)).collect(),
                                 Push::Upsert { worktree, .. } => { f.1.insert(worktree.id.clone(), worktree); }
@@ -135,7 +136,11 @@ fn watch(fleet: Arc<Mutex<(bool, BTreeMap<String, Worktree>)>>) {
                 }
             }
         }
-        fleet.lock().unwrap().0 = false;
+        {
+            let mut f = fleet.lock().unwrap();
+            f.0 = false;
+            f.2 += 1;
+        }
         std::thread::sleep(Duration::from_secs(2));
     }
 }
@@ -176,9 +181,14 @@ impl App {
 
     fn run(&mut self, term: &mut ratatui::DefaultTerminal) -> Result<()> {
         let mut last_tick = Instant::now();
+        let (mut dirty, mut seen, mut drawn) = (true, 0u64, Instant::now());
         while !self.quit {
             if let Some(s) = &mut self.session {
-                s.drain();
+                dirty |= s.drain();
+            }
+            let v = self.fleet.lock().unwrap().2;
+            if v != seen {
+                (seen, dirty) = (v, true);
             }
             if let Some(id) = self.pending.clone() {
                 if let Some(i) = self.rows().iter().position(|w| w.id == id) {
@@ -189,6 +199,7 @@ impl App {
                 }
             }
             while let Ok(Bg::Started { id, err }) = self.bg_rx.try_recv() {
+                dirty = true;
                 match err {
                     Some(e) => self.status = format!("couldn't start {id}: {e}"),
                     None => self.attach(&id),
@@ -197,9 +208,14 @@ impl App {
             if self.view == View::Changes && last_tick.elapsed() > Duration::from_secs(3) {
                 self.reload_changes(false);
                 last_tick = Instant::now();
+                dirty = true;
             }
-            term.draw(|f| self.draw(f))?;
+            if dirty || drawn.elapsed() > Duration::from_secs(1) {
+                term.draw(|f| self.draw(f))?;
+                (dirty, drawn) = (false, Instant::now());
+            }
             if event::poll(Duration::from_millis(30))? {
+                dirty = true;
                 match event::read()? {
                     Event::Key(k) if k.kind != KeyEventKind::Release => self.key(k),
                     Event::Paste(t) => match (&self.session, self.focus, self.view) {
@@ -569,7 +585,7 @@ mod tests {
         let w = Worktree { id: "wd/feat/x".into(), slug: "wd".into(), name: "feat/x".into(), path: repo.to_string_lossy().into(), status: Status::Input, ..Default::default() };
         let (bg_tx, bg_rx) = mpsc::channel();
         App {
-            dev: repo, fleet: Arc::new(Mutex::new((true, [(w.id.clone(), w)].into_iter().collect()))), roster: ListState::default().with_selected(Some(0)),
+            dev: repo, fleet: Arc::new(Mutex::new((true, [(w.id.clone(), w)].into_iter().collect(), 0))), roster: ListState::default().with_selected(Some(0)),
             focus: Focus::Roster, view: View::Session, session: None, changes: None, side_by_side: true, form: None, status: String::new(),
             bg_tx, bg_rx, main_area: Rect::default(), pending: None, quit: false,
         }
