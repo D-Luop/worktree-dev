@@ -11,7 +11,8 @@ use std::process::{Command, Stdio};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
-use crate::{codex, paths, repos, settings, tray, win};
+use crate::program::{copy_tree, place_file};
+use crate::{codex, paths, program, repos, settings, tray, win};
 
 const USAGE: &str = "usage: wtd setup [--dev-root <dir>] [--repair] [--uninstall [--keep-data]] [--from <payload dir>] [--yes] [--skip <step,…>]
   steps: a (shims, PATH, completion)  a2 (binaries)  b (dependency check)  c (Claude status hooks)
@@ -79,11 +80,6 @@ impl Layout {
     }
 }
 
-/// `%LOCALAPPDATA%\WorkTreeDev` (stand-in for `paths::program_dir()` from the program/dev-root split).
-fn program_dir(home: &Path) -> PathBuf {
-    std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(|| home.join("AppData").join("Local")).join("WorkTreeDev")
-}
-
 fn is_payload(dir: &Path) -> bool {
     dir.join("templates").is_dir() && dir.join("bin").join("wtd.exe").is_file()
 }
@@ -119,7 +115,7 @@ pub fn main(args: &[String]) -> Result<i32> {
     };
     let exe = std::env::current_exe()?;
     let exe_dir = exe.parent().context("exe has no folder")?.to_path_buf();
-    let layout = resolve_layout(&opts, &home, &dev, &exe_dir)?;
+    let layout = resolve_layout(&opts, &dev, &exe_dir)?;
     let mut s = Setup { opts, home, dev, layout, exe_dir, failed: vec![] };
     if s.opts.uninstall {
         s.uninstall()?;
@@ -139,8 +135,8 @@ fn default_dev_root(home: &Path) -> Result<PathBuf> {
     Ok(home.join("dev").join("worktree-dev"))
 }
 
-fn resolve_layout(opts: &Opts, home: &Path, dev: &Path, exe_dir: &Path) -> Result<Layout> {
-    let prog = program_dir(home);
+fn resolve_layout(opts: &Opts, dev: &Path, exe_dir: &Path) -> Result<Layout> {
+    let prog = paths::program_dir();
     if let Some(from) = &opts.from {
         if !is_payload(from) {
             bail!("{} isn't a payload (needs templates\\ and bin\\wtd.exe)", from.display());
@@ -173,60 +169,14 @@ fn install_payload(from: &Path, prog: &Path) -> Result<PathBuf> {
     let versions = prog.join("versions");
     let target = versions.join(&ver);
     let current = prog.join("current");
-    if !same_path(from, &target) && !same_path(from, &current) {
+    if !same_path(from, &target) {
         copy_tree(from, &target)?;
     }
     if !same_path(&current, &target) {
-        replace_current(&current, &target)?;
+        program::point_current(&current, &target)?;
     }
     println!("==> payload {ver} installed to {}", target.display());
     Ok(current)
-}
-
-fn replace_current(current: &Path, target: &Path) -> Result<()> {
-    if let Ok(meta) = std::fs::symlink_metadata(current) {
-        // a junction: remove the link only; a real folder (copy fallback): move it aside first
-        if meta.file_type().is_symlink() || std::fs::remove_dir(current).is_ok() {
-            let _ = std::fs::remove_dir(current);
-        } else {
-            let aside = current.with_file_name(format!("current.old-{}", stamp()));
-            std::fs::rename(current, &aside).with_context(|| format!("moving {} aside", current.display()))?;
-            let _ = settings::remove_tree(&aside);
-        }
-    }
-    let mut c = Command::new("cmd");
-    c.arg("/c").arg("mklink").arg("/J").arg(current).arg(target).stdout(Stdio::null()).stderr(Stdio::null());
-    if !win::no_window(&mut c).status().is_ok_and(|s| s.success()) {
-        copy_tree(target, current)?;
-    }
-    Ok(())
-}
-
-fn stamp() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
-}
-
-/// Copy a folder over another. A file Windows won't overwrite (a running exe) is renamed aside first.
-fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for e in std::fs::read_dir(src)?.flatten() {
-        let to = dst.join(e.file_name());
-        if e.path().is_dir() {
-            copy_tree(&e.path(), &to)?;
-        } else {
-            place_file(&e.path(), &to)?;
-        }
-    }
-    Ok(())
-}
-
-fn place_file(src: &Path, dst: &Path) -> Result<()> {
-    if dst.exists() && std::fs::remove_file(dst).is_err() {
-        let aside = PathBuf::from(format!("{}.old-{}", dst.display(), stamp()));
-        std::fs::rename(dst, &aside).with_context(|| format!("{} is in use and can't be moved aside", dst.display()))?;
-    }
-    std::fs::copy(src, dst).with_context(|| format!("copying {} to {}", src.display(), dst.display()))?;
-    Ok(())
 }
 
 /// Leftover `*.old-*` copies from earlier swaps, deleted now that nothing runs them.
@@ -799,7 +749,7 @@ impl Setup {
 
     /// The program dir; if this exe runs from inside it, the rest is deleted once it exits.
     fn remove_program(&mut self) -> Result<()> {
-        let prog = program_dir(&self.home);
+        let prog = paths::program_dir();
         if !prog.is_dir() {
             return Ok(());
         }

@@ -4,7 +4,6 @@
 //! Runs in a helper process: a copy of the running (known-good) `wtd.exe` at `<program>\update-helper.exe`,
 //! so neither the swap nor a broken new build can take down the code doing the rollback.
 
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -13,7 +12,8 @@ use anyhow::{bail, Context, Result};
 use serde_json::json;
 
 use super::{read_version, running_version, ApplyRecord, Layout, State};
-use crate::{client::Client, daemon::now, settings, win};
+use crate::program::{copy_tree, is_link};
+use crate::{client::Client, daemon::now, program, settings, win};
 
 pub const VSIX: &str = "claude-status.vsix";
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -144,93 +144,13 @@ fn tidy(l: &Layout, from: &str, to: &str) {
     }
 }
 
-pub fn is_link(p: &Path) -> bool {
-    std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())
-}
-
-fn junction(link: &Path, target: &Path) -> Result<()> {
-    let out = win::no_window(Command::new("cmd").raw_arg(format!("/c mklink /J \"{}\" \"{}\"", link.display(), target.display())))
-        .stdin(Stdio::null())
-        .output()?;
-    if !out.status.success() || !is_link(link) {
-        bail!("mklink /J failed: {}", String::from_utf8_lossy(&out.stderr).trim());
-    }
-    Ok(())
-}
-
-/// Point `current\` at `versions\<ver>\`: re-target the junction (the running exes inside the old
-/// version's folder are untouched), or — if `current\` is a plain copy — move the running exes aside
-/// and copy the new version over it.
+/// Point `current\` at `versions\<ver>\`.
 pub fn swap_current(l: &Layout, ver: &str) -> Result<()> {
     let target = l.version_dir(ver);
     if read_version(&target).as_deref() != Some(ver) {
         bail!("{} doesn't hold {ver}", target.display());
     }
-    let cur = l.current();
-    let linked = is_link(&cur);
-    if linked || !cur.exists() {
-        let new = l.root.join("current.new");
-        if is_link(&new) {
-            std::fs::remove_dir(&new)?;
-        }
-        if junction(&new, &target).is_ok() {
-            if linked {
-                std::fs::remove_dir(&cur)?; // removes the junction, not its target
-            }
-            std::fs::rename(&new, &cur)?;
-            return Ok(());
-        }
-        if linked {
-            std::fs::remove_dir(&cur)?;
-        }
-    }
-    replace_copy(&cur, &target)
-}
-
-fn replace_copy(cur: &Path, src: &Path) -> Result<()> {
-    std::fs::create_dir_all(cur)?;
-    let stamp = now();
-    for f in files(cur) {
-        let name = f.file_name().unwrap_or_default().to_string_lossy().to_string();
-        if name.contains(".old-") {
-            let _ = std::fs::remove_file(&f);
-            continue;
-        }
-        // a running exe can't be deleted or overwritten, but it can be renamed
-        if std::fs::remove_file(&f).is_err() {
-            std::fs::rename(&f, f.with_file_name(format!("{name}.old-{stamp}"))).with_context(|| format!("moving {} aside", f.display()))?;
-        }
-    }
-    copy_tree(src, cur)
-}
-
-fn files(dir: &Path) -> Vec<PathBuf> {
-    let mut out = vec![];
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
-            let p = e.path();
-            if e.file_type().is_ok_and(|t| t.is_dir()) {
-                stack.push(p);
-            } else {
-                out.push(p);
-            }
-        }
-    }
-    out
-}
-
-fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
-    for f in files(src) {
-        if f.file_name().is_some_and(|n| n.to_string_lossy().contains(".old-")) {
-            continue;
-        }
-        let out = dst.join(f.strip_prefix(src)?);
-        if let Some(d) = out.parent() {
-            std::fs::create_dir_all(d)?;
-        }
-        std::fs::copy(&f, &out).with_context(|| format!("copying {}", f.display()))?;
-    }
+    program::point_current(&l.current(), &target)?;
     Ok(())
 }
 
@@ -498,7 +418,7 @@ pub(crate) mod tests {
         assert!(!is_link(&l.current()));
         assert_eq!(std::fs::read_to_string(&exe).unwrap(), "wtd 1.1.0");
         assert!(!l.current().join("templates").join("only-1.0.0.md").exists());
-        assert!(files(&l.current().join("bin")).iter().any(|f| f.to_string_lossy().contains("wtd.exe.old-")));
+        assert!(program::files(&l.current().join("bin")).iter().any(|f| f.to_string_lossy().contains("wtd.exe.old-")));
         assert!(l.version_dir("1.0.0").join("version.txt").is_file(), "the copy was kept for rollback");
         child.kill().ok();
         child.wait().ok();

@@ -4,6 +4,7 @@
 //! The rest of `wtd setup` belongs to the installer; only `--migrate` is handled here.
 
 use std::path::{Path, PathBuf};
+use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
@@ -95,7 +96,7 @@ fn lay_down(src: &Path, dst: &Path) -> Result<()> {
     for exe in EXES {
         let from = src.join("bin").join(exe);
         if from.is_file() {
-            copy_replacing(&from, &dst.join("bin").join(exe))?;
+            place_file(&from, &dst.join("bin").join(exe))?;
         }
     }
     if let Some(vsix) = newest_vsix(&src.join("templates").join("vscode-claude-status")) {
@@ -111,33 +112,108 @@ fn newest_vsix(dir: &Path) -> Option<PathBuf> {
         .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
 }
 
-/// A running exe can be renamed but not overwritten: move it aside first.
-fn copy_replacing(from: &Path, to: &Path) -> Result<()> {
-    if std::fs::copy(from, to).is_ok() {
-        return Ok(());
+/// Point `current` at `target`: a junction (re-targeted without touching the running exes inside the
+/// old version), else a plain copy whose running exes are moved aside. Returns which it made.
+pub fn point_current(current: &Path, target: &Path) -> Result<&'static str> {
+    // a plain copy that nothing runs from is dropped so a junction can replace it
+    if current.is_dir() && !is_link(current) {
+        let _ = crate::settings::remove_tree(current);
     }
-    let aside = to.with_extension(format!("exe.old-{}", std::process::id()));
-    std::fs::rename(to, &aside).with_context(|| format!("replacing {}", to.display()))?;
-    std::fs::copy(from, to).with_context(|| format!("copying to {}", to.display()))?;
+    let linked = is_link(current);
+    if linked || !current.exists() {
+        let new = current.with_file_name("current.new");
+        if is_link(&new) {
+            std::fs::remove_dir(&new)?;
+        }
+        if junction(&new, target).is_ok() {
+            if linked {
+                std::fs::remove_dir(current)?; // the link, not its target
+            }
+            std::fs::rename(&new, current)?;
+            return Ok("junction");
+        }
+        if linked {
+            std::fs::remove_dir(current)?;
+        }
+    }
+    replace_copy(current, target)?;
+    Ok("copy")
+}
+
+pub fn is_link(p: &Path) -> bool {
+    std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+fn junction(link: &Path, target: &Path) -> Result<()> {
+    let out = win::no_window(Command::new("cmd").raw_arg(format!("/c mklink /J \"{}\" \"{}\"", link.display(), target.display())))
+        .stdin(Stdio::null())
+        .output()?;
+    if !out.status.success() || !is_link(link) {
+        bail!("mklink /J failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
     Ok(())
 }
 
-/// `current` as a junction to `target`, or a plain copy if junctions fail.
-fn point_current(current: &Path, target: &Path) -> Result<&'static str> {
-    if let Ok(m) = std::fs::symlink_metadata(current) {
-        if m.file_type().is_symlink() {
-            std::fs::remove_dir(current)?;
-        } else {
-            crate::settings::remove_tree(current).with_context(|| format!("removing {}", current.display()))?;
+fn replace_copy(cur: &Path, src: &Path) -> Result<()> {
+    std::fs::create_dir_all(cur)?;
+    for f in files(cur) {
+        let name = f.file_name().unwrap_or_default().to_string_lossy().to_string();
+        if name.contains(".old-") {
+            let _ = std::fs::remove_file(&f);
+            continue;
+        }
+        if std::fs::remove_file(&f).is_err() {
+            move_aside(&f)?;
         }
     }
-    let mut c = Command::new("cmd");
-    c.args(["/C", "mklink", "/J"]).arg(current).arg(target).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    if win::no_window(&mut c).status().is_ok_and(|s| s.success()) && current.join("version.txt").is_file() {
-        return Ok("junction");
+    copy_tree(src, cur)
+}
+
+pub(crate) fn files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = vec![];
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                stack.push(p);
+            } else {
+                out.push(p);
+            }
+        }
     }
-    crate::tools::copy_filtered(target, current, &|_| false)?;
-    Ok("copy")
+    out
+}
+
+/// Copy a folder over another, skipping `*.old-*` leftovers. A file Windows won't overwrite (a running
+/// exe) is renamed aside first.
+pub fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for e in std::fs::read_dir(src)?.flatten() {
+        let (from, to) = (e.path(), dst.join(e.file_name()));
+        if e.file_type().is_ok_and(|t| t.is_dir()) {
+            copy_tree(&from, &to)?;
+        } else if !e.file_name().to_string_lossy().contains(".old-") {
+            place_file(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Copy one file into place; a running exe at `dst` can't be overwritten, but it can be renamed.
+pub fn place_file(src: &Path, dst: &Path) -> Result<()> {
+    if dst.exists() && std::fs::remove_file(dst).is_err() {
+        move_aside(dst)?;
+    }
+    std::fs::copy(src, dst).with_context(|| format!("copying {} to {}", src.display(), dst.display()))?;
+    Ok(())
+}
+
+fn move_aside(f: &Path) -> Result<()> {
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let aside = PathBuf::from(format!("{}.old-{stamp}", f.display()));
+    std::fs::rename(f, &aside).with_context(|| format!("{} is in use and can't be moved aside", f.display()))?;
+    Ok(())
 }
 
 /// Every spelling of `<dev>\.wtd\<d>\` a config might hold, mapped to the same spelling of `current\<d>\`.
