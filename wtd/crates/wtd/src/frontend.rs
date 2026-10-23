@@ -66,7 +66,7 @@ pub fn open(dev: &Path, id: &str, f: Frontend) -> Result<()> {
             win::no_window(Command::new("cmd").args(["/c", "code", "--open-url"]).arg(url)).spawn()?;
         }
         Frontend::Zed => {
-            let wt = paths::worktree_path(dev, id);
+            let wt = paths::worktree_root(dev, id);
             if !wt.is_dir() {
                 bail!("{id} has no worktree yet — open it in VS Code or a terminal first");
             }

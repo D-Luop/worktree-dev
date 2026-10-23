@@ -142,7 +142,7 @@ pub fn open(d: &Arc<Daemon>, method: &str, p: &Value) -> Result<(Arc<Hosted>, Va
 /// The process ended: drop the session, and record SessionEnd (a killed agent never ran its hook).
 fn exited(d: &Arc<Daemon>, id: u64, wt: &str, code: i32) {
     eprintln!("[{}] hosted session for {wt} exited ({code})", now());
-    let root = paths::worktree_path(&d.dev, wt);
+    let root = d.lock().worktrees.get(wt).map(|w| PathBuf::from(&w.path)).unwrap_or_else(|| paths::worktree_root(&d.dev, wt));
     let old = statusfile::read(&root);
     let new = apply(old, &Event::SessionEnd);
     if new != old {

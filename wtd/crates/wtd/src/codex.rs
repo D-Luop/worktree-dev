@@ -17,14 +17,19 @@ pub fn home() -> Option<PathBuf> {
 }
 
 pub fn prepare(codex_home: &Path, cwd: &Path) -> Result<()> {
+    prepare_for(codex_home, &cwd.to_string_lossy(), &crate::paths::wtd_exe())
+}
+
+/// [`prepare`] with the project path and `wtd.exe` as the Codex side sees them (inside WSL: a Linux
+/// path, and `wtd.exe` through `/mnt`).
+pub fn prepare_for(codex_home: &Path, project: &str, exe: &Path) -> Result<()> {
     std::fs::create_dir_all(codex_home)?;
-    let exe = crate::paths::wtd_exe();
-    ensure_hooks(codex_home, &exe)?;
+    ensure_hooks(codex_home, exe)?;
     let cfg = codex_home.join("config.toml");
     let mut text = std::fs::read_to_string(&cfg).unwrap_or_default();
     let before = text.clone();
-    set_mcp(&mut text, &exe);
-    let key = format!("[projects.{}]", toml_lit(&cwd.to_string_lossy()));
+    set_mcp(&mut text, exe);
+    let key = format!("[projects.{}]", toml_lit(project));
     if !text.contains(&key) {
         push_block(&mut text, &format!("{key}\ntrust_level = \"trusted\"\n"));
     }
@@ -133,7 +138,7 @@ fn hook_cmd(exe: &Path, event: &str) -> String {
     if p.contains(' ') { format!("\"{p}\" hook {event}") } else { format!("{p} hook {event}") }
 }
 
-fn ensure_hooks(codex_home: &Path, exe: &Path) -> Result<()> {
+pub(crate) fn ensure_hooks(codex_home: &Path, exe: &Path) -> Result<()> {
     let path = codex_home.join("hooks.json");
     let mut doc: Value = std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_else(|| json!({}));
     if !doc.is_object() {

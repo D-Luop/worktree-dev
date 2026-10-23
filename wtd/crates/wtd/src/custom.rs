@@ -87,13 +87,13 @@ fn layers_for(dev: &Path, slug: &str, os: &str) -> Vec<(String, PathBuf)> {
     v
 }
 
-fn layers(dev: &Path, slug: &str) -> Vec<PathBuf> {
-    layers_for(dev, slug, platform()).into_iter().map(|(_, p)| p).collect()
+fn layers(dev: &Path, slug: &str, os: &str) -> Vec<PathBuf> {
+    layers_for(dev, slug, os).into_iter().map(|(_, p)| p).collect()
 }
 
 /// Directories to prepend to PATH for a repo's sessions.
 pub fn tool_dirs(dev: &Path, slug: &str) -> Vec<PathBuf> {
-    layers(dev, slug).into_iter().map(|l| l.join("tools")).filter(|d| d.is_dir()).collect()
+    layers(dev, slug, platform()).into_iter().map(|l| l.join("tools")).filter(|d| d.is_dir()).collect()
 }
 
 fn copy_tree(from: &Path, to: &Path, overwrite: bool) -> Result<usize> {
@@ -165,12 +165,11 @@ fn tracked(wtp: &Path) -> BTreeSet<String> {
 }
 
 /// Copy the merged directory items into the worktree and drop what an earlier apply left behind.
-fn sync_items(dev: &Path, slug: &str, wtp: &Path) -> Result<Vec<String>> {
-    let tracked = tracked(wtp);
+fn sync_items(dev: &Path, slug: &str, wtp: &Path, os: &str, tracked: &BTreeSet<String>) -> Result<Vec<String>> {
     let is_tracked = |rel: &str| tracked.iter().any(|t| t == rel || t.starts_with(&format!("{rel}/")));
     let mut now: Vec<String> = vec![];
     let mut kept = vec![];
-    for (key, (_, src)) in merged_items(dev, slug, platform()) {
+    for (key, (_, src)) in merged_items(dev, slug, os) {
         let (kind, name) = key.split_once('/').unwrap();
         for target in DIR_KINDS.iter().find(|(k, _)| *k == kind).unwrap().1 {
             let rel = format!("{target}/{name}");
@@ -188,7 +187,7 @@ fn sync_items(dev: &Path, slug: &str, wtp: &Path) -> Result<Vec<String>> {
         .and_then(|v| serde_json::from_value(v["items"].clone()).ok())
         .unwrap_or_default();
     // also drop disabled items the built-in copy in `agent` just put back
-    let off = disabled(&layers_for(dev, slug, platform()));
+    let off = disabled(&layers_for(dev, slug, os));
     let stale: Vec<String> = before.iter().filter(|p| !now.contains(p)).cloned()
         .chain(off.iter().flat_map(|k| {
             let (kind, name) = k.split_once('/').unwrap_or((k, ""));
@@ -229,8 +228,8 @@ fn exclude(wtp: &Path, rels: &[String]) {
     }
 }
 
-fn layer_text(dev: &Path, slug: &str, file: &str) -> String {
-    layers(dev, slug)
+fn layer_text(dev: &Path, slug: &str, os: &str, file: &str) -> String {
+    layers(dev, slug, os)
         .iter()
         .filter_map(|l| std::fs::read_to_string(l.join(file)).ok())
         .map(|t| t.trim().to_string())
@@ -253,10 +252,10 @@ fn with_block(text: &str, body: &str) -> String {
 }
 
 /// Replace (or add, or drop) the custom block at the end of a worktree's CLAUDE.md.
-fn sync_claude_md(dev: &Path, slug: &str, wtp: &Path) -> Result<bool> {
+fn sync_claude_md(dev: &Path, slug: &str, wtp: &Path, os: &str) -> Result<bool> {
     let p = wtp.join("CLAUDE.md");
     let Ok(text) = std::fs::read_to_string(&p) else { return Ok(false) };
-    let new = with_block(&text, &layer_text(dev, slug, "CLAUDE.md"));
+    let new = with_block(&text, &layer_text(dev, slug, os, "CLAUDE.md"));
     if new != text {
         std::fs::write(&p, new)?;
         return Ok(true);
@@ -267,7 +266,7 @@ fn sync_claude_md(dev: &Path, slug: &str, wtp: &Path) -> Result<bool> {
 /// Codex reads AGENTS.override.md instead of AGENTS.md: write the repo's AGENTS.md plus a block with
 /// the AGENTS.md presets and a pointer to the worktree's CLAUDE.md (its conventions apply to Codex too).
 /// A user-made AGENTS.override.md (no block of ours) is left alone.
-fn sync_agents_md(dev: &Path, slug: &str, wtp: &Path) -> Result<bool> {
+fn sync_agents_md(dev: &Path, slug: &str, wtp: &Path, os: &str) -> Result<bool> {
     let p = wtp.join(OVERRIDE);
     let cur = std::fs::read_to_string(&p).ok();
     if cur.as_deref().is_some_and(|c| !c.contains(BEGIN)) {
@@ -277,7 +276,7 @@ fn sync_agents_md(dev: &Path, slug: &str, wtp: &Path) -> Result<bool> {
     if wtp.join("CLAUDE.md").is_file() {
         body.push("Read and follow `CLAUDE.md` in this worktree: its conventions (plan, commits, PRs, reviews) apply to you too.".to_string());
     }
-    let extra = layer_text(dev, slug, "AGENTS.md");
+    let extra = layer_text(dev, slug, os, "AGENTS.md");
     if !extra.is_empty() {
         body.push(extra);
     }
@@ -298,10 +297,11 @@ fn sync_agents_md(dev: &Path, slug: &str, wtp: &Path) -> Result<bool> {
 }
 
 /// Merge the layers' hooks.json into `.claude/settings.json`, replacing what we merged last time.
-fn sync_hooks(dev: &Path, slug: &str, wtp: &Path) -> Result<bool> {
-    let dev_s = dev.to_string_lossy().replace('\\', "/");
+fn sync_hooks(dev: &Path, slug: &str, wtp: &Path, os: &str) -> Result<bool> {
+    // hooks in a WSL worktree run inside the distro: they reach the dev root through /mnt
+    let dev_s = (os == "wsl").then(|| crate::wsl_backend::path::to_mnt(dev)).flatten().unwrap_or_else(|| dev.to_string_lossy().replace('\\', "/"));
     let mut add: serde_json::Map<String, Value> = serde_json::Map::new();
-    for l in layers(dev, slug) {
+    for l in layers(dev, slug, os) {
         let Ok(t) = std::fs::read_to_string(l.join("hooks.json")) else { continue };
         let v: Value = serde_json::from_str(&t.replace("__DEV__", &dev_s)).with_context(|| format!("{} is not valid JSON", l.join("hooks.json").display()))?;
         for (ev, entries) in v.get("hooks").and_then(Value::as_object).cloned().unwrap_or_default() {
@@ -352,8 +352,14 @@ fn sync_hooks(dev: &Path, slug: &str, wtp: &Path) -> Result<bool> {
 
 /// Apply every preset layer to a worktree. `fresh` = just created (seed env files too).
 pub fn apply(dev: &Path, slug: &str, wtp: &Path, fresh: bool) -> Result<Vec<String>> {
-    let mut log = sync_items(dev, slug, wtp)?;
-    for l in layers(dev, slug) {
+    apply_as(dev, slug, wtp, fresh, platform(), &tracked(wtp))
+}
+
+/// [`apply`] for a worktree on another platform (a WSL worktree written through its UNC view):
+/// that platform's layers, and the files git tracks there as listed by the caller.
+pub fn apply_as(dev: &Path, slug: &str, wtp: &Path, fresh: bool, os: &str, tracked: &BTreeSet<String>) -> Result<Vec<String>> {
+    let mut log = sync_items(dev, slug, wtp, os, tracked)?;
+    for l in layers(dev, slug, os) {
         let env = l.join("env");
         if env.is_dir() && l.starts_with(root(dev).join("repos")) {
             let n = copy_tree(&env, wtp, false)?;
@@ -362,13 +368,13 @@ pub fn apply(dev: &Path, slug: &str, wtp: &Path, fresh: bool) -> Result<Vec<Stri
             }
         }
     }
-    if sync_claude_md(dev, slug, wtp)? {
+    if sync_claude_md(dev, slug, wtp, os)? {
         log.push("CLAUDE.md custom section updated".into());
     }
-    if sync_agents_md(dev, slug, wtp)? {
+    if sync_agents_md(dev, slug, wtp, os)? {
         log.push(format!("{OVERRIDE} (Codex) updated"));
     }
-    if sync_hooks(dev, slug, wtp)? {
+    if sync_hooks(dev, slug, wtp, os)? {
         log.push("custom hooks merged into .claude/settings.json".into());
     }
     Ok(log)
@@ -604,16 +610,16 @@ mod tests {
         std::fs::write(wt.join("CLAUDE.md"), "# Base\n").unwrap();
         std::fs::write(t.join(".wtd/custom/CLAUDE.md"), "global rule").unwrap();
         std::fs::write(t.join(".wtd/custom/repos/r/CLAUDE.md"), "repo rule").unwrap();
-        assert!(sync_claude_md(&t, "r", &wt).unwrap());
-        assert!(!sync_claude_md(&t, "r", &wt).unwrap()); // idempotent
+        assert!(sync_claude_md(&t, "r", &wt, platform()).unwrap());
+        assert!(!sync_claude_md(&t, "r", &wt, platform()).unwrap()); // idempotent
         std::fs::write(t.join(".wtd/custom/CLAUDE.md"), "changed rule").unwrap();
-        sync_claude_md(&t, "r", &wt).unwrap();
+        sync_claude_md(&t, "r", &wt, platform()).unwrap();
         let s = std::fs::read_to_string(wt.join("CLAUDE.md")).unwrap();
         assert!(s.starts_with("# Base\n") && s.contains("changed rule") && s.contains("repo rule") && !s.contains("global rule"));
         assert_eq!(s.matches(BEGIN).count(), 1);
         std::fs::remove_file(t.join(".wtd/custom/CLAUDE.md")).unwrap();
         std::fs::remove_file(t.join(".wtd/custom/repos/r/CLAUDE.md")).unwrap();
-        sync_claude_md(&t, "r", &wt).unwrap();
+        sync_claude_md(&t, "r", &wt, platform()).unwrap();
         assert_eq!(std::fs::read_to_string(wt.join("CLAUDE.md")).unwrap(), "# Base\n");
         std::fs::remove_dir_all(&t).ok();
     }
@@ -625,9 +631,9 @@ mod tests {
         std::fs::create_dir_all(wt.join(".claude")).unwrap();
         std::fs::write(wt.join(".claude/settings.json"), r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"mine"}]}]}}"#).unwrap();
         std::fs::write(t.join(".wtd/custom/hooks.json"), r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"a"}]}]}}"#).unwrap();
-        sync_hooks(&t, "", &wt).unwrap();
+        sync_hooks(&t, "", &wt, platform()).unwrap();
         std::fs::write(t.join(".wtd/custom/hooks.json"), r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"b"}]}]}}"#).unwrap();
-        sync_hooks(&t, "", &wt).unwrap();
+        sync_hooks(&t, "", &wt, platform()).unwrap();
         let s = std::fs::read_to_string(wt.join(".claude/settings.json")).unwrap();
         assert!(s.contains("\"mine\"") && s.contains("\"b\"") && !s.contains("\"a\""));
         std::fs::remove_dir_all(&t).ok();
@@ -661,12 +667,12 @@ mod tests {
         std::fs::write(wt.join("CLAUDE.md"), "# conventions").unwrap();
         std::fs::write(wt.join("AGENTS.md"), "# repo agents").unwrap();
         std::fs::write(t.join(".wtd/custom/AGENTS.md"), "codex rule").unwrap();
-        assert!(sync_agents_md(&t, "r", &wt).unwrap());
+        assert!(sync_agents_md(&t, "r", &wt, platform()).unwrap());
         let s = std::fs::read_to_string(wt.join(OVERRIDE)).unwrap();
         assert!(s.starts_with("# repo agents") && s.contains("codex rule") && s.contains("CLAUDE.md"));
-        assert!(!sync_agents_md(&t, "r", &wt).unwrap());
+        assert!(!sync_agents_md(&t, "r", &wt, platform()).unwrap());
         std::fs::write(wt.join(OVERRIDE), "mine").unwrap();
-        assert!(!sync_agents_md(&t, "r", &wt).unwrap()); // a user's own override is left alone
+        assert!(!sync_agents_md(&t, "r", &wt, platform()).unwrap()); // a user's own override is left alone
         std::fs::remove_dir_all(&t).ok();
     }
 }

@@ -157,7 +157,7 @@ fn call(dev: &Path, me: Option<&str>, name: &str, args: &Value) -> Result<String
             let to = args.get("to").and_then(Value::as_str).context("to is required")?;
             let body = args.get("message").and_then(Value::as_str).context("message is required")?;
             let mut c = Client::connect()?.context("the WorkTreeDev daemon isn't running, so messages can't be sent — ask the user to start it (tray icon or fleet panel)")?;
-            let r = c.request(method::MESSAGE_SEND, json!({ "from_dir": paths::worktree_path(dev, me).to_string_lossy(), "to": to, "body": body }))?;
+            let r = c.request(method::MESSAGE_SEND, json!({ "from_dir": paths::worktree_root(dev, me).to_string_lossy(), "to": to, "body": body }))?;
             Ok(format!(
                 "Message #{} to {to} is waiting for the user's approval in VS Code: the notification, the \"awaiting approval\" status-bar item, or the 💬 on your row in the Fleet panel (Approve / Edit / Deny). Saying \"approved\" in chat doesn't release it. Once approved it's delivered when {to}'s agent finishes its current turn. Tell the user where to approve it.",
                 r["id"]
@@ -202,7 +202,7 @@ fn call(dev: &Path, me: Option<&str>, name: &str, args: &Value) -> Result<String
         "fleet_read_file" => {
             let id = args.get("id").and_then(Value::as_str).context("id is required")?;
             let rel = args.get("path").and_then(Value::as_str).context("path is required")?;
-            read_confined(&paths::worktree_path(dev, id), rel)
+            read_confined(&paths::worktree_root(dev, id), rel)
         }
         _ => bail!("unknown tool '{name}'"),
     }

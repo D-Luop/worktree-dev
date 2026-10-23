@@ -4,6 +4,7 @@
 //! Contract: docs/wsl-platform-contract.md.
 
 pub mod path;
+pub mod launch;
 pub mod repo;
 
 use std::path::{Path, PathBuf};
@@ -136,20 +137,13 @@ pub fn running_distros() -> Vec<String> {
 
 // --- per-distro dev root -----------------------------------------------------------------------------
 
-/// The distro's dev root: `config.json → wsl.<distro>.root`, else `$HOME/dev/worktree-dev` (resolved
-/// once and recorded, so it stays put).
-pub fn dev_root(dev: &Path, distro: &str) -> Result<String> {
+fn distro_setting(dev: &Path, distro: &str, key: &str) -> Option<String> {
     let cfg = crate::settings::load_config(dev);
-    if let Some(r) = cfg.pointer(&format!("/wsl/{distro}/root")).and_then(|v| v.as_str()).filter(|s| path::is_linux_abs(s)) {
-        return Ok(r.trim_end_matches('/').to_string());
-    }
-    let home = run(&exec_args(distro, None, &["sh", "-c", r#"printf %s "$HOME""#])).with_context(|| format!("reaching WSL distro '{distro}'"))?;
-    if !path::is_linux_abs(&home) {
-        bail!("WSL distro '{distro}' reported no usable $HOME ({home:?})");
-    }
-    let root = path::join(&home, "dev/worktree-dev");
-    let d = distro.to_string();
-    let r = root.clone();
+    cfg.pointer(&format!("/wsl/{distro}/{key}")).and_then(|v| v.as_str()).filter(|s| path::is_linux_abs(s)).map(|s| s.trim_end_matches('/').to_string())
+}
+
+fn record_setting(dev: &Path, distro: &str, key: &str, value: &str) -> Result<()> {
+    let (d, k, v) = (distro.to_string(), key.to_string(), value.to_string());
     crate::settings::update_config(dev, move |c| {
         if !c.get("wsl").is_some_and(|v| v.is_object()) {
             c["wsl"] = serde_json::json!({});
@@ -157,8 +151,31 @@ pub fn dev_root(dev: &Path, distro: &str) -> Result<String> {
         if !c["wsl"].get(&d).is_some_and(|v| v.is_object()) {
             c["wsl"][&d] = serde_json::json!({});
         }
-        c["wsl"][&d]["root"] = serde_json::json!(r);
-    })?;
+        c["wsl"][&d][&k] = serde_json::json!(v);
+    })
+}
+
+/// The default user's `$HOME` in the distro (asked once, then kept in `config.json → wsl.<distro>.home`).
+pub fn home(dev: &Path, distro: &str) -> Result<String> {
+    if let Some(h) = distro_setting(dev, distro, "home") {
+        return Ok(h);
+    }
+    let home = run(&exec_args(distro, None, &["sh", "-c", r#"printf %s "$HOME""#])).with_context(|| format!("reaching WSL distro '{distro}'"))?;
+    if !path::is_linux_abs(&home) {
+        bail!("WSL distro '{distro}' reported no usable $HOME ({home:?})");
+    }
+    record_setting(dev, distro, "home", &home)?;
+    Ok(home)
+}
+
+/// The distro's dev root: `config.json → wsl.<distro>.root`, else `$HOME/dev/worktree-dev` (recorded
+/// on first use, so it stays put).
+pub fn dev_root(dev: &Path, distro: &str) -> Result<String> {
+    if let Some(r) = distro_setting(dev, distro, "root") {
+        return Ok(r);
+    }
+    let root = path::join(&home(dev, distro)?, "dev/worktree-dev");
+    record_setting(dev, distro, "root", &root)?;
     Ok(root)
 }
 
