@@ -5,6 +5,7 @@
 //! remove the only button that can start it again. Holds one daemon subscription (on its own thread)
 //! to keep the icon and tooltip in sync; when the daemon is down it retries the pipe every 2s.
 
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -464,7 +465,7 @@ pub fn start_at_logon() -> bool {
 pub fn set_start_at_logon(on: bool) {
     if on {
         win::reg::delete(WTD_KEY, LOGON_OFF);
-        write_run_entry();
+        write_run_entry(&own_bin());
     } else {
         win::reg::set_dword(WTD_KEY, LOGON_OFF, 1);
         win::reg::delete(RUN_KEY, RUN_VALUE);
@@ -473,17 +474,29 @@ pub fn set_start_at_logon(on: bool) {
 
 /// On install/update: start at logon by default, pointing at this install's exe, unless the user turned it off.
 pub fn refresh_start_at_logon() {
+    refresh_start_at_logon_in(&own_bin());
+}
+
+/// Same, for the install whose binaries are in `bin` (`wtd setup` may run from elsewhere).
+pub fn refresh_start_at_logon_in(bin: &Path) {
     if !win::reg::exists(WTD_KEY, LOGON_OFF) {
-        write_run_entry();
+        write_run_entry(bin);
     }
 }
 
-fn write_run_entry() {
+/// Uninstall: drop the Run entry without recording a user choice.
+pub fn remove_start_at_logon() {
+    win::reg::delete(RUN_KEY, RUN_VALUE);
+}
+
+fn own_bin() -> PathBuf {
+    paths::wtd_exe().parent().map(Path::to_path_buf).unwrap_or_default()
+}
+
+fn write_run_entry(bin: &Path) {
     // the windowless wtd-tray.exe, so signing in never opens a console window for the tray
-    let cmdline = match paths::tray_exe() {
-        Some(t) => format!("\"{}\"", t.display()),
-        None => format!("\"{}\" tray", paths::wtd_exe().display()),
-    };
+    let tray = bin.join("wtd-tray.exe");
+    let cmdline = if tray.is_file() { format!("\"{}\"", tray.display()) } else { format!("\"{}\" tray", bin.join("wtd.exe").display()) };
     win::reg::set_sz(RUN_KEY, RUN_VALUE, &cmdline);
 }
 

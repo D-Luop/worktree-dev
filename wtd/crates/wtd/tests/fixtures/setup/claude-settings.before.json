@@ -1,0 +1,27 @@
+{
+  "model": "opus",
+  "hooks": {
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "notify-send done" } ] },
+      { "hooks": [ { "type": "command", "command": "/d/dev/worktree-dev/.wtd/hooks/wt-status.sh stop" } ] }
+    ],
+    "PreToolUse": [
+      { "matcher": "Bash", "hooks": [ { "type": "command", "command": "~/bin/audit-bash" } ] },
+      { "matcher": "*", "hooks": [ { "type": "command", "command": "D:/dev/worktree-dev/.wtd/bin/wtd.exe hook tool" } ] },
+      { "matcher": "Edit|Write|MultiEdit", "hooks": [ { "type": "command", "command": "/d/dev/worktree-dev/.wtd/hooks/plan-nudge.sh" } ] }
+    ],
+    "SubagentStop": [
+      { "hooks": [ { "type": "command", "command": "echo sub" } ] }
+    ],
+    "PreCompact": [
+      { "hooks": [ { "type": "command", "command": "D:/old/.wtd/bin/wtd.exe hook compact" } ] }
+    ]
+  },
+  "permissions": {
+    "allow": [ "Bash(git status)" ],
+    "deny": [ "Write(D:/dev/worktree-dev/refs/**)", "Read(./.env)" ]
+  },
+  "statusLine": { "type": "command", "command": "~/my-line.sh" },
+  "attribution": { "commit": "Co-authored-by: x" },
+  "theme": "dark"
+}

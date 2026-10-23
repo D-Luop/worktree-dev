@@ -27,6 +27,7 @@ pub mod review;
 pub mod run;
 pub mod session_env;
 pub mod settings;
+pub mod setup;
 pub mod statusfile;
 pub mod ticket;
 pub mod tools;
@@ -66,6 +67,8 @@ Worktrees & sessions (also on PATH as plain `agent`, `archive`, … via ~/.local
   wtd tokens                         token usage across sessions
   wtd ship                           package the toolkit for another machine
   wtd version                        version, channel, program dir and dev root (JSON)
+  wtd setup [--repair] [--uninstall [--keep-data]] [--dev-root d] [--from payload] [--yes] [--skip steps]
+                                     install / repair / remove WorkTreeDev for this user (idempotent)
   wtd setup --migrate                move a checkout install's program files to the program dir
 
 Fleet & daemon
@@ -150,7 +153,8 @@ fn dispatch(cmd: &str, rest: &[String]) -> Result<i32> {
         "tokens" => tools::tokens_main(rest),
         "ship" => tools::ship_main(rest),
         "version" | "--version" => program::version_main(rest),
-        "setup" => program::setup_main(rest),
+        "setup" if rest.iter().any(|a| a == "--migrate") => program::setup_main(rest),
+        "setup" => setup::main(rest),
         "stop" => {
             let id = rest.first().ok_or_else(|| anyhow::anyhow!("usage: wtd stop <slug/name>"))?;
             let r = client::Client::connect_required()?.request(method::SESSION_STOP, json!({ "id": id }))?;
