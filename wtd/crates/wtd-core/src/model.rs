@@ -56,6 +56,9 @@ pub struct Worktree {
     /// User-defined group id (None = Ungrouped).
     #[serde(default)]
     pub group: Option<String>,
+    /// Id of the delegator (`delegate/<slug>`) that started this worktree; the roster nests it there.
+    #[serde(default)]
+    pub parent: Option<String>,
     /// The live session is hosted by the daemon (a pseudo console that survives VSCode reloads),
     /// as opposed to running inside a terminal under `wtd run`.
     #[serde(default)]

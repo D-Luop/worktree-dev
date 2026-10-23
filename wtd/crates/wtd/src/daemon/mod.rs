@@ -213,11 +213,13 @@ impl Daemon {
         let _ = self.tx.send(Push::Groups { rev: inner.rev, groups: inner.store.groups.clone() });
     }
 
-    /// Set a worktree's group field from the membership table and push it.
+    /// Set a worktree's group and parent fields from the store and push it.
     fn apply_membership(&self, inner: &mut Inner, id: &str) {
         let g = inner.store.membership.get(id).cloned();
+        let parent = inner.store.parents.get(id).cloned();
         if let Some(mut wt) = inner.worktrees.get(id).cloned() {
             wt.group = g;
+            wt.parent = parent;
             self.upsert(inner, wt);
         }
     }
@@ -489,6 +491,12 @@ async fn dispatch(d: &Arc<Daemon>, conn: u64, req: &Request, out: &mpsc::Unbound
                 }
             })
             .await?;
+            if !archive && res.is_ok() {
+                let mut inner = d.lock();
+                if inner.store.parents.remove(&id).is_some() {
+                    let _ = inner.store.save(&d.dev);
+                }
+            }
             rescan(d).await;
             res
         }
@@ -587,6 +595,21 @@ async fn dispatch(d: &Arc<Daemon>, conn: u64, req: &Request, out: &mpsc::Unbound
             d.apply_membership(&mut inner, &wt);
             Ok(json!({}))
         }
+        method::WORKTREE_PARENT => {
+            let wt = p.get("worktree").and_then(Value::as_str).context("missing worktree")?.to_string();
+            let parent = p.get("parent").and_then(Value::as_str).map(String::from);
+            check_parent(&d.dev, &wt, parent.as_deref())?;
+            let mut inner = d.lock();
+            match parent {
+                Some(par) => { inner.store.parents.insert(wt.clone(), par); }
+                None => { inner.store.parents.remove(&wt); }
+            }
+            if let Err(e) = inner.store.save(&d.dev) {
+                eprintln!("[{}] saving store: {e}", now());
+            }
+            d.apply_membership(&mut inner, &wt);
+            Ok(json!({}))
+        }
         method::MESSAGE_SEND => messages::send(d, p),
         method::MESSAGE_DECIDE => messages::decide(d, p),
         method::MESSAGE_LIST => messages::list(d, p),
@@ -634,6 +657,7 @@ async fn rescan(d: &Arc<Daemon>) {
     for mut wt in found {
         seen.insert(wt.id.clone());
         wt.group = inner.store.membership.get(&wt.id).cloned();
+        wt.parent = inner.store.parents.get(&wt.id).cloned();
         match inner.worktrees.get(&wt.id) {
             Some(old) => {
                 wt.git = old.git.clone();
@@ -820,6 +844,20 @@ fn group_name(p: &Value) -> Result<String> {
     Ok(n)
 }
 
+/// Checked against disk, not the fleet map: `agent` records the parent of a worktree it has just
+/// created, before the next rescan picks it up.
+fn check_parent(dev: &std::path::Path, child: &str, parent: Option<&str>) -> Result<()> {
+    if child == DEV_ID || paths::is_delegate_id(child) || !paths::worktree_path(dev, child).is_dir() {
+        bail!("no worktree '{child}' that can be nested");
+    }
+    if let Some(p) = parent {
+        if !paths::is_delegate_id(p) || !paths::worktree_path(dev, p).is_dir() {
+            bail!("'{p}' is not a delegator (expected delegate/<slug>)");
+        }
+    }
+    Ok(())
+}
+
 /// End every session of a worktree (hosted: kill its pty's job; `wtd run`: terminate its named job).
 fn stop_sessions(d: &Daemon, id: &str) -> u64 {
     let (jobs, hosted): (Vec<String>, Vec<Arc<host::Hosted>>) = {
@@ -920,4 +958,40 @@ pub fn fmt_local(epoch: i64) -> String {
     let rem = t.rem_euclid(86400);
     let wd = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"][days.rem_euclid(7) as usize];
     format!("{wd} {:02}:{:02}", rem / 3600, (rem % 3600) / 60)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parent_must_be_a_delegator_on_disk() {
+        let t = std::env::temp_dir().join(format!("wtd-parent-{}", std::process::id()));
+        for id in ["delegate/luop", "luop/feat/x", "plan/idea"] {
+            std::fs::create_dir_all(paths::worktree_path(&t, id)).unwrap();
+        }
+        assert!(check_parent(&t, "luop/feat/x", Some("delegate/luop")).is_ok());
+        assert!(check_parent(&t, "luop/feat/x", None).is_ok());
+        assert!(check_parent(&t, "luop/feat/x", Some("plan/idea")).is_err());
+        assert!(check_parent(&t, "luop/feat/x", Some("delegate/gone")).is_err());
+        assert!(check_parent(&t, "luop/feat/missing", Some("delegate/luop")).is_err());
+        assert!(check_parent(&t, "delegate/luop", Some("delegate/luop")).is_err());
+        assert!(check_parent(&t, DEV_ID, None).is_err());
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn store_parents_persist_and_default() {
+        let t = std::env::temp_dir().join(format!("wtd-store-{}", std::process::id()));
+        let mut s = store::Store::default();
+        s.parents.insert("luop/feat/x".into(), "delegate/luop".into());
+        s.save(&t).unwrap();
+        assert_eq!(store::Store::load(&t).parents.get("luop/feat/x").map(String::as_str), Some("delegate/luop"));
+        // a store.json written before `parents` existed still loads
+        std::fs::write(paths::state_dir(&t).join("store.json"), r#"{"groups":[],"membership":{"a/b":"g1"}}"#).unwrap();
+        let old = store::Store::load(&t);
+        assert!(old.parents.is_empty());
+        assert_eq!(old.membership.get("a/b").map(String::as_str), Some("g1"));
+        std::fs::remove_dir_all(&t).ok();
+    }
 }

@@ -125,6 +125,10 @@ pub fn resolve_worktree(dev: &Path, dir: &Path) -> Option<WtRef> {
 /// `worktrees/delegate/<repo slug>`: a repo's long-lived delegator, which spawns worktrees for it.
 pub const DELEGATE: &str = "delegate";
 
+pub fn is_delegate_id(id: &str) -> bool {
+    id.split_once('/').is_some_and(|(slug, name)| slug == DELEGATE && !name.is_empty() && !name.contains('/'))
+}
+
 /// Slugs under `worktrees/` that hold plain folders (their own `git init`), not checkouts of a repo.
 pub fn repo_less(slug: &str) -> bool {
     slug == "plan" || slug == DELEGATE
@@ -146,6 +150,14 @@ mod tests {
         assert_eq!(normalize("/d/dev/x/y"), PathBuf::from(r"D:\dev\x\y"));
         assert_eq!(normalize("D:/dev/x"), PathBuf::from(r"D:\dev\x"));
         assert_eq!(normalize(r"D:\dev"), PathBuf::from(r"D:\dev"));
+    }
+
+    #[test]
+    fn delegate_ids() {
+        assert!(is_delegate_id("delegate/worktree-dev"));
+        for id in ["delegate", "delegate/", "delegate/a/b", "worktree-dev/delegate", "plan/x", DEV_ID] {
+            assert!(!is_delegate_id(id), "{id}");
+        }
     }
 
     #[test]
