@@ -13,8 +13,7 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::io::{AsyncReadExt, BufReader, ReadHalf};
-use tokio::net::windows::named_pipe::NamedPipeServer;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::{broadcast, mpsc};
 use wtd_core::status::{apply, Event};
 
@@ -163,14 +162,17 @@ fn exited(d: &Arc<Daemon>, id: u64, wt: &str, code: i32) {
 
 /// Relay a hosted session over this connection until the client disconnects (the session survives)
 /// or the session ends.
+/// Every attached terminal can resize the one shared console, so input claims it: typing into a
+/// terminal whose size isn't the console's resizes the console to that terminal first.
 pub async fn attach(
     hosted: Arc<Hosted>,
     created: bool,
     cols: u16,
     rows: u16,
-    mut rd: BufReader<ReadHalf<NamedPipeServer>>,
+    mut rd: impl AsyncRead + Unpin,
     out: mpsc::UnboundedSender<Vec<u8>>,
 ) {
+    let mut size = (cols, rows);
     let mut rx = hosted.tx.subscribe();
     if !created {
         // a re-attaching terminal starts blank: clear it, then make conpty repaint the viewport
@@ -216,6 +218,9 @@ pub async fn attach(
         }
         match hdr[0] {
             F_DATA => {
+                if hosted.pty.size() != size {
+                    hosted.pty.resize(size.0, size.1);
+                }
                 let pty = hosted.pty.clone();
                 // a pipe write can block if conpty is momentarily not reading; keep the runtime free
                 if tokio::task::spawn_blocking(move || pty.write(&payload)).await.map(|r| r.is_err()).unwrap_or(true) {
@@ -225,10 +230,65 @@ pub async fn attach(
             F_RESIZE if payload.len() >= 4 => {
                 let c = u16::from_le_bytes([payload[0], payload[1]]);
                 let r = u16::from_le_bytes([payload[2], payload[3]]);
+                size = (c, r);
                 hosted.pty.resize(c, r);
             }
             _ => {}
         }
     }
     pump.abort();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+    use tokio::io::AsyncWriteExt;
+
+    fn resize(cols: u16, rows: u16) -> Vec<u8> {
+        let mut p = cols.to_le_bytes().to_vec();
+        p.extend_from_slice(&rows.to_le_bytes());
+        frame(F_RESIZE, &p)
+    }
+
+    async fn wait_for_size(pty: &Pty, want: (u16, u16)) {
+        let start = Instant::now();
+        while pty.size() != want {
+            assert!(start.elapsed() < Duration::from_secs(5), "console is {:?}, expected {want:?}", pty.size());
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    // Two terminals on one session (e.g. a reload-revived tab and a new one): the one being typed in
+    // must get the console at its own size, or it renders output laid out for the other's width.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn input_claims_the_console_for_its_terminal_size() {
+        let cmd = PathBuf::from(std::env::var("ComSpec").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into()));
+        let env: Vec<(String, String)> = std::env::vars().collect();
+        let (tx, _) = broadcast::channel(256);
+        let tx_out = tx.clone();
+        let pty = Pty::spawn(&cmd, &["/k".into()], &std::env::temp_dir(), &env, 100, 30, "test-claim", move |b| {
+            let _ = tx_out.send(HostEvent::Data(Arc::new(b.to_vec())));
+        }, |_| {})
+        .unwrap();
+        let hosted = Arc::new(Hosted { pty: pty.clone(), tx });
+        let (out, _out_rx) = mpsc::unbounded_channel();
+        let (mut a, a_rd) = tokio::io::duplex(4096);
+        let (mut b, b_rd) = tokio::io::duplex(4096);
+        tokio::spawn(attach(hosted.clone(), true, 100, 30, a_rd, out.clone()));
+        tokio::spawn(attach(hosted.clone(), false, 80, 24, b_rd, out.clone()));
+        wait_for_size(&pty, (80, 24)).await;
+
+        a.write_all(&frame(F_DATA, b" ")).await.unwrap();
+        wait_for_size(&pty, (100, 30)).await;
+
+        b.write_all(&resize(90, 24)).await.unwrap();
+        wait_for_size(&pty, (90, 24)).await;
+        a.write_all(&frame(F_DATA, b" ")).await.unwrap();
+        wait_for_size(&pty, (100, 30)).await;
+
+        b.write_all(&frame(F_DATA, b" ")).await.unwrap();
+        wait_for_size(&pty, (90, 24)).await;
+        pty.kill();
+    }
 }
