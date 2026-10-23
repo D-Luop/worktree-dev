@@ -16,6 +16,8 @@ struct HookInput {
     #[serde(default)]
     cwd: Option<String>,
     #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
     tool_input: Option<serde_json::Value>,
     #[serde(default)]
     tool_response: Option<ToolResponse>,
@@ -61,7 +63,11 @@ fn run(args: &[String]) -> anyhow::Result<()> {
             path = format!("{}/{}", c.trim_end_matches(['/', '\\']), path);
         }
     }
-    let Some(ev) = Event::from_word(word, &path) else { anyhow::bail!("unknown event '{word}'") };
+    let ev = Event::from_word(word, &path);
+    if ev.is_none() && word != "plan-nudge" {
+        anyhow::bail!("unknown event '{word}'");
+    }
+    let session = input.session_id.take().unwrap_or_default();
 
     let dir: PathBuf = std::env::var("CLAUDE_PROJECT_DIR")
         .ok()
@@ -71,6 +77,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         .unwrap_or(std::env::current_dir()?);
     let dev = paths::dev_root()?;
     let Some(wt) = paths::resolve_worktree(&dev, &dir) else { return Ok(()) }; // not ours
+    let Some(ev) = ev else { return crate::nudge::hook(&dev, &wt, &session, &path) };
 
     let old = statusfile::read(&wt.root);
     let new = apply(old, &ev);

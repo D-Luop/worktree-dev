@@ -103,7 +103,7 @@ pub struct StatusState {
 }
 
 /// Edits to these don't count as "real source edits" (they don't invalidate a milestone).
-fn is_scratch_path(path: &str) -> bool {
+pub fn is_scratch_path(path: &str) -> bool {
     if path.is_empty() {
         return true;
     }

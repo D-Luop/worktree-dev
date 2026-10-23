@@ -58,6 +58,15 @@
             "command": "__DEV__/.wtd/hooks/wt-status.sh edit"
           }
         ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__DEV__/.wtd/hooks/plan-nudge.sh"
+          }
+        ]
       }
     ],
     "PostToolUse": [
