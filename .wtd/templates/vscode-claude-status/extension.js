@@ -799,8 +799,7 @@ class DevSummaryProvider {
     switch (m.cmd) {
       case 'groupNew': {
         const name = await ask('', 'New group'); if (!name) return;
-        const r = await d.request('group.create', { name: name.trim() });
-        if (m.worktree) await d.request('group.assign', { worktree: m.worktree, group: r.id });
+        await d.request('group.create', { name: name.trim() });
         return;
       }
       case 'groupRename': {
@@ -815,16 +814,6 @@ class DevSummaryProvider {
       case 'groupCollapse': return d.request('group.update', { id: m.id, collapsed: !!m.collapsed });
       case 'groupAssign': return d.request('group.assign', { worktree: m.worktree, group: m.group || null });
       case 'groupReorder': return d.request('group.reorder', { ids: m.ids || [] });
-      case 'groupMove': {
-        const wt = d.wts.get(m.worktree);
-        const items = groups.map((g) => ({ label: '$(folder) ' + g.name, id: g.id, description: wt && wt.group === g.id ? 'current' : '' }));
-        items.push({ label: '$(circle-outline) Ungrouped', id: null, description: wt && !wt.group ? 'current' : '' });
-        items.push({ label: '$(new-folder) New group…', id: '__new__' });
-        const it = await vscode.window.showQuickPick(items, { placeHolder: 'Move ' + m.worktree + ' to…' });
-        if (!it) return;
-        if (it.id === '__new__') return this._groupOp({ cmd: 'groupNew', worktree: m.worktree });
-        return d.request('group.assign', { worktree: m.worktree, group: it.id });
-      }
     }
   }
 
@@ -949,9 +938,6 @@ class DevSummaryProvider {
         this.previewFocused();
       } else if (m.cmd === 'ticket' && m.slug) {
         this.ticketMenu(m.slug, m.name).catch((e) => vscode.window.showErrorMessage('Ticket: ' + e.message));
-      } else if (m.cmd === 'openCommits' && m.slug) {
-        if (this.changes && this.changes.enabled()) this.changes.follow(m.slug, m.name).then(() => this.changes.panel && this.changes.panel.reveal(this._cols().panel, true));
-        else if (this.gitView) this.gitView.show(m.slug, m.name);
       } else if (m.cmd === 'pasteImage') {
         this.pasteImage();
       } else if (m.cmd === 'toggleTests') {
@@ -1085,7 +1071,7 @@ class DevSummaryProvider {
     }
   }
 
-  // daemon mode: rows straight from the pushed fleet state (no disk scan, no git, no registry reads)
+  // daemon mode: rows straight from the pushed fleet state (no git, no registry reads; only a stat of each .claude-ticket.md)
   _daemonRows() {
     const rows = []; const live = new Set();
     const pendingFrom = {};
@@ -1094,7 +1080,7 @@ class DevSummaryProvider {
       if (w.kind === 'dev') continue;   // the assistant has its own pinned row
       const slug = w.slug, name = w.name;
       rows.push({ id: w.id, group: w.group || null, parent: w.parent || null, slug, name, status: w.status === 'none' ? '' : w.status, dirty: !!(w.git && w.git.dirty), ahead: (w.git && w.git.ahead) || 0,
-                  branch: (w.git && w.git.branch) || '', plan: w.plan_title || '', account: w.account || '', live: !!w.live, kind: w.kind || '', program: w.program || '', msgPending: pendingFrom[w.id] || 0, limitResetsAt: w.limit_resets_at || 0 });
+                  branch: (w.git && w.git.branch) || '', plan: w.plan_title || '', account: w.account || '', live: !!w.live, kind: w.kind || '', program: w.program || '', msgPending: pendingFrom[w.id] || 0, limitResetsAt: w.limit_resets_at || 0, ticket: ticketOf(w.path) });
       if (w.live) live.add(slug + '-' + name);
     }
     return { rows, live };
@@ -1431,6 +1417,8 @@ class DevSummaryProvider {
     const lim = w.status==='limited' ? limTxt(w.limitResetsAt) : '';
     const tip = w.slug+'/'+w.name+' — '+s[1]+(lim?' · '+lim:'')+(w.active?' · live session':'')+(w.branch?' · '+w.branch:'')+(w.plan?'\\n'+w.plan:'')+'\\nclick to open';
     const drag = groupsData && canEditGroups;
+    const tk = w.ticket;
+    const tkIco = !tk ? 'link' : tk.kind==='issue' ? (tk.state==='CLOSED'?'issue-closed':'issue-opened') : (tk.state==='MERGED'?'git-merge':'git-pull-request');
     return '<div class="row wt'+(child?' child':'')+(w.active?' live':'')+(w.unread?' unread':'')+(w.current?' current':'')+'" data-id="'+esc(w.id||'')+'" data-slug="'+esc(w.slug)+'" data-name="'+esc(w.name)+'" data-glyph="'+g+'" title="'+esc(tip)+'"'+(drag?' draggable="true"':'')+'>'
       +'<span class="st" style="color:'+s[3]+'">'+ico(s[2])+'</span>'
       +'<span class="nm">'+esc(w.name)+'</span>'+(groupsData&&w.kind!=='delegate'?'<span class="rb" title="repository">'+esc(w.slug)+'</span>':'')+role+acct
@@ -1439,9 +1427,7 @@ class DevSummaryProvider {
       +(w.preview?'<i class="codicon codicon-file-media pv" title="Staged previews: open them in the Changes panel"></i>':'')
       +'<span class="git">'+git+'</span>'
       +'<span class="acts">'
-      +'<i class="codicon codicon-diff dif" title="Commits & diffs"></i>'
-      +'<i class="codicon codicon-issues tkt" title="Linked ticket (.claude-ticket.md)…"></i>'
-      +(groupsData&&canEditGroups?'<i class="codicon codicon-folder mv" title="Move to group…"></i>':'')
+      +'<i class="codicon codicon-'+tkIco+' tkt" title="'+esc(tk?'#'+tk.n+' '+tk.title:'Link an issue or PR…')+'"></i>'
       +(w.active&&!w.unread?'<i class="codicon codicon-mail unr" title="Mark unread"></i>':'')
       +(multiAcct?'<i class="codicon codicon-arrow-swap acc" title="Continue on another account (Claude or Codex)…"></i>':'')
       +(w.active?'<i class="codicon codicon-debug-stop term danger" title="End session (worktree stays)"></i>':'')
@@ -1496,8 +1482,7 @@ class DevSummaryProvider {
     }
     const on=(sel,cmd)=>el.querySelectorAll(sel).forEach(x=>x.onclick=(ev)=>{ ev.stopPropagation(); const p=x.closest('.wt'); vsc.postMessage({cmd,slug:p.dataset.slug,name:p.dataset.name}); });
     el.querySelectorAll('.wt').forEach(x=>x.onclick=()=>vsc.postMessage({cmd:'open',slug:x.dataset.slug,name:x.dataset.name,glyph:x.dataset.glyph}));
-    on('.arch','archive'); on('.del','delete'); on('.term','terminate'); on('.unr','markunread'); on('.acc','switchAccount'); on('.dif','openCommits'); on('.tkt','ticket'); on('.pv','preview');
-    el.querySelectorAll('.mv').forEach(x=>x.onclick=(ev)=>{ ev.stopPropagation(); vsc.postMessage({cmd:'groupMove', worktree:x.closest('.wt').dataset.id}); });
+    on('.arch','archive'); on('.del','delete'); on('.term','terminate'); on('.unr','markunread'); on('.acc','switchAccount'); on('.tkt','ticket'); on('.pv','preview');
     el.querySelectorAll('.msgp').forEach(x=>x.onclick=(ev)=>{ ev.stopPropagation(); vsc.postMessage({cmd:'reviewMessages', worktree:x.closest('.wt').dataset.id}); });
   }
 
@@ -1600,6 +1585,25 @@ function wtdJson(args) {
       try { resolve(JSON.parse((so || '').trim().split('\n').pop() || 'null')); } catch (x) { reject(x); }
     });
   });
+}
+
+// what a worktree's .claude-ticket.md is about, from the header `wtd ticket sync` writes → {kind,n,title,state} | null
+const _tickets = new Map();
+function ticketOf(wtPath) {
+  if (!wtPath) return null;
+  const file = path.join(wtPath, '.claude-ticket.md');
+  let mtime; try { mtime = fs.statSync(file).mtimeMs; } catch { _tickets.delete(file); return null; }
+  const hit = _tickets.get(file);
+  if (hit && hit.mtime === mtime) return hit.t;
+  let t = null;
+  try {
+    const md = fs.readFileSync(file, 'utf8');
+    let m = md.match(/^# #(\d+) (.*)\r?\n\r?\n- Issue · \*\*(\w+)\*\*/);
+    if (m) t = { kind: 'issue', n: m[1], title: m[2], state: m[3] };
+    else if ((m = md.match(/^## Pull request #(\d+) — (.*)\r?\n\r?\n- (\w+) ·/m))) t = { kind: 'pr', n: m[1], title: m[2], state: m[3] };
+  } catch {}
+  _tickets.set(file, { mtime, t });
+  return t;
 }
 
 const BACK = Symbol('back');
