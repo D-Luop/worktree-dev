@@ -146,7 +146,7 @@ wtd_session_run_claude() {
   export WTD_SESSION="$session"
   cd "$wt" || return 1
   # refresh the worktree's status glyph for the extension roster
-  CLAUDE_PROJECT_DIR="$wt" "$WTD/hooks/wt-status.sh" sync </dev/null 2>/dev/null || true
+  CLAUDE_PROJECT_DIR="$wt" "${WTA:-$WTD}/hooks/wt-status.sh" sync </dev/null 2>/dev/null || true
   if [ "$launch" != 1 ]; then
     echo "worktree ready: $wt  (run 'claude' when ready)"
     exec "${SHELL:-bash}" -i

@@ -32,7 +32,99 @@ pub fn dev_root() -> Result<PathBuf> {
             return Ok(p);
         }
     }
-    bail!("can't find the worktree-dev root (set WTD_DEV, or run install.sh)")
+    bail!("can't find the worktree-dev root (set WTD_DEV, or run wtd setup)")
+}
+
+pub fn program_dir_pin() -> Option<PathBuf> {
+    home_dir().ok().map(|h| h.join(".config").join("wtd").join("program-dir"))
+}
+
+/// Where the installed program lives (`%LOCALAPPDATA%\WorkTreeDev`): `WTD_PROGRAM_DIR` env → the
+/// `~/.config/wtd/program-dir` pin → the default. It may not exist (a dev-mode install).
+pub fn program_dir() -> PathBuf {
+    // unit tests never see this machine's real install
+    if cfg!(test) && std::env::var_os("WTD_PROGRAM_DIR").is_none() {
+        return std::env::temp_dir().join("wtd-test-no-program-dir");
+    }
+    if let Some(p) = std::env::var_os("WTD_PROGRAM_DIR").filter(|v| !v.is_empty()) {
+        return PathBuf::from(p);
+    }
+    if let Some(s) = program_dir_pin().and_then(|p| std::fs::read_to_string(p).ok()).filter(|s| !s.trim().is_empty()) {
+        return PathBuf::from(s.trim());
+    }
+    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+        .or_else(|| home_dir().ok().map(|h| h.join("AppData").join("Local")))
+        .unwrap_or_default();
+    local.join("WorkTreeDev")
+}
+
+/// Where binaries, templates, hooks and scripts come from, and whether the dev root's own copies win.
+#[derive(Debug, Clone)]
+pub struct Layout {
+    pub dev: Option<PathBuf>,
+    /// `<program dir>/current`, the active version.
+    pub current: PathBuf,
+    /// `WTD_DEV_SOURCE=1`: a contributor running from the checkout even with a program dir installed.
+    pub dev_source: bool,
+}
+
+impl Layout {
+    pub fn detect() -> Self {
+        Self::with_dev(dev_root().ok())
+    }
+
+    pub fn with_dev(dev: Option<PathBuf>) -> Self {
+        Layout {
+            dev,
+            current: program_dir().join("current"),
+            dev_source: std::env::var("WTD_DEV_SOURCE").is_ok_and(|v| v == "1"),
+        }
+    }
+
+    pub fn installed(&self) -> bool {
+        self.current.join("bin").join("wtd.exe").is_file()
+    }
+
+    /// The dev root is a source checkout and its copies are the ones to use.
+    pub fn dev_mode(&self) -> bool {
+        self.dev.as_ref().is_some_and(|d| d.join(".wtd").join("templates").is_dir()) && (self.dev_source || !self.installed())
+    }
+
+    /// `rel` under the program dir, falling back to `<dev>/.wtd/<rel>` for a file the program dir lacks.
+    pub fn asset(&self, rel: &str) -> PathBuf {
+        let dev = self.dev.as_ref().map(|d| d.join(".wtd").join(rel));
+        if self.dev_mode() {
+            return dev.unwrap();
+        }
+        let prog = self.current.join(rel);
+        match dev {
+            Some(d) if !prog.exists() && d.exists() => d,
+            _ => prog,
+        }
+    }
+
+    /// The `wtd.exe` that hooks, shims and spawned commands should run.
+    pub fn wtd_exe(&self) -> PathBuf {
+        if !self.dev_mode() && self.installed() {
+            self.current.join("bin").join("wtd.exe")
+        } else {
+            sibling_exe("wtd.exe")
+        }
+    }
+}
+
+pub fn dev_mode() -> bool {
+    Layout::detect().dev_mode()
+}
+
+/// A program file (`templates/…`, `hooks/…`, `scripts/…`, `bin/…`), resolved per [`Layout::asset`].
+pub fn asset(rel: &str) -> PathBuf {
+    Layout::detect().asset(rel)
+}
+
+/// [`asset`] for a dev root the caller already has.
+pub fn asset_in(dev: &Path, rel: &str) -> PathBuf {
+    Layout::with_dev(Some(dev.to_path_buf())).asset(rel)
 }
 
 /// A sibling program next to the running one (`wtd.exe` / `wtd-tray.exe` live side by side).
@@ -40,11 +132,11 @@ pub fn sibling_exe(name: &str) -> PathBuf {
     std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(name))).unwrap_or_else(|| PathBuf::from(name))
 }
 pub fn wtd_exe() -> PathBuf {
-    sibling_exe("wtd.exe")
+    Layout::detect().wtd_exe()
 }
 /// The windowless tray program, if it's installed.
 pub fn tray_exe() -> Option<PathBuf> {
-    Some(sibling_exe("wtd-tray.exe")).filter(|p| p.is_file())
+    Some(wtd_exe().with_file_name("wtd-tray.exe")).filter(|p| p.is_file())
 }
 
 pub fn home_dir() -> Result<PathBuf> {
@@ -158,6 +250,74 @@ mod tests {
         for id in ["delegate", "delegate/", "delegate/a/b", "worktree-dev/delegate", "plan/x", DEV_ID] {
             assert!(!is_delegate_id(id), "{id}");
         }
+    }
+
+    fn touch(p: &Path) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, "").unwrap();
+    }
+
+    fn layout(tag: &str, checkout: bool, installed: bool, dev_source: bool) -> (PathBuf, Layout) {
+        let t = std::env::temp_dir().join(format!("wtd-layout-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        let dev = t.join("dev");
+        std::fs::create_dir_all(dev.join(".wtd").join("state")).unwrap();
+        if checkout {
+            touch(&dev.join(".wtd/templates/CLAUDE.md"));
+            touch(&dev.join(".wtd/templates/dev-only.md"));
+        }
+        let current = t.join("WorkTreeDev").join("current");
+        if installed {
+            touch(&current.join("bin/wtd.exe"));
+            touch(&current.join("templates/CLAUDE.md"));
+        }
+        (t, Layout { dev: Some(dev), current, dev_source })
+    }
+
+    #[test]
+    fn program_mode_uses_program_dir() {
+        let (t, l) = layout("prog", false, true, false);
+        assert!(!l.dev_mode());
+        assert_eq!(l.asset("templates/CLAUDE.md"), l.current.join("templates/CLAUDE.md"));
+        assert_eq!(l.asset("hooks/missing.sh"), l.current.join("hooks/missing.sh"));
+        assert_eq!(l.wtd_exe(), l.current.join("bin").join("wtd.exe"));
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn dev_mode_without_a_program_dir() {
+        let (t, l) = layout("dev", true, false, false);
+        assert!(l.dev_mode());
+        let dev = l.dev.clone().unwrap();
+        assert_eq!(l.asset("templates/CLAUDE.md"), dev.join(".wtd").join("templates/CLAUDE.md"));
+        assert_eq!(l.wtd_exe(), sibling_exe("wtd.exe"));
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn dev_source_beats_an_installed_program_dir() {
+        let (t, l) = layout("devsrc", true, true, true);
+        assert!(l.dev_mode());
+        assert_eq!(l.asset("templates/CLAUDE.md"), l.dev.clone().unwrap().join(".wtd").join("templates/CLAUDE.md"));
+        assert_eq!(l.wtd_exe(), sibling_exe("wtd.exe"));
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn mixed_mode_falls_back_per_file() {
+        let (t, l) = layout("mixed", true, true, false);
+        assert!(!l.dev_mode());
+        assert_eq!(l.asset("templates/CLAUDE.md"), l.current.join("templates/CLAUDE.md"));
+        assert_eq!(l.asset("templates/dev-only.md"), l.dev.clone().unwrap().join(".wtd").join("templates/dev-only.md"));
+        assert_eq!(l.wtd_exe(), l.current.join("bin").join("wtd.exe"));
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn no_dev_root_and_nothing_installed() {
+        let l = Layout { dev: None, current: PathBuf::from(r"Z:\nowhere\current"), dev_source: false };
+        assert!(!l.dev_mode() && !l.installed());
+        assert_eq!(l.asset("templates/CLAUDE.md"), PathBuf::from(r"Z:\nowhere\current").join("templates/CLAUDE.md"));
     }
 
     #[test]

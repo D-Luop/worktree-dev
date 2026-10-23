@@ -2,12 +2,13 @@
 """Package this extension into a .vsix (a zip with the VSCode extension layout) using only the
 stdlib — no vsce/npm needed. install.sh runs it and installs the result; run it by hand to test:
 
-    python build-vsix.py
+    python build-vsix.py [--version X.Y.Z] [--out <file.vsix>]
 
 The version is derived: package.json's version with its patch raised by the number of commits that
 touched this folder, so it moves whenever the source does. Don't bump package.json by hand, and
 don't commit the .vsix (it's gitignored). Writes claude-status-<version>.vsix next to this script,
-replacing any older build."""
+replacing any older build. The release pipeline passes --version (the release's X.Y.Z) and --out."""
+import argparse
 import json
 import os
 import subprocess
@@ -15,6 +16,11 @@ import sys
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--version", help="explicit X.Y.Z instead of the git-derived version")
+ap.add_argument("--out", help="output .vsix path")
+args = ap.parse_args()
 
 # Gate: the webviews' inline <script> blocks must parse. A syntax error there (e.g. an unescaped
 # apostrophe in a concatenated HTML string) ships a panel that renders but is silently dead.
@@ -34,7 +40,7 @@ def derived_version(base):
     return f"{major}.{minor}.{int(patch) + n}"
 
 
-VERSION = derived_version(pkg["version"])
+VERSION = args.version or derived_version(pkg["version"])
 pkg["version"] = VERSION
 NAME, PUBLISHER = pkg["name"], pkg["publisher"]
 
@@ -63,10 +69,13 @@ MANIFEST = (
     "</PackageManifest>"
 )
 
-out = os.path.join(HERE, f"{NAME}-{VERSION}.vsix")
-for f in os.listdir(HERE):
-    if f.startswith(f"{NAME}-") and f.endswith(".vsix"):
-        os.remove(os.path.join(HERE, f))
+if args.out:
+    out = os.path.abspath(args.out)
+else:
+    out = os.path.join(HERE, f"{NAME}-{VERSION}.vsix")
+    for f in os.listdir(HERE):
+        if f.startswith(f"{NAME}-") and f.endswith(".vsix"):
+            os.remove(os.path.join(HERE, f))
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
     z.writestr("[Content_Types].xml", CONTENT_TYPES)
     z.writestr("extension.vsixmanifest", MANIFEST)

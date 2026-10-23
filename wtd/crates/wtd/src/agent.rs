@@ -432,7 +432,7 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
                 for d in ["docs", "research", "notes/tasks"] {
                     std::fs::create_dir_all(wtp.join(d))?;
                 }
-                let tmpl = std::fs::read_to_string(dev.join(".wtd").join("templates").join("DELEGATOR.md"))
+                let tmpl = std::fs::read_to_string(paths::asset_in(dev, "templates/DELEGATOR.md"))
                     .unwrap_or_else(|_| include_str!("../../../../.wtd/templates/DELEGATOR.md").to_string());
                 std::fs::write(wtp.join("CLAUDE.md"), tmpl.replace("__SLUG__", &name))?;
             }
@@ -447,7 +447,7 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
         }
         std::fs::create_dir_all(wtp.join(".claude").join("plans"))?;
         if !wtp.join("CLAUDE.md").exists() {
-            std::fs::copy(dev.join(".wtd").join("templates").join("CLAUDE.md"), wtp.join("CLAUDE.md"))?;
+            std::fs::copy(paths::asset_in(dev, "templates/CLAUDE.md"), wtp.join("CLAUDE.md"))?;
         }
         if let Some(f) = issue.as_ref().filter(|f| f.is_file()) {
             seed_issue(&wtp, f)?;
@@ -471,7 +471,7 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
         }
     }
     // template skills refresh on every open, so new/updated skills reach existing worktrees
-    let skills = dev.join(".wtd").join("templates").join(".claude").join("skills");
+    let skills = paths::asset_in(dev, "templates/.claude/skills");
     if skills.is_dir() {
         let _ = copy_dir(&skills, &wtp.join(".claude").join("skills"));
     }
@@ -479,7 +479,7 @@ fn launch(dev: &Path, args: &[String]) -> Result<i32> {
     let pvplan = name.split('/').fold(dev.join(".wtd").join("state").join("previews").join(&slug), |p, c| p.join(c)).join("plan.html");
     if !pvplan.exists() {
         std::fs::create_dir_all(pvplan.parent().unwrap())?;
-        let _ = std::fs::copy(dev.join(".wtd").join("templates").join("plan-placeholder.html"), &pvplan);
+        let _ = std::fs::copy(paths::asset_in(dev, "templates/plan-placeholder.html"), &pvplan);
     }
     // your own skills / CLAUDE.md additions / hooks (.wtd/custom), global and for this repo
     match crate::custom::apply(dev, &slug, &wtp, created) {

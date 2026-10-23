@@ -1,0 +1,114 @@
+# Pushing tag vX.Y.Z (or vX.Y.Z-beta.N) publishes the release in docs' distribution contract:
+#   WorkTreeDev-Setup-X.Y.Z.exe, worktree-dev-X.Y.Z-windows-x64.zip, latest.json / latest-beta.json
+# The exes and Setup are signed with Azure Trusted Signing when its secrets are set (README-windows.md).
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      SIGN: ${{ secrets.AZURE_CLIENT_ID != '' && secrets.AZURE_TENANT_ID != '' && secrets.AZURE_CLIENT_SECRET != '' && secrets.TRUSTED_SIGNING_ENDPOINT != '' && secrets.TRUSTED_SIGNING_ACCOUNT != '' && secrets.TRUSTED_SIGNING_PROFILE != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version from tag
+        run: |
+          $v = '${{ github.ref_name }}' -replace '^v', ''
+          "VERSION=$v" >> $env:GITHUB_ENV
+          "PRERELEASE=$($v.Contains('-').ToString().ToLower())" >> $env:GITHUB_ENV
+          ./installer/set-crate-version.ps1 -Version $v
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: wtd
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: cargo build
+        run: cargo build --release --locked --manifest-path wtd/Cargo.toml
+
+      - name: Signing disabled
+        if: env.SIGN != 'true'
+        run: echo "::warning::Azure Trusted Signing secrets not set; wtd.exe, wtd-tray.exe and Setup ship unsigned."
+
+      - name: Sign wtd.exe, wtd-tray.exe
+        if: env.SIGN == 'true'
+        uses: azure/trusted-signing-action@v0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.TRUSTED_SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\wtd\target\release\wtd.exe,${{ github.workspace }}\wtd\target\release\wtd-tray.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Assemble payload
+        run: ./installer/assemble-payload.ps1 -Version $env:VERSION -Out dist/payload
+
+      - name: Build Setup
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed" }
+          }
+          & $iscc /Q "/DAppVersion=$env:VERSION" "/DPayloadDir=$PWD\dist\payload" "/O$PWD\dist" installer\WorkTreeDev.iss
+          if ($LASTEXITCODE -ne 0) { throw "iscc failed ($LASTEXITCODE)" }
+
+      - name: Sign Setup
+        if: env.SIGN == 'true'
+        uses: azure/trusted-signing-action@v0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.TRUSTED_SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\dist\WorkTreeDev-Setup-${{ env.VERSION }}.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Zip payload + manifest
+        # after signing: latest.json carries the signed Setup's sha256
+        run: ./installer/write-manifest.ps1 -Version $env:VERSION -Payload dist/payload -Setup "dist/WorkTreeDev-Setup-$env:VERSION.exe" -OutDir dist -Repo $env:GITHUB_REPOSITORY
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $manifest = if ($env:PRERELEASE -eq 'true') { 'latest-beta.json' } else { 'latest.json' }
+          $assets = @("dist/WorkTreeDev-Setup-$env:VERSION.exe", "dist/worktree-dev-$env:VERSION-windows-x64.zip", "dist/$manifest")
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @assets --clobber
+          } else {
+            $flags = @('--verify-tag', '--generate-notes', '--title', "WorkTreeDev $env:VERSION")
+            if ($env:PRERELEASE -eq 'true') { $flags += '--prerelease' }
+            gh release create $tag @assets @flags
+          }
+          if ($LASTEXITCODE -ne 0) { throw "gh release failed ($LASTEXITCODE)" }

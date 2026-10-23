@@ -135,7 +135,7 @@ fn disabled(layers: &[(String, PathBuf)]) -> BTreeSet<String> {
 
 /// `kind/name` → (layer label, source path), later layers winning, disabled items dropped.
 fn merged_items(dev: &Path, slug: &str, os: &str) -> BTreeMap<String, (String, PathBuf)> {
-    let mut all = vec![("built-in".to_string(), dev.join(".wtd").join("templates").join(".claude"))];
+    let mut all = vec![("built-in".to_string(), crate::paths::asset_in(dev, "templates/.claude"))];
     all.extend(layers_for(dev, slug, os));
     let off = disabled(&all);
     let mut items = BTreeMap::new();
@@ -415,7 +415,7 @@ pub fn ls(dev: &Path) -> Value {
         info["platforms"] = platform_infos(&rr);
         repos.insert(slug.clone(), info);
     }
-    let builtin = names(&dev.join(".wtd").join("templates").join(".claude").join("skills"), Some(true));
+    let builtin = names(&crate::paths::asset_in(dev, "templates/.claude/skills"), Some(true));
     json!({ "root": r.to_string_lossy(), "platform": platform(), "platforms_all": PLATFORMS, "builtin": { "skills": builtin }, "global": layer_info(&r), "platforms": platform_infos(&r), "repos": repos })
 }
 
