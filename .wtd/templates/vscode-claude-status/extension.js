@@ -783,9 +783,13 @@ class DevSummaryProvider {
     const t = this._terms.get(key); if (t) kill.add(t);
     const sh = this._shells.get(key); if (sh) kill.add(sh);
     const others = new Set([...this._terms.entries()].filter(([k]) => k !== key).map(([, v]) => v));
+    const under = (p) => { if (!p) return false; const a = path.resolve(p).toLowerCase(), b = path.resolve(wt).toLowerCase(); return a === b || a.startsWith(b + path.sep); };
     for (const x of vscode.window.terminals) {
       const n = termName(x);
       if (n === this._shellName(slug, name) || (!t && n === name && !others.has(x))) kill.add(x);
+      // any other shell sitting in the folder (e.g. a duplicate revived after a reload) holds it too
+      const cwd = (x.shellIntegration && x.shellIntegration.cwd) || (x.creationOptions && x.creationOptions.cwd);
+      if (cwd && under(typeof cwd === 'string' ? cwd : cwd.fsPath)) kill.add(x);
     }
     for (const x of kill) { try { x.dispose(); } catch {} }
     this._terms.delete(key); this._shells.delete(key);
@@ -794,7 +798,6 @@ class DevSummaryProvider {
     if (this.gitView && this.gitView.target && this.gitView.target.slug === slug && this.gitView.target.name === name) {
       this.gitView.target = null; this.gitView.state = null; this.gitView.refresh();
     }
-    const under = (p) => { if (!p) return false; const a = path.resolve(p).toLowerCase(), b = path.resolve(wt).toLowerCase(); return a === b || a.startsWith(b + path.sep); };
     const holds = (u) => !!u && ((u.scheme === 'file' && under(u.fsPath))
       || (u.scheme === 'wtd-git' && (() => { try { return under(JSON.parse(u.query).wt); } catch { return false; } })()));
     const tabs = [];
