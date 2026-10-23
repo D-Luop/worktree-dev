@@ -61,6 +61,7 @@ const IS_WIN = process.platform === 'win32';
 const PASTE_IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'];
 const ASST_NAME = 'assistant';   // the reserved terminal name of the pinned fleet-management session
 const TERM_NAME = 'terminal';    // the reserved name of the pinned plain shell row (above assistant)
+const FOCUS_DELAY_MS = 60;       // lets the clicked webview finish taking focus before we move it
 // The shell each worktree terminal runs. On Windows that's Git Bash (so the .wtd bash scripts run);
 // elsewhere /bin/bash. On Windows `agent` runs claude directly in this terminal (no tmux); on Unix it
 // runs `tmux attach`, so the terminal hosts the tmux session either way.
@@ -478,7 +479,7 @@ class DevSummaryProvider {
       t.show();
     }
     this._terms.set(key, t);
-    this.onTermActive(t);         // select it + dock its shell and Changes (no event fires if it was already active)
+    this._focusSession(t, this.onTermActive(t));   // select it + dock its shell and Changes (no event fires if it was already active)
     this.clearUnread(key);
     _dbg(`  -> branch=${branch} tname=${JSON.stringify(t && t.name)} exit=${t && t.exitStatus}`);
     setTimeout(() => this._postRoster(), 1500);
@@ -501,6 +502,7 @@ class DevSummaryProvider {
       t.show();
     }
     this._asstTerm = t; this._current = t;
+    this._focusSession(t);
     this._unread[ASST_NAME] = false;   // opening/focusing the assistant clears its unread (like a worktree)
     setTimeout(() => this._postRoster(), 800);
   }
@@ -518,7 +520,17 @@ class DevSummaryProvider {
       t.show();
     }
     this._term = t; this._current = t;
+    this._focusSession(t);
     setTimeout(() => this._postRoster(), 800);
+  }
+  // A roster click leaves focus in the webview, and docking (editor layout change) can move it too:
+  // once both settle, put the keyboard in the session so typing goes straight to the agent.
+  _focusSession(t, docked) {
+    Promise.resolve(docked).catch(() => {}).then(() => setTimeout(() => {
+      if (t.exitStatus !== undefined || this._current !== t) return;
+      t.show(false);
+      vscode.commands.executeCommand('workbench.action.terminal.focus');
+    }, FOCUS_DELAY_MS));
   }
 
   // Add an image to the focused session without the broken native-Windows clipboard paste: grab the
@@ -797,19 +809,24 @@ class DevSummaryProvider {
 
   onTermClosed(t) { const sk = this._shellKey(t); if (sk) { this._shells.delete(sk); if (this._shownShell === sk) this._shownShell = null; return; }
     if (this._current === t) { this._current = null; this._postRoster(); } if (this._asstTerm === t) this._asstTerm = null; if (this._term === t) this._term = null; for (const [k, v] of this._terms) if (v === t) { this._terms.delete(k); break; } }
+  // → resolves once its shell + Changes panel are docked
   onTermActive(t) {
     if (!t) return;
     if (this._shellKey(t)) return;   // the bottom shell: the session above stays the selected one
     this._current = t; setTimeout(() => this._postRoster(), 0);   // mark the focused session as selected
     const tk = this._terminalKey(t);   // …and the Changes tree
+    let docked;
     if (tk) { const j = tk.indexOf('\x01'); const s = tk.slice(0, j), n = tk.slice(j + 1);
       if (this.gitView) this.gitView.follow(s, n);
-      if (this.changes) this.changes.follow(s, n);
+      const steps = [];
+      if (this.changes) steps.push(this.changes.follow(s, n));
       if (!this._terms.has(tk) && t.exitStatus === undefined) this._terms.set(tk, t);   // adopt a reload-revived session
-      if (this._terms.get(tk) === t) this._showShell(s, n, t).catch(() => {}); }
-    for (const [k, v] of this._terms) if (v === t) { this.clearUnread(k); return; }
+      if (this._terms.get(tk) === t) steps.push(this._showShell(s, n, t));
+      docked = Promise.all(steps.map((p) => Promise.resolve(p).catch(() => {}))); }
+    for (const [k, v] of this._terms) if (v === t) { this.clearUnread(k); return docked; }
     // also match a reload-revived terminal by name
-    for (const k of Object.keys(this._unread)) { const name = k.split('')[1]; if (this._unread[k] && termName(t) === name) { this.clearUnread(k); return; } }
+    for (const k of Object.keys(this._unread)) { const name = k.split('')[1]; if (this._unread[k] && termName(t) === name) { this.clearUnread(k); return docked; } }
+    return docked;
   }
 
   // "New session": the toolbar button and the `WorkTreeDev: New Session` palette command. With wtd.exe
@@ -2028,12 +2045,13 @@ async function launchSession(dev, st) {
     shellArgs: ['agent', slug, name].concat(args) });
   dev._terms.set(dev._key(slug, name), t); dev._current = t;
   t.show();
+  dev._focusSession(t);
   // after the worktree exists: dock its shell + Changes panel (both skip a missing folder, so the focus
   // above was too early for them), join the chosen group, move the project card
   const afterCreate = async () => {
     const wt = dev._wtPath(slug, name);
     for (let i = 0; i < 60 && !(dev.daemon && dev.daemon.wts.has(id) && fs.existsSync(path.join(wt, '.git'))); i++) await new Promise((r) => setTimeout(r, 1000));
-    if (t.exitStatus === undefined && dev._current === t) dev.onTermActive(t);
+    if (t.exitStatus === undefined && dev._current === t) dev._focusSession(t, dev.onTermActive(t));
     if (st.group && dev.daemon && dev.daemon.running) dev.daemon.request('group.assign', { worktree: id, group: st.group }).catch(() => {});
     if (st.item && st.item.item_id) {
       wtdJson(['issues', 'start', slug, st.item.item_id]).then((r) => { if (r && r.moved) vscode.window.setStatusBarMessage('$(project) Moved the card to ' + r.to, 5000); },
