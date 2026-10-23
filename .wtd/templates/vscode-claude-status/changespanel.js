@@ -17,6 +17,7 @@ const fs = require('fs');
 const path = require('path');
 const gp = require('./gitparse.js');
 const { baseRef, revUri } = require('./gitview.js');
+const wsl = require('./wslpath.js');
 
 const WORKING = '~working';
 const MAX_COMMITS = 200;
@@ -26,7 +27,8 @@ const IGNORE = /(^|[\\/])(\.git|node_modules|target|dist|build|out|\.next|\.turb
 
 function git(wt, args) {
   return new Promise((resolve) => {
-    cp.execFile('git', ['-C', wt].concat(args), { maxBuffer: 64 * 1024 * 1024, timeout: 20000, windowsHide: true, encoding: 'utf8' },
+    const g = wsl.gitCommand(wt, args);
+    cp.execFile(g.cmd, g.args, { maxBuffer: 64 * 1024 * 1024, timeout: 20000, windowsHide: true, encoding: 'utf8' },
       (e, so) => resolve(e ? null : so));
   });
 }
@@ -45,6 +47,12 @@ function previewDoc(raw, nonce) {
   const html = String(raw).replace(/<script\b(?![^>]*\b(?:nonce|src)\s*=)/gi, '<script nonce=' + nonce);
   const bridge = '<script nonce=' + nonce + '>' + BRIDGE + '</script>';
   return /<\/body>/i.test(html) ? html.replace(/<\/body>(?![\s\S]*<\/body>)/i, bridge + '</body>') : html + bridge;
+}
+
+// a WSL worktree's file opens through Remote-WSL when it's installed, else through \\wsl.localhost
+function fileUri(fp) {
+  const r = vscode.extensions.getExtension('ms-vscode-remote.remote-wsl') && wsl.remoteUri(fp);
+  return r ? vscode.Uri.parse(r) : vscode.Uri.file(fp);
 }
 
 class ChangesPanel {
@@ -149,6 +157,7 @@ class ChangesPanel {
   _watchTarget() {
     this._unwatch();
     const t = this.target; if (!t) return;
+    if (wsl.fromUnc(t.wt)) return;   // no change notifications over UNC: the daemon's git pushes refresh it
     try {
       const w = fs.watch(t.wt, { recursive: true }, (ev, file) => {
         if (file && IGNORE.test(String(file))) return;
@@ -298,12 +307,13 @@ class ChangesPanel {
   async _openFile(sel, f) {
     const wt = this.target.wt, fp = path.join(wt, f.path), opts = { viewColumn: this._col(), preview: true };
     let uri = null;
-    if (f.status !== 'deleted' && fs.existsSync(fp)) uri = vscode.Uri.file(fp);
+    if (f.status !== 'deleted' && fs.existsSync(fp)) uri = fileUri(fp);
     else if (f.status === 'deleted') uri = revUri(wt, f.path, sel === WORKING ? 'HEAD' : sel + '^');
     else if (sel !== WORKING) uri = revUri(wt, f.path, sel);
     if (!uri) { vscode.window.setStatusBarMessage('$(info) ' + f.path + ' is no longer on disk', 4000); return; }
     try { await vscode.commands.executeCommand('vscode.open', uri, opts); }
     catch {
+      if (uri.scheme === 'vscode-remote') { try { return await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(fp), opts); } catch {} }
       if (uri.scheme === 'file') await vscode.commands.executeCommand('revealInExplorer', uri).then(undefined, () => {});
       vscode.window.setStatusBarMessage('$(warning) Could not open ' + f.path, 4000);
     }

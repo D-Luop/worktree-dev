@@ -36,7 +36,8 @@ const STATUS = {   // letter → [label, decoration colour] (the colours SCM its
 
 function git(wt, args, opts) {
   return new Promise((resolve) => {
-    cp.execFile('git', ['-C', wt].concat(args),
+    const g = require('./wslpath.js').gitCommand(wt, args);
+    cp.execFile(g.cmd, g.args,
       Object.assign({ maxBuffer: 64 * 1024 * 1024, timeout: 20000, windowsHide: true, encoding: 'buffer' }, opts || {}),
       (e, so) => resolve(e ? null : so));
   });

@@ -26,6 +26,8 @@ args = ap.parse_args()
 # apostrophe in a concatenated HTML string) ships a panel that renders but is silently dead.
 if subprocess.call(["node", os.path.join(HERE, "check-webview.js")]) != 0:
     sys.exit("ABORT: webview script parse check failed — not building the vsix")
+if subprocess.call(["node", os.path.join(HERE, "check-wslpath.js")]) != 0:
+    sys.exit("ABORT: WSL path/command checks failed — not building the vsix")
 
 pkg = json.load(open(os.path.join(HERE, "package.json"), encoding="utf-8"))
 
