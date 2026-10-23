@@ -51,6 +51,28 @@ The installer is idempotent. Re-run it any time; it doesn't stop a running daemo
 
 Then open the dev root in VS Code (`code /d/dev/worktree-dev`) and run *Developer: Reload Window*.
 
+### Program dir and dev root
+
+An installed build keeps its program files in `%LOCALAPPDATA%\WorkTreeDev\current\` (`bin\wtd.exe`,
+`bin\wtd-tray.exe`, `templates\`, `hooks\`, `scripts\`, `claude-status.vsix`, `version.txt`). The dev
+root then holds only your data (worktrees, repos, refs, `.wtd\state`, `.wtd\custom`,
+`.wtd\config.json`, `.wtd\repos.tsv`) and doesn't have to be a git checkout.
+
+A checkout installed with `install.sh` runs in **dev mode**: binaries in `.wtd\bin`, templates from
+`.wtd\templates`. It stays in dev mode until a program dir is installed; set `WTD_DEV_SOURCE=1` to keep
+using the checkout even then. `wtd version` shows which one is active (`dev_mode`, `program_dir`).
+
+To move a checkout install to the program dir:
+
+```bash
+wtd setup --migrate
+```
+
+It copies the checkout's program files into `versions\<ver>\`, points `current\` at it, writes
+`~/.config/wtd/program-dir`, and repoints hooks, shims, MCP registrations and repo git hooks from
+`.wtd\bin|hooks|scripts` to `current\`. Worktrees, repos and `.wtd\state` aren't touched. Then restart
+the daemon and tray from the new `wtd.exe` and reload VS Code.
+
 ## 3. Use it
 
 1. **Start the daemon:** use the ▶ in the fleet panel's header, the tray icon (right-click →

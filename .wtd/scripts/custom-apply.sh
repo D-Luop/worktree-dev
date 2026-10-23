@@ -6,9 +6,15 @@
 #   tool dirs for PATH: `custom-apply.sh --tool-dirs <slug>` prints them, one per line.
 set -euo pipefail
 
-WTD="$(cd "$(dirname "$0")/.." && pwd)"
-DEV="$(dirname "$WTD")"
-. "$WTD/scripts/platform-lib.sh"
+WTA="$(cd "$(dirname "$0")/.." && pwd)"   # program files: <dev>/.wtd, or the program dir's current/
+if [ "$(basename "$WTA")" = .wtd ]; then
+  DEV="$(dirname "$WTA")"
+else
+  DEV="${WTD_DEV:-$(cat "$HOME/.config/wtd/dev-root" 2>/dev/null)}"
+  command -v cygpath >/dev/null 2>&1 && DEV="$(cygpath -u "$DEV")"
+fi
+WTD="$DEV/.wtd"
+. "$WTA/scripts/platform-lib.sh"
 OS="${WTD_PLATFORM:-$(wtd_os)}"
 C="$WTD/custom"
 BEGIN='<!-- BEGIN custom (worktree-dev: from .wtd/custom — edit there, not here) -->'
@@ -43,9 +49,9 @@ is_disabled() { printf '%s\n' "$disabled" | grep -qxF -e "$1" -e "${1%.md}"; }
 
 # --- directory items: merge by name (later layer wins), copy, track in the manifest ---
 items="$(mktemp)"; trap 'rm -f "$items"' EXIT
-for l in "$WTD/templates/.claude" $(layers "$slug"); do
+for l in "$WTA/templates/.claude" $(layers "$slug"); do
   for kind in skills agents commands rules; do
-    [ "$l" = "$WTD/templates/.claude" ] && [ "$kind" != skills ] && continue
+    [ "$l" = "$WTA/templates/.claude" ] && [ "$kind" != skills ] && continue
     [ -d "$l/$kind" ] || continue
     for e in "$l/$kind"/*; do
       [ -e "$e" ] || continue
