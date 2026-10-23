@@ -1,0 +1,17 @@
+{
+  "model": "opus",
+  "hooks": {
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "notify-send done" } ] },
+      { "hooks": [ { "type": "command", "command": "/mnt/d/old/.wtd/bin/wtd.exe hook stop" } ] }
+    ],
+    "PreToolUse": [
+      { "matcher": "Bash", "hooks": [ { "type": "command", "command": "~/bin/audit-bash" } ] }
+    ]
+  },
+  "permissions": {
+    "allow": [ "Bash(git status)" ]
+  },
+  "statusLine": { "type": "command", "command": "~/my-line.sh" },
+  "theme": "dark"
+}

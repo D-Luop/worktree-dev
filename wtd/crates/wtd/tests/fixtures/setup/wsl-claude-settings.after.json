@@ -1,0 +1,132 @@
+{
+  "model": "opus",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "notify-send done"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/mnt/c/Users/u/AppData/Local/WorkTreeDev/current/bin/wtd.exe hook stop"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/bin/audit-bash"
+          }
+        ]
+      },
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/mnt/c/Users/u/AppData/Local/WorkTreeDev/current/bin/wtd.exe hook tool"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/mnt/c/Users/u/AppData/Local/WorkTreeDev/current/bin/wtd.exe hook edit"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/mnt/c/Users/u/AppData/Local/WorkTreeDev/current/bin/wtd.exe hook plan-nudge"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "matcher": "rate_limit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/mnt/c/Users/u/AppData/Local/WorkTreeDev/current/bin/wtd.exe hook limited"
+          }
+        ]
+      },
+      {
+        "matcher": "overloaded|authentication_failed|oauth_org_not_allowed|account_on_hold|verification_required|billing_error|invalid_request|model_not_found|server_error|unknown|max_output_tokens|cloud_credential_error",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/mnt/c/Users/u/AppData/Local/WorkTreeDev/current/bin/wtd.exe hook stop"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/mnt/c/Users/u/AppData/Local/WorkTreeDev/current/bin/wtd.exe hook stop"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/mnt/c/Users/u/AppData/Local/WorkTreeDev/current/bin/wtd.exe hook working"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/mnt/c/Users/u/AppData/Local/WorkTreeDev/current/bin/wtd.exe hook sessionend"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(git status)"
+    ],
+    "additionalDirectories": [
+      "/home/u/dev/worktree-dev/refs"
+    ],
+    "deny": [
+      "Edit(/home/u/dev/worktree-dev/refs/**)"
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/statusline.sh"
+  },
+  "theme": "dark",
+  "attribution": {
+    "commit": "",
+    "pr": ""
+  }
+}
+

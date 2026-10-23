@@ -3,6 +3,7 @@
 
 mod merge;
 mod shell;
+mod wsl;
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -15,6 +16,7 @@ use crate::program::{copy_tree, place_file};
 use crate::{codex, paths, program, repos, settings, tray, win};
 
 const USAGE: &str = "usage: wtd setup [--dev-root <dir>] [--repair] [--uninstall [--keep-data]] [--from <payload dir>] [--yes] [--skip <step,…>]
+       wtd setup --wsl <distro> [--skip <step,…>]   wire a WSL distro's Claude/Codex to this wtd.exe (steps wsl-c, wsl-mcp, wsl-a)
   steps: a (shims, PATH, completion)  a2 (binaries)  b (dependency check)  c (Claude status hooks)
          d (VS Code extension)  d2 (VS Code user settings)  e (statusline)  f (attribution)
          g (refs read grant)  i (repo hooks + git perf config)  j (dev-root VS Code settings)
@@ -31,6 +33,7 @@ struct Opts {
     from: Option<PathBuf>,
     yes: bool,
     skip: Vec<String>,
+    wsl: Option<String>,
 }
 
 fn parse(args: &[String]) -> Result<Opts> {
@@ -41,6 +44,7 @@ fn parse(args: &[String]) -> Result<Opts> {
         match a.as_str() {
             "--dev-root" => o.dev_root = Some(paths::normalize(&val("--dev-root")?)),
             "--from" => o.from = Some(paths::normalize(&val("--from")?)),
+            "--wsl" => o.wsl = Some(val("--wsl")?),
             "--skip" => o.skip.extend(val("--skip")?.split(',').map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty())),
             "--repair" => o.repair = true,
             "--uninstall" => o.uninstall = true,
@@ -52,6 +56,9 @@ fn parse(args: &[String]) -> Result<Opts> {
     }
     if o.keep_data && !o.uninstall {
         bail!("--keep-data only goes with --uninstall");
+    }
+    if o.wsl.is_some() && (o.uninstall || o.from.is_some()) {
+        bail!("--wsl can't be combined with --uninstall or --from");
     }
     if o.uninstall && (o.repair || o.from.is_some()) {
         bail!("--uninstall can't be combined with --repair or --from");
@@ -117,7 +124,9 @@ pub fn main(args: &[String]) -> Result<i32> {
     let exe_dir = exe.parent().context("exe has no folder")?.to_path_buf();
     let layout = resolve_layout(&opts, &dev, &exe_dir)?;
     let mut s = Setup { opts, home, dev, layout, exe_dir, failed: vec![] };
-    if s.opts.uninstall {
+    if let Some(distro) = s.opts.wsl.clone() {
+        s.wsl(&distro)?;
+    } else if s.opts.uninstall {
         s.uninstall()?;
     } else {
         s.install()?;
@@ -824,6 +833,8 @@ mod tests {
         assert!(parse(&args("--uninstall --repair")).is_err());
         assert!(parse(&args("--from")).is_err());
         assert!(parse(&args("--bogus")).is_err());
+        assert_eq!(parse(&args("--wsl Ubuntu --skip wsl-a")).unwrap().wsl.as_deref(), Some("Ubuntu"));
+        assert!(parse(&args("--wsl Ubuntu --uninstall")).is_err());
     }
 
     #[test]
