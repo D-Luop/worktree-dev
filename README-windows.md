@@ -111,8 +111,13 @@ under the chat, git, builds and tests. Each repo gets its own clone in the distr
    the `wtd` MCP server and the statusline at this `wtd.exe` (through WSL interop), and puts
    `agent`, `wtd`, … in the distro's `~/.local/bin`. Log in to Claude inside the distro too:
    its logins are separate (`~/.claude`, `~/.claude-accounts/<name>`).
-2. `agent <slug> <name> --platform wsl:Ubuntu`. Reopening it later needs no flag; `archive` and
-   `agent rm` work as usual.
+2. `agent <slug> <name> --platform wsl:Ubuntu`, or pick the distro in **New Session**. Reopening it
+   later needs no flag; `archive` and `agent rm` work as usual. To make WSL the default for new
+   worktrees: `wtd config platform [--repo <slug>] wsl:Ubuntu`. `wtd platforms` lists the distros
+   and whether git and claude are installed in each.
+
+`review` / `wt-review` on a WSL worktree run the reviewer inside the distro too, with the distro's
+Claude login (`--account <name>` means `~/.claude-accounts/<name>` there).
 
 The roster reads a WSL worktree through `\\wsl.localhost\<distro>\…` and runs its git through
 `wsl.exe`. It doesn't start a stopped distro just to refresh a row. Open file uses Remote - WSL when
