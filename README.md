@@ -184,8 +184,10 @@ On Windows: `wtd help`. Each command below also works as a bare name through its
 | `wtd repo set-dir <folder>\|--clear` · `wtd repo set-guardrails <slug>\|* <json>` | The repos folder, and guardrails for one repo or the defaults (`*`). |
 | `tokens` | Token usage and estimated cost per worktree. |
 | `ship [out]` | Package the toolkit (no secrets, worktrees or repos) for another machine. |
+| `wtd tui [<slug>/<name> \| --new]` | The fleet in a terminal, no editor needed: roster, the selected worktree's live session (the daemon-hosted one; started if needed), and its Changes — branch commits and working changes with inline or side-by-side diffs. `Ctrl+]`/`F12` leaves a session; `d` changes, `n` new, `x` stop, `v` diff layout. |
+| `wtd changes <slug>/<name> [working\|<sha>]` | A worktree's commits, or one diff, as JSON (files → hunks → numbered lines). |
 | `wtd new [<slug>] [--in terminal\|zed]` | New Session in the console: pick a repo, name the branch, and the session starts there (or the worktree opens in Zed). |
-| `wtd open <slug>/<name> [--in vscode\|zed\|terminal]` · `wtd frontend [vscode\|zed\|terminal]` | Show a session in VS Code, Zed or a terminal (Windows Terminal tab when available) · show or set the default. Zed opens the worktree with a `WorkTreeDev: session` task in `.zed/tasks.json`; press `alt-shift-w` to run it in Zed's terminal (Zed has no run-on-open). |
+| `wtd open <slug>/<name> [--in vscode\|zed\|terminal]` · `wtd frontend [vscode\|zed\|terminal]` | Show a session in VS Code, Zed or a terminal (`wtd tui` in a Windows Terminal tab when available) · show or set the default. Zed opens the worktree with a `WorkTreeDev: session` task in `.zed/tasks.json`; press `alt-shift-w` to run it in Zed's terminal (Zed has no run-on-open). |
 | `wtd daemon start\|stop\|status` · `wtd tray` · `wtd ls` | Daemon control, tray icon, and a fleet listing. |
 
 **In-session skills:**

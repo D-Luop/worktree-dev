@@ -75,10 +75,10 @@ That means:
 
 Left-click opens the VS Code window on the dev root. Right-click gives:
 
-- Your sessions, needs-you first. Each row opens in VS Code, Zed or a terminal (the default one is
-  bold); a live row can also be stopped.
-- New session ▸ in VS Code (the New Session wizard) / Zed / Terminal (`wtd new`: repo → branch in a
-  console; for Zed it then opens the worktree)
+- Your sessions, needs-you first. Each row opens in VS Code, Zed or a terminal (`wtd tui`, with the
+  session and its diffs) — the default one is bold; a live row can also be stopped.
+- New session ▸ in VS Code (the New Session wizard) / Zed (`wtd new`, then the worktree opens in Zed)
+  / Terminal (the TUI's New session form)
 - Open sessions in ▸ VS Code / Zed / Terminal: the default (same as `wtd frontend <name>`)
 - Start / Stop daemon
 - Open VS Code

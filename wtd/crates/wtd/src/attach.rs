@@ -26,11 +26,11 @@ use wtd_core::protocol::method;
 use crate::client::Client;
 use crate::{paths, win};
 
-const F_DATA: u8 = 0;
-const F_RESIZE: u8 = 1;
-const F_EXIT: u8 = 2;
+pub(crate) const F_DATA: u8 = 0;
+pub(crate) const F_RESIZE: u8 = 1;
+pub(crate) const F_EXIT: u8 = 2;
 
-fn frame(t: u8, payload: &[u8]) -> Vec<u8> {
+pub(crate) fn frame(t: u8, payload: &[u8]) -> Vec<u8> {
     let mut v = Vec::with_capacity(5 + payload.len());
     v.push(t);
     v.extend_from_slice(&(payload.len() as u32).to_le_bytes());
@@ -147,10 +147,16 @@ pub fn host_main(args: &[String]) -> Result<i32> {
     // the hosted process gets this terminal's environment (CLAUDE_CONFIG_DIR / CODEX_HOME, PATH, …)
     let env: Vec<(String, String)> = std::env::vars_os().map(|(k, v)| (k.to_string_lossy().into(), v.to_string_lossy().into())).collect();
     let (cols, rows) = console_size().unwrap_or((120, 30));
-    relay(method::SESSION_SPAWN, json!({
+    let params = json!({
         "dir": cwd.to_string_lossy(), "kind": kind, "account": account, "program": stem,
         "exe": exe.to_string_lossy(), "args": argv, "env": env, "cols": cols, "rows": rows,
-    }))
+    });
+    // WTD_DETACH: start (or find) the hosted session and return; a frontend attaches on its own
+    if std::env::var_os("WTD_DETACH").is_some() {
+        Client::connect_required()?.request(method::SESSION_SPAWN, params)?;
+        return Ok(0);
+    }
+    relay(method::SESSION_SPAWN, params)
 }
 
 pub fn attach_main(args: &[String]) -> Result<i32> {

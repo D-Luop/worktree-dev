@@ -3,6 +3,7 @@
 
 pub mod agent;
 pub mod attach;
+pub mod changes;
 pub mod client;
 pub mod codex;
 pub mod custom;
@@ -24,6 +25,7 @@ pub mod statusfile;
 pub mod ticket;
 pub mod tools;
 pub mod tray;
+pub mod tui;
 pub mod win;
 pub mod wt;
 
@@ -65,6 +67,9 @@ Fleet & daemon
   wtd open <slug/name> [--in vscode|zed|terminal]
                                      show a worktree's session (default: `wtd frontend`)
   wtd frontend [vscode|zed|terminal] show or set the default frontend
+  wtd tui                            the fleet in this terminal: roster, live session, changes/diffs
+  wtd changes <slug/name> [working|<sha>]
+                                     branch commits / a diff as JSON (files → hunks → lines)
   wtd stop <slug/name>               end a worktree's live session (kills its process tree)
   wtd refresh [slug/name]            rescan worktrees and re-check git now
   wtd hook <event>                   Claude Code hook handler (reads hook JSON on stdin)
@@ -111,6 +116,8 @@ fn dispatch(cmd: &str, rest: &[String]) -> Result<i32> {
         "tray" => tray::main(rest),
         "open" => frontend::open_main(rest),
         "new" => new::main(rest),
+        "changes" => changes::main(rest),
+        "tui" => tui::main(rest),
         "frontend" => frontend::frontend_main(rest),
         "repo" => settings::repo_main(rest),
         "account" => settings::account_main(rest),

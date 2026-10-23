@@ -78,22 +78,20 @@ pub fn open(dev: &Path, id: &str, f: Frontend) -> Result<()> {
             ensure_zed_key();
             win::no_window(Command::new(zed).arg(&wt)).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
         }
-        Frontend::Terminal => console(dev, name, &["agent".into(), slug.into(), name.into()])?,
+        // the TUI: roster + this session + its changes; it starts the session if needed
+        Frontend::Terminal => console(dev, name, &["tui".into(), id.into()])?,
     }
     Ok(())
 }
 
-/// Start the New Session flow in `f`: VS Code's wizard, or `wtd new` in a console (Zed opens after).
+/// Start the New Session flow in `f`: VS Code's wizard, the TUI's form, or `wtd new` then Zed.
 pub fn new_session(dev: &Path, f: Frontend) -> Result<()> {
     if f == Frontend::VsCode {
         let _ = win::no_window(Command::new("cmd").args(["/c", "code"]).arg(dev)).status();
         win::no_window(Command::new("cmd").args(["/c", "code", "--open-url", "vscode://local.claude-status/new"])).spawn()?;
         return Ok(());
     }
-    let mut args = vec!["new".to_string()];
-    if f == Frontend::Zed {
-        args.extend(["--in".into(), "zed".into()]);
-    }
+    let args: Vec<String> = if f == Frontend::Zed { vec!["new".into(), "--in".into(), "zed".into()] } else { vec!["tui".into(), "--new".into()] };
     console(dev, "New session", &args)
 }
 
