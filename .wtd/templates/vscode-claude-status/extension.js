@@ -1890,9 +1890,12 @@ async function launchSession(dev, st) {
     shellArgs: ['agent', slug, name].concat(args) });
   dev._terms.set(dev._key(slug, name), t); dev._current = t;
   t.show();
-  // after the worktree exists: join the chosen group, move the project card
+  // after the worktree exists: dock its shell + Changes panel (both skip a missing folder, so the focus
+  // above was too early for them), join the chosen group, move the project card
   const afterCreate = async () => {
-    for (let i = 0; i < 60 && !(dev.daemon && dev.daemon.wts.has(id)); i++) await new Promise((r) => setTimeout(r, 1000));
+    const wt = dev._wtPath(slug, name);
+    for (let i = 0; i < 60 && !(dev.daemon && dev.daemon.wts.has(id) && fs.existsSync(path.join(wt, '.git'))); i++) await new Promise((r) => setTimeout(r, 1000));
+    if (t.exitStatus === undefined && dev._current === t) dev.onTermActive(t);
     if (st.group && dev.daemon && dev.daemon.running) dev.daemon.request('group.assign', { worktree: id, group: st.group }).catch(() => {});
     if (st.item && st.item.item_id) {
       wtdJson(['issues', 'start', slug, st.item.item_id]).then((r) => { if (r && r.moved) vscode.window.setStatusBarMessage('$(project) Moved the card to ' + r.to, 5000); },
@@ -1968,6 +1971,14 @@ function activate(context) {
     if (k) { const j = k.indexOf('\x01'); dev.gitView.follow(k.slice(0, j), k.slice(j + 1)); dev.changes.follow(k.slice(0, j), k.slice(j + 1)); } }
   // ctrl+v in a focused session → image-aware paste (see DevSummaryProvider.smartPaste)
   context.subscriptions.push(vscode.commands.registerCommand('claudeStatus.smartPaste', () => dev.smartPaste()));
+  // a terminal swallows ctrl+v (sends it to the shell) unless the bound command is in commandsToSkipShell
+  if (IS_WIN) {
+    const tcfg = vscode.workspace.getConfiguration('terminal.integrated');
+    const skip = tcfg.inspect('commandsToSkipShell');
+    const cur = (skip && skip.globalValue) || [];
+    if (!cur.includes('claudeStatus.smartPaste'))
+      tcfg.update('commandsToSkipShell', cur.concat('claudeStatus.smartPaste'), vscode.ConfigurationTarget.Global).then(undefined, () => {});
+  }
 
   // agents publish design mockups via the `preview` command (→ .wtd/state/previews/<slug>/<name>.html);
   // watch that tree so a 🖼 appears on the worktree's roster row, and clears when the file is removed.
