@@ -10,6 +10,7 @@
     --fg: var(--vscode-editor-foreground);
     --dim: var(--vscode-descriptionForeground);
     --border: var(--vscode-panel-border, var(--vscode-editorGroup-border, rgba(128,128,128,.25)));
+    --divider: var(--vscode-editorGroup-border, var(--vscode-panel-border, rgba(128,128,128,.45)));
     --hover: var(--vscode-list-hoverBackground);
     --sel: var(--vscode-list-activeSelectionBackground);
     --selfg: var(--vscode-list-activeSelectionForeground);
@@ -40,7 +41,7 @@
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--fg); font-family: var(--vscode-font-family); font-size: var(--vscode-font-size, 13px);
-         display: flex; flex-direction: column; overflow: hidden; }
+         display: flex; flex-direction: column; overflow: hidden; border-left: 3px solid var(--divider); }
   button.icon { background: none; border: 0; color: var(--fg); cursor: pointer; padding: 3px; border-radius: 4px; line-height: 0; opacity: .85; }
   button.icon:hover { background: var(--vscode-toolbar-hoverBackground, var(--hover)); opacity: 1; }
   button.icon:disabled { opacity: .35; cursor: default; background: none; }
@@ -71,10 +72,10 @@
   #menu .mi .k { margin-left: auto; padding-left: 16px; opacity: .7; font-size: 12px; }
   #menu .sep { height: 1px; margin: 4px 0; background: var(--vscode-menu-separatorBackground, var(--border)); }
 
-  /* ---------- top band: commits | message + file tree ---------- */
+  /* ---------- top band: message + file tree | commits ---------- */
   #top { flex: none; display: flex; min-height: 80px; height: 38vh; }
-  #list { width: 44%; min-width: 0; overflow: auto; border-right: 1px solid var(--border); }
-  #side { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+  #side { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; border-right: 3px solid var(--divider); }
+  #list { width: 44%; min-width: 0; overflow: auto; }
   #tree { flex: 1; overflow: auto; min-height: 0; }
   .sec { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--dim); padding: 6px 12px 2px; user-select: none; }
   .row { display: flex; align-items: center; gap: 6px; padding: 0 10px 0 12px; height: 22px; cursor: pointer; white-space: nowrap; user-select: none; }
@@ -115,9 +116,9 @@
   .st { font-family: var(--mono); font-size: 11px; font-weight: 700; width: 14px; text-align: center; flex: none; }
   .st-M { color: var(--mod-fg); } .st-A { color: var(--add-fg); } .st-U { color: var(--unt-fg); } .st-D { color: var(--del-fg); } .st-R { color: var(--ren-fg); }
 
-  #sash { flex: none; height: 6px; cursor: row-resize; background: var(--tabs-bg); border-top: 1px solid var(--border); display: flex; align-items: center; justify-content: center; }
-  #sash::after { content: ''; width: 36px; height: 2px; border-radius: 1px; background: var(--dim); opacity: .4; }
-  #sash:hover, #sash.drag { background: var(--focus); }
+  #sash { flex: none; height: 4px; cursor: row-resize; background: var(--divider); position: relative; z-index: 6; }
+  #sash::before { content: ''; position: absolute; left: 0; right: 0; top: -4px; bottom: -4px; }   /* 12px grab area */
+  #sash:hover, #sash.drag { background: var(--vscode-sash-hoverBorder, var(--focus)); }
 
   /* ---------- bottom pane: Diff + one tab per staged preview ---------- */
   #tabs { flex: none; display: flex; background: var(--tabs-bg); border-bottom: 1px solid var(--border); overflow-x: auto; overflow-y: hidden; }
@@ -181,8 +182,8 @@
   /* narrow panel: the two top-band columns stack; the bottom pane stays at the bottom */
   @media (max-width: 560px) {
     #top { flex-direction: column; height: 50vh; }
-    #list { width: auto; flex: 0 0 40%; border-right: 0; border-bottom: 1px solid var(--border); }
-    #side { min-height: 0; }
+    #side { min-height: 0; border-right: 0; border-bottom: 3px solid var(--divider); }
+    #list { width: auto; flex: 0 0 40%; }
     #head .br { display: none; }
   }
 </style>
@@ -201,11 +202,11 @@
   <div id="menu" hidden></div>
   <div id="empty"><span class="codicon codicon-git-compare"></span><div>Open a session to see its commits and changes here.</div></div>
   <div id="top">
-    <div id="list" tabindex="0"></div>
     <div id="side">
       <div id="meta"></div>
       <div id="tree" tabindex="0"></div>
     </div>
+    <div id="list" tabindex="0"></div>
   </div>
   <div id="sash" title="Drag to resize"></div>
   <div id="tabs" role="tablist"></div>
