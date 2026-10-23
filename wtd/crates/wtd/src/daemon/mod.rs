@@ -275,6 +275,10 @@ async fn serve(dev: PathBuf) -> Result<()> {
     tokio::spawn(metrics_loop(d.clone()));
     tokio::spawn(jobs_loop(d.clone()));
     tokio::spawn(tickets_loop(d.clone()));
+    // a test daemon (own pipe) must not start the real tray
+    if std::env::var_os("WTD_PIPE").is_none() {
+        tokio::spawn(tray_loop());
+    }
 
     loop {
         server.connect().await?;
@@ -861,6 +865,15 @@ async fn tickets_loop(d: Arc<Daemon>) {
             }
         })
         .await;
+    }
+}
+
+/// Watchdog: bring the tray icon back within seconds if it crashed or was killed.
+async fn tray_loop() {
+    let mut t = tokio::time::interval(Duration::from_secs(5));
+    loop {
+        t.tick().await;
+        let _ = tokio::task::spawn_blocking(crate::tray::ensure).await;
     }
 }
 

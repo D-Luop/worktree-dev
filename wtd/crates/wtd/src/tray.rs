@@ -27,6 +27,10 @@ const WM_TRAY: u32 = WM_APP + 1;
 const WM_STATE: u32 = WM_APP + 2;
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "WorkTreeDev";
+const WTD_KEY: &str = r"Software\WorkTreeDev";
+/// volatile: Windows drops it at sign-out, so what it records lasts for this sign-in only
+const SESSION_KEY: &str = r"Software\WorkTreeDev\Session";
+const CLASS: &str = "wtd-tray";
 
 #[derive(Clone, Copy, PartialEq, Default)]
 pub(crate) struct View {
@@ -58,7 +62,7 @@ pub(crate) fn hwnd() -> HWND {
     TRAY.lock().unwrap().as_ref().map(|t| t.hwnd).unwrap_or(std::ptr::null_mut())
 }
 
-/// `wtd tray [--spawn | --open | --quit | --logon on|off]`
+/// `wtd tray [--spawn | --ensure | --open | --quit | --logon on|off]`
 pub fn main(args: &[String]) -> Result<i32> {
     match args.first().map(String::as_str) {
         // start detached (from install / a terminal) so it doesn't die with the caller
@@ -68,9 +72,13 @@ pub fn main(args: &[String]) -> Result<i32> {
             win::spawn_detached(&mut cmd)?;
             return Ok(0);
         }
+        Some("--ensure") => {
+            ensure();
+            return Ok(0);
+        }
         // close a running tray (e.g. before replacing wtd.exe)
         Some("--quit") => unsafe {
-            let hwnd = FindWindowW(win::wide("wtd-tray").as_ptr(), std::ptr::null());
+            let hwnd = FindWindowW(win::wide(CLASS).as_ptr(), std::ptr::null());
             if !hwnd.is_null() {
                 PostMessageW(hwnd, WM_CLOSE, 0, 0);
             }
@@ -78,7 +86,7 @@ pub fn main(args: &[String]) -> Result<i32> {
         },
         // open the running tray's flyout, as a click on its icon would
         Some("--open") => unsafe {
-            let hwnd = FindWindowW(win::wide("wtd-tray").as_ptr(), std::ptr::null());
+            let hwnd = FindWindowW(win::wide(CLASS).as_ptr(), std::ptr::null());
             if !hwnd.is_null() {
                 PostMessageW(hwnd, WM_TRAY, 0, WM_LBUTTONUP as isize);
             }
@@ -88,7 +96,7 @@ pub fn main(args: &[String]) -> Result<i32> {
             set_start_at_logon(args.get(1).map(String::as_str) != Some("off"));
             return Ok(0);
         }
-        Some(a) => bail!("unknown option '{a}' (wtd tray [--spawn | --open | --quit | --logon on|off])"),
+        Some(a) => bail!("unknown option '{a}' (wtd tray [--spawn | --ensure | --open | --quit | --logon on|off])"),
         None => {}
     }
     unsafe {
@@ -98,8 +106,9 @@ pub fn main(args: &[String]) -> Result<i32> {
         if GetLastError() == ERROR_ALREADY_EXISTS {
             return Ok(0);
         }
+        set_session_state(SessionState::Running);
         let hinst = GetModuleHandleW(std::ptr::null());
-        let class = win::wide("wtd-tray");
+        let class = win::wide(CLASS);
         let wc = WNDCLASSW {
             lpfnWndProc: Some(wndproc),
             hInstance: hinst,
@@ -127,6 +136,7 @@ pub fn main(args: &[String]) -> Result<i32> {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        set_session_state(SessionState::Quit);
         notify_icon(NIM_DELETE);
     }
     Ok(0)
@@ -207,6 +217,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             crate::flyout::refresh();
             0
+        }
+        WM_CLOSE => {
+            // record the quit before the window goes, so the watchdog never sees "running" with no window
+            set_session_state(SessionState::Quit);
+            DefWindowProcW(hwnd, msg, wp, lp)
         }
         WM_DESTROY => {
             PostQuitMessage(0);
@@ -318,6 +333,50 @@ fn tray_command() -> Command {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum SessionState {
+    Running,
+    /// the user quit it (⚙ Quit / `wtd tray --quit`): leave it gone until the next sign-in
+    Quit,
+}
+
+fn session_state() -> Option<SessionState> {
+    match win::reg::get_sz(SESSION_KEY, "Tray")?.as_str() {
+        "running" => Some(SessionState::Running),
+        "quit" => Some(SessionState::Quit),
+        _ => None,
+    }
+}
+
+fn set_session_state(s: SessionState) {
+    if win::reg::create(WTD_KEY, false) && win::reg::create(SESSION_KEY, true) {
+        win::reg::set_sz(SESSION_KEY, "Tray", if s == SessionState::Running { "running" } else { "quit" });
+    }
+}
+
+fn tray_alive() -> bool {
+    unsafe { !FindWindowW(win::wide(CLASS).as_ptr(), std::ptr::null()).is_null() }
+}
+
+/// No state yet this sign-in means it never started (e.g. the Run entry was disabled in Task
+/// Manager): start it if it's meant to run at logon. "running" with no window means it died.
+fn should_relaunch(alive: bool, state: Option<SessionState>, logon: bool) -> bool {
+    !alive && match state {
+        Some(SessionState::Running) => true,
+        Some(SessionState::Quit) => false,
+        None => logon,
+    }
+}
+
+/// Relaunch the tray if it should be running and isn't (the daemon's watchdog calls this).
+pub fn ensure() {
+    if should_relaunch(tray_alive(), session_state(), start_at_logon()) {
+        let mut cmd = tray_command();
+        cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        let _ = win::spawn_detached(&mut cmd);
+    }
+}
+
 pub fn start_at_logon() -> bool {
     unsafe {
         let mut size: u32 = 0;
@@ -404,4 +463,18 @@ fn argb(a: f32, r: u8, g: u8, b: u8) -> u32 {
     let a8 = (a * 255.0).round() as u32;
     let pm = |c: u8| ((c as f32) * a).round() as u32;
     (a8 << 24) | (pm(r) << 16) | (pm(g) << 8) | pm(b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{should_relaunch, SessionState::*};
+
+    #[test]
+    fn relaunches_only_a_tray_that_died_or_never_started() {
+        assert!(should_relaunch(false, Some(Running), false), "crashed or killed");
+        assert!(!should_relaunch(false, Some(Quit), true), "the user quit it this sign-in");
+        assert!(should_relaunch(false, None, true), "not started yet this sign-in, logon on");
+        assert!(!should_relaunch(false, None, false), "never started, logon off");
+        assert!(!should_relaunch(true, Some(Running), true), "already running");
+    }
 }
