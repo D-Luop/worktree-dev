@@ -82,7 +82,7 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
     z.writestr("[Content_Types].xml", CONTENT_TYPES)
     z.writestr("extension.vsixmanifest", MANIFEST)
     z.writestr("extension/package.json", json.dumps(pkg, indent=2, ensure_ascii=False) + "\n")
-    for f in ("extension.js", "gitview.js", "gitparse.js", "changespanel.js", "changes.html", "settings.js", "README.md", "LICENSE"):
+    for f in ("extension.js", "gitview.js", "gitparse.js", "changespanel.js", "changes.html", "settings.js", "wslpath.js", "README.md", "LICENSE"):
         z.write(os.path.join(HERE, f), f"extension/{f}")
     # bundled codicons (toolbar / row icons) + their licenses
     for f in sorted(os.listdir(os.path.join(HERE, "media"))):
