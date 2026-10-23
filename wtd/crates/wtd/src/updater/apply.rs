@@ -88,6 +88,9 @@ pub fn apply(l: &Layout, ver: &str, host: &mut dyn Host) -> Result<Outcome> {
                 l.log(&format!("restarting {from} after rollback: {e:#}"));
             }
             record(l, &from, ver, false, false, &reason, true)?;
+            // never retried, so its download and files only take space
+            let _ = settings::remove_tree(&l.pending_dir(ver));
+            let _ = settings::remove_tree(&l.version_dir(ver));
             Ok(Outcome::RolledBack { from, to: ver.into(), reason })
         }
     }
@@ -262,7 +265,7 @@ pub struct RealHost;
 
 impl Host for RealHost {
     fn stop(&mut self) -> Result<Running> {
-        let mut was = Running { daemon: false, tray: crate::tray::is_running() };
+        let mut was = Running { daemon: false, tray: owns_tray() && crate::tray::is_running() };
         if let Some(mut c) = Client::connect()? {
             was.daemon = true;
             let _ = c.request(wtd_core::protocol::method::SHUTDOWN, json!({ "force": true }));
@@ -282,7 +285,7 @@ impl Host for RealHost {
         if !st.success() {
             bail!("`wtd daemon start` exited with {st}");
         }
-        if was.tray || crate::tray::start_at_logon() {
+        if owns_tray() && (was.tray || crate::tray::start_at_logon()) {
             let tray = bin.join("wtd-tray.exe");
             let mut cmd = if tray.is_file() {
                 Command::new(tray)
@@ -319,6 +322,11 @@ impl Host for RealHost {
         }
         Ok(())
     }
+}
+
+/// A test daemon (own `WTD_PIPE`) never touches the real tray.
+fn owns_tray() -> bool {
+    std::env::var_os("WTD_PIPE").is_none()
 }
 
 fn wait_for(limit: Duration, mut ok: impl FnMut() -> bool) -> bool {
@@ -450,6 +458,7 @@ pub(crate) mod tests {
         assert_eq!(st.staged, None);
         assert!(st.last_apply.is_some_and(|a| !a.ok));
         assert_eq!(l.staged(), None, "a failed version isn't offered again");
+        assert!(!l.version_dir("1.1.0").exists() && l.version_dir("1.0.0").is_dir());
         std::fs::remove_dir_all(&l.root).ok();
     }
 
