@@ -172,8 +172,9 @@ fn spawn_params(args: &[String]) -> Result<Value> {
     }
     let mut argv: Vec<String> = prefix.iter().map(|p| p.to_string_lossy().to_string()).collect();
     argv.extend(args[i + 1..].iter().cloned());
-    // the hosted process gets this terminal's environment (CLAUDE_CONFIG_DIR / CODEX_HOME, PATH, …)
-    let env: Vec<(String, String)> = std::env::vars_os().map(|(k, v)| (k.to_string_lossy().into(), v.to_string_lossy().into())).collect();
+    // the hosted process gets this terminal's environment (CLAUDE_CONFIG_DIR / CODEX_HOME, PATH, …),
+    // minus any Claude session this was run from
+    let env = crate::session_env::current();
     let (cols, rows) = console_size().unwrap_or((120, 30));
     Ok(json!({
         "dir": cwd.to_string_lossy(), "kind": kind, "account": account, "program": stem,
