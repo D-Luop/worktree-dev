@@ -356,7 +356,9 @@ if [ ! -d "$wt" ]; then
         base="$(git -c safe.bareRepository=all -C "$bare" symbolic-ref --quiet HEAD 2>/dev/null | sed 's@^refs/heads/@@')"
         base="${base:-main}"
       fi
-      git -c safe.bareRepository=all -C "$bare" worktree add "$wt" -b "$name" "$base"            # new branch off "$base"
+      git -c safe.bareRepository=all -C "$bare" worktree add --no-track "$wt" -b "$name" "$base"  # new branch off "$base" (not tracking it)
+      # first bare `git push` creates and tracks origin/$name
+      git -c safe.bareRepository=all -C "$bare" config push.autoSetupRemote >/dev/null || git -c safe.bareRepository=all -C "$bare" config push.autoSetupRemote true
     fi
   fi
   # seed: stub CLAUDE.md + .claude scaffolding (plans dir); template skills are refreshed below on

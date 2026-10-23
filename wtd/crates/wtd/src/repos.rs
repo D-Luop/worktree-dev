@@ -166,6 +166,11 @@ pub fn prepare(dev: &Path, repo: &Repo) -> Result<()> {
     if text.len() != before {
         std::fs::write(&excl, text)?;
     }
+    // new branches don't track their base, so the first bare `git push` creates and tracks origin/<branch>
+    let rp = crate::gitx::s(&repo.path);
+    if !crate::gitx::ok(&["-C", &rp, "config", "push.autoSetupRemote"]) {
+        let _ = crate::gitx::ok(&["-C", &rp, "config", "push.autoSetupRemote", "true"]);
+    }
     let hooks = repo.admin.join("hooks");
     std::fs::create_dir_all(&hooks)?;
     let wtd = dev.join(".wtd");
