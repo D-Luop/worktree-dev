@@ -35,6 +35,7 @@ pub mod tray;
 pub mod tui;
 pub mod updater;
 pub mod win;
+pub mod wsl_backend;
 pub mod wt;
 
 use anyhow::Result;
