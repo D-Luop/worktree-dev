@@ -22,6 +22,7 @@ pub mod proposal;
 pub mod repos;
 pub mod review;
 pub mod run;
+pub mod session_env;
 pub mod settings;
 pub mod statusfile;
 pub mod ticket;

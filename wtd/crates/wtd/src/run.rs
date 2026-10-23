@@ -48,7 +48,11 @@ pub fn main(args: &[String]) -> Result<i32> {
             }
         }
     }
-    let mut child = Command::new(&exe).args(&prefix).args(rest).spawn().with_context(|| format!("starting {}", exe.display()))?;
+    let mut cmd = Command::new(&exe);
+    for &v in crate::session_env::SESSION_VARS {
+        cmd.env_remove(v);
+    }
+    let mut child = cmd.args(&prefix).args(rest).spawn().with_context(|| format!("starting {}", exe.display()))?;
 
     let params = SessionParams {
         dir: std::env::current_dir()?.to_string_lossy().into(),
