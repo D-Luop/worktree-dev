@@ -3,10 +3,11 @@
 //!   wtd platforms [--refresh]   JSON list (from the daemon's 60s cache when it's up)
 
 use std::io::Read;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
 use wtd_core::model::Platform;
@@ -205,6 +206,124 @@ impl Cache {
     }
 }
 
+// --- defaults ---------------------------------------------------------------------------------------
+
+/// A platform setting from config; an unparseable one is ignored so resolution falls through.
+fn setting(v: Option<&Value>) -> Option<Platform> {
+    v?.as_str()?.parse().ok()
+}
+
+pub fn global_default(cfg: &Value) -> Option<Platform> {
+    setting(cfg.get("default_platform"))
+}
+
+/// The 3rd column of a `.wtd/repos.tsv` line (`<slug>\t<url>\t<platform>`), from before the
+/// setting moved to config.json. Bash tooling reads only two columns, so we never write it.
+fn tsv_platforms(dev: &Path) -> Vec<(String, Platform)> {
+    std::fs::read_to_string(crate::settings::registry(dev))
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| {
+            let mut it = l.split('\t');
+            let slug = it.next()?.trim();
+            Some((slug.to_string(), it.nth(1)?.trim().parse().ok()?))
+        })
+        .collect()
+}
+
+/// This repo's own default: `repos.<slug>.platform` in config.json, else a legacy tsv column.
+pub fn repo_default(dev: &Path, cfg: &Value, slug: &str) -> Option<Platform> {
+    setting(cfg.pointer(&format!("/repos/{slug}/platform")))
+        .or_else(|| tsv_platforms(dev).into_iter().find(|(s, _)| s == slug).map(|(_, p)| p))
+}
+
+/// Explicit choice, then the repo default, then the global default, then windows.
+pub fn resolve(explicit: Option<Platform>, repo: Option<Platform>, global: Option<Platform>) -> Platform {
+    explicit.or(repo).or(global).unwrap_or_default()
+}
+
+pub fn resolve_for(dev: &Path, slug: &str, explicit: Option<Platform>) -> Platform {
+    let cfg = crate::settings::load_config(dev);
+    let repo = if crate::paths::repo_less(slug) { None } else { repo_default(dev, &cfg, slug) };
+    resolve(explicit, repo, global_default(&cfg))
+}
+
+/// Copy legacy tsv platforms into config.json (an existing config value wins). True if any existed.
+fn migrate_into(dev: &Path, cfg: &mut Value) -> Result<bool> {
+    let legacy = tsv_platforms(dev);
+    for (slug, p) in &legacy {
+        let entry = repo_entry(cfg, slug)?;
+        if setting(entry.get("platform")).is_none() {
+            entry["platform"] = json!(p.to_string());
+        }
+    }
+    Ok(!legacy.is_empty())
+}
+
+/// Back to two columns, once config.json holds the platforms.
+fn strip_tsv_column(dev: &Path) -> Result<()> {
+    let reg = crate::settings::registry(dev);
+    let text = std::fs::read_to_string(&reg)?;
+    let lines: Vec<String> =
+        text.lines().map(|l| if l.starts_with('#') { l.to_string() } else { l.split('\t').take(2).collect::<Vec<_>>().join("\t") }).collect();
+    std::fs::write(&reg, lines.join("\n") + "\n")?;
+    Ok(())
+}
+
+fn repo_entry<'a>(cfg: &'a mut Value, slug: &str) -> Result<&'a mut Value> {
+    let repos = cfg.as_object_mut().context("config.json is not an object")?.entry("repos").or_insert_with(|| json!({}));
+    Ok(repos.as_object_mut().context("config.repos is not an object")?.entry(slug.to_string()).or_insert_with(|| json!({})))
+}
+
+fn show(dev: &Path) -> Value {
+    let cfg = crate::settings::load_config(dev);
+    let repos: serde_json::Map<String, Value> = crate::repos::all(dev)
+        .into_iter()
+        .filter_map(|r| Some((r.slug.clone(), json!(repo_default(dev, &cfg, &r.slug)?.to_string()))))
+        .collect();
+    json!({ "default_platform": global_default(&cfg).unwrap_or_default().to_string(), "repos": repos })
+}
+
+/// `wtd config platform [--repo <slug>] [<id>|--clear]`
+pub fn config_main(args: &[String]) -> Result<i32> {
+    let dev = crate::paths::dev_root()?;
+    let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    let usage = "usage: wtd config platform [--repo <slug>] [windows|wsl:<distro>|--clear]";
+    let ["platform", rest @ ..] = a.as_slice() else { bail!("{usage}") };
+    let (repo, rest) = match rest {
+        ["--repo", slug, rest @ ..] => (Some(*slug), rest),
+        _ => (None, rest),
+    };
+    let value = match rest {
+        [] => return crate::settings::out(show(&dev)),
+        ["--clear"] => None,
+        [id] => Some(id.parse::<Platform>().map_err(|e| anyhow::anyhow!(e))?),
+        _ => bail!("{usage}"),
+    };
+    if let Some(slug) = repo {
+        if crate::repos::find(&dev, slug).is_none() {
+            bail!("no repo '{slug}'");
+        }
+    }
+    let mut cfg = crate::settings::load_config(&dev);
+    let migrated = migrate_into(&dev, &mut cfg)?;
+    let (obj, key) = match repo {
+        Some(slug) => (repo_entry(&mut cfg, slug)?, "platform"),
+        None => (&mut cfg, "default_platform"),
+    };
+    let obj = obj.as_object_mut().context("config entry is not an object")?;
+    match &value {
+        Some(p) => obj.insert(key.into(), json!(p.to_string())),
+        None => obj.remove(key),
+    };
+    crate::settings::update_config(&dev, |c| *c = cfg)?;
+    if migrated {
+        strip_tsv_column(&dev)?;
+    }
+    crate::settings::out(show(&dev))
+}
+
 pub fn main(args: &[String]) -> Result<i32> {
     let refresh = args.iter().any(|a| a == "--refresh");
     if let Some(a) = args.iter().find(|a| *a != "--refresh" && *a != "--json") {
@@ -260,6 +379,63 @@ mod tests {
         assert_eq!(u, None);
         assert_eq!(t, Tools::default());
         assert_eq!(hints(&t).len(), 3);
+    }
+
+    #[test]
+    fn resolution_order() {
+        let (w, u, d) = (Some(Platform::Windows), Some(Platform::Wsl("Ubuntu".into())), Some(Platform::Wsl("Debian".into())));
+        assert_eq!(resolve(w.clone(), u.clone(), d.clone()), Platform::Windows);
+        assert_eq!(resolve(None, u.clone(), d.clone()), u.clone().unwrap());
+        assert_eq!(resolve(None, None, d.clone()), d.clone().unwrap());
+        assert_eq!(resolve(None, None, None), Platform::Windows);
+        assert_eq!(resolve(d.clone(), None, u.clone()), d.unwrap());
+    }
+
+    fn dev_root(tag: &str, tsv: &str, cfg: Value) -> std::path::PathBuf {
+        let t = std::env::temp_dir().join(format!("wtd-platforms-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(t.join(".wtd")).unwrap();
+        std::fs::write(t.join(".wtd").join("repos.tsv"), tsv).unwrap();
+        std::fs::write(t.join(".wtd").join("config.json"), cfg.to_string()).unwrap();
+        t
+    }
+
+    #[test]
+    fn defaults_from_config_and_legacy_tsv() {
+        let t = dev_root(
+            "defaults",
+            "# comment\twith\ttabs\napp\tgit@x:a.git\twsl:Ubuntu\napi\tgit@x:b.git\nweb\tgit@x:c.git\tbogus\n",
+            json!({ "default_platform": "wsl:Debian", "repos": { "api": { "platform": "windows" }, "web": { "platform": "nope" } } }),
+        );
+        let cfg = crate::settings::load_config(&t);
+        assert_eq!(global_default(&cfg), Some(Platform::Wsl("Debian".into())));
+        assert_eq!(repo_default(&t, &cfg, "app"), Some(Platform::Wsl("Ubuntu".into())));
+        assert_eq!(repo_default(&t, &cfg, "api"), Some(Platform::Windows));
+        assert_eq!(repo_default(&t, &cfg, "web"), None, "bad values in both places fall through");
+        assert_eq!(resolve_for(&t, "web", None), Platform::Wsl("Debian".into()));
+        assert_eq!(resolve_for(&t, "plan", None), Platform::Wsl("Debian".into()));
+        assert_eq!(resolve_for(&t, "app", Some(Platform::Windows)), Platform::Windows);
+        // the third column doesn't leak into the URL
+        assert_eq!(crate::settings::registered(&t)[0], ("app".to_string(), "git@x:a.git".to_string()));
+        std::fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn migrates_tsv_column_into_config() {
+        let t = dev_root("migrate", "# head\napp\tgit@x:a.git\twsl:Ubuntu\napi\tgit@x:b.git\twsl:Debian\n", json!({ "version": 1, "repos": { "api": { "platform": "windows" } } }));
+        let mut cfg = crate::settings::load_config(&t);
+        assert!(migrate_into(&t, &mut cfg).unwrap());
+        assert_eq!(cfg["repos"]["app"]["platform"], "wsl:Ubuntu");
+        assert_eq!(cfg["repos"]["api"]["platform"], "windows", "config wins over the tsv");
+        strip_tsv_column(&t).unwrap();
+        assert_eq!(std::fs::read_to_string(crate::settings::registry(&t)).unwrap(), "# head\napp\tgit@x:a.git\napi\tgit@x:b.git\n");
+        let mut again = cfg.clone();
+        assert!(!migrate_into(&t, &mut again).unwrap());
+        assert_eq!(again, cfg);
+        // an old config with no platform keys at all
+        let old = dev_root("old", "app\tgit@x:a.git\n", json!({ "version": 1, "repos": {} }));
+        assert_eq!(resolve_for(&old, "app", None), Platform::Windows);
+        std::fs::remove_dir_all(&t).ok();
+        std::fs::remove_dir_all(&old).ok();
     }
 
     #[test]
