@@ -58,30 +58,76 @@ pub fn send(d: &Arc<Daemon>, p: &Value) -> Result<Value> {
 }
 
 pub fn decide(d: &Arc<Daemon>, p: &Value) -> Result<Value> {
-    let id = p.get("id").and_then(Value::as_u64).context("missing id")?;
     let approve = p.get("approve").and_then(Value::as_bool).context("missing approve")?;
+    if let Some(ids) = p.get("ids").and_then(Value::as_array) {
+        let ids: Vec<u64> = ids.iter().filter_map(Value::as_u64).collect();
+        return decide_many(d, &ids, approve);
+    }
+    let id = p.get("id").and_then(Value::as_u64).context("missing id")?;
     let to = {
         let mut inner = d.lock();
         let m = inner.store.messages.iter_mut().find(|m| m.id == id).with_context(|| format!("no message #{id}"))?;
         if m.state != MessageState::Pending {
-            bail!("message #{id} was already decided");
+            bail!("message #{id} was already decided ({})", state_name(m.state));
         }
         if approve {
             if let Some(b) = p.get("body").and_then(Value::as_str).map(str::trim).filter(|b| !b.is_empty()) {
                 m.body = b.chars().take(MAX_BODY).collect();
             }
-            m.state = MessageState::Queued;
-        } else {
-            m.state = MessageState::Denied;
         }
+        m.state = if approve { MessageState::Queued } else { MessageState::Denied };
         let to = m.to.clone();
         d.messages_changed(&mut inner);
         to
     };
+    eprintln!("[{}] message #{id} {}", now(), if approve { "approved" } else { "denied" });
     if approve {
         deliver_next(d, &to);
     }
-    Ok(json!({}))
+    Ok(json!({ "decided": [id] }))
+}
+
+/// Bulk approve/deny (e.g. clearing stale requests). Ids that aren't pending are skipped, not errors.
+fn decide_many(d: &Arc<Daemon>, ids: &[u64], approve: bool) -> Result<Value> {
+    let (decided, targets) = {
+        let mut inner = d.lock();
+        let next = if approve { MessageState::Queued } else { MessageState::Denied };
+        let mut decided = Vec::new();
+        let mut targets = std::collections::BTreeSet::new();
+        for m in inner.store.messages.iter_mut().filter(|m| ids.contains(&m.id) && m.state == MessageState::Pending) {
+            m.state = next;
+            decided.push(m.id);
+            targets.insert(m.to.clone());
+        }
+        if !decided.is_empty() {
+            d.messages_changed(&mut inner);
+        }
+        (decided, targets)
+    };
+    eprintln!("[{}] messages {decided:?} {}", now(), if approve { "approved" } else { "denied" });
+    for to in &targets {
+        deliver_next(d, to);
+    }
+    Ok(json!({ "decided": decided }))
+}
+
+/// Expire undelivered messages whose target worktree is gone from disk (archived/deleted): they could
+/// never be delivered, and would otherwise sit pending forever.
+pub(super) fn expire_orphans(d: &Daemon, inner: &mut Inner) {
+    let gone = |to: &str| !inner.worktrees.contains_key(to) && !crate::paths::worktree_path(&d.dev, to).is_dir();
+    let orphans: Vec<u64> = inner.store.messages.iter().filter(|m| matches!(m.state, MessageState::Pending | MessageState::Queued) && gone(&m.to)).map(|m| m.id).collect();
+    if orphans.is_empty() {
+        return;
+    }
+    for m in inner.store.messages.iter_mut().filter(|m| orphans.contains(&m.id)) {
+        m.state = MessageState::Expired;
+    }
+    eprintln!("[{}] messages {orphans:?} expired (target worktree gone)", now());
+    d.messages_changed(inner);
+}
+
+fn state_name(s: MessageState) -> String {
+    serde_json::to_value(s).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default()
 }
 
 pub fn list(d: &Arc<Daemon>, p: &Value) -> Result<Value> {
@@ -129,4 +175,70 @@ pub fn deliver_next(d: &Arc<Daemon>, to: &str) {
             let _ = pty.write(b"\r");
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::Mutex;
+    use wtd_core::model::Worktree;
+
+    fn daemon(tag: &str, ids: &[&str]) -> Arc<Daemon> {
+        let dev = std::env::temp_dir().join(format!("wtd-msg-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dev);
+        let mut inner = Inner::default();
+        for id in ids {
+            let p = crate::paths::worktree_path(&dev, id);
+            std::fs::create_dir_all(p.join(".git")).unwrap();
+            inner.worktrees.insert(id.to_string(), Worktree { id: id.to_string(), path: p.to_string_lossy().into(), ..Default::default() });
+        }
+        let (tx, _) = tokio::sync::broadcast::channel(64);
+        Arc::new(Daemon { dev, inner: Mutex::new(inner), tx, next_conn: AtomicU64::new(1), watchers: Mutex::new(HashMap::new()) })
+    }
+
+    fn send_from(d: &Arc<Daemon>, from: &str, to: &str) -> u64 {
+        let dir = crate::paths::worktree_path(&d.dev, from);
+        send(d, &json!({ "from_dir": dir.to_string_lossy(), "to": to, "body": "hi" })).unwrap()["id"].as_u64().unwrap()
+    }
+
+    fn state(d: &Arc<Daemon>, id: u64) -> MessageState {
+        d.lock().store.messages.iter().find(|m| m.id == id).unwrap().state
+    }
+
+    #[test]
+    fn approve_queues_until_the_target_session_can_take_it() {
+        let d = daemon("approve", &["delegate/r", "r/feat/a"]);
+        let id = send_from(&d, "delegate/r", "r/feat/a");
+        assert_eq!(state(&d, id), MessageState::Pending);
+        decide(&d, &json!({ "id": id, "approve": true, "body": "edited" })).unwrap();
+        // no hosted session for the target yet → stays queued
+        assert_eq!(state(&d, id), MessageState::Queued);
+        assert_eq!(d.lock().store.messages[0].body, "edited");
+        assert!(decide(&d, &json!({ "id": id, "approve": false })).is_err());
+    }
+
+    #[test]
+    fn bulk_deny_skips_already_decided() {
+        let d = daemon("bulk", &["delegate/r", "r/feat/a"]);
+        let (a, b, c) = (send_from(&d, "delegate/r", "r/feat/a"), send_from(&d, "delegate/r", "r/feat/a"), send_from(&d, "delegate/r", "r/feat/a"));
+        decide(&d, &json!({ "id": a, "approve": true })).unwrap();
+        let r = decide(&d, &json!({ "ids": [a, b, c], "approve": false })).unwrap();
+        assert_eq!(r["decided"], json!([b, c]));
+        assert_eq!((state(&d, a), state(&d, b), state(&d, c)), (MessageState::Queued, MessageState::Denied, MessageState::Denied));
+        assert!(d.lock().store.open_messages().iter().all(|m| m.id == a));
+    }
+
+    #[test]
+    fn messages_to_a_removed_worktree_expire() {
+        let d = daemon("expire", &["delegate/r", "r/feat/a", "r/feat/b"]);
+        let (to_a, to_b) = (send_from(&d, "delegate/r", "r/feat/a"), send_from(&d, "delegate/r", "r/feat/b"));
+        std::fs::remove_dir_all(crate::paths::worktree_path(&d.dev, "r/feat/a")).unwrap();
+        let mut inner = d.lock();
+        inner.worktrees.remove("r/feat/a");
+        expire_orphans(&d, &mut inner);
+        drop(inner);
+        assert_eq!((state(&d, to_a), state(&d, to_b)), (MessageState::Expired, MessageState::Pending));
+    }
 }

@@ -90,6 +90,8 @@ pub enum MessageState {
     Queued,
     Delivered,
     Denied,
+    /// The target worktree was archived or deleted before delivery.
+    Expired,
 }
 
 /// A prompt one agent asked to send to another worktree's agent. Never delivered without approval.

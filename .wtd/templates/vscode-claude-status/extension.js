@@ -57,6 +57,7 @@ function refreshDevRoot() {
   WTD = path.join(DEV, '.wtd');
 }
 const IS_WIN = process.platform === 'win32';
+const PASTE_IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'];
 const ASST_NAME = 'assistant';   // the reserved terminal name of the pinned fleet-management session
 const TERM_NAME = 'terminal';    // the reserved name of the pinned plain shell row (above assistant)
 // The shell each worktree terminal runs. On Windows that's Git Bash (so the .wtd bash scripts run);
@@ -502,36 +503,24 @@ class DevSummaryProvider {
   pasteImage() {
     const target = vscode.window.activeTerminal || this._current;
     if (!target) { vscode.window.showInformationMessage('claude-status: open a session first, then add an image.'); return; }
-    const dir = path.join(WTD, 'state', 'pasted-images');
-    try { fs.mkdirSync(dir, { recursive: true }); } catch {}
-    const insert = (file) => { target.show(); target.sendText((IS_WIN ? file.replace(/\//g, '\\') : file) + ' ', false); };
     const pick = () => {
-      vscode.window.showOpenDialog({ canSelectMany: false, openLabel: 'Add image',
-        filters: { Images: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'] } }).then((uris) => {
+      vscode.window.showOpenDialog({ canSelectMany: true, openLabel: 'Add image',
+        filters: { Images: PASTE_IMAGE_EXTS } }).then((uris) => {
         if (!uris || !uris.length) return;
-        const src = uris[0].fsPath;
-        // copy into the space-free staging dir so the inserted path can't trip Claude's path auto-detect
-        const staged = path.join(dir, 'img-' + Date.now() + (path.extname(src) || '.png'));
-        try { fs.copyFileSync(src, staged); insert(staged); }
+        try { this._insertImages(target, uris.map((u, i) => this._stageImageFile(u.fsPath, i))); }
         catch (e) { vscode.window.showErrorMessage('claude-status: image copy failed: ' + e.message); }
       });
     };
     if (!IS_WIN) return pick();
-    // Windows: try the clipboard image first (the case native paste can't handle); else pick a file.
-    const dest = path.join(dir, 'img-' + Date.now() + '.png');
-    const psPath = dest.replace(/\//g, '\\').replace(/'/g, "''");
-    const ps = "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $i=[System.Windows.Forms.Clipboard]::GetImage(); if($i){ $i.Save('" + psPath + "',[System.Drawing.Imaging.ImageFormat]::Png); $i.Dispose(); exit 0 } else { exit 3 }";
-    cp.execFile('powershell.exe', ['-NoProfile', '-STA', '-Command', ps], { timeout: 8000 }, (e) => {
-      if (!e) insert(dest);   // clipboard held an image → staged + inserted
-      else pick();            // nothing on the clipboard → fall back to a file picker
-    });
+    // Windows: try the clipboard first (the case native paste can't handle); else pick a file.
+    this._stageClipboardImages((files) => (files.length ? this._insertImages(target, files) : pick()));
   }
 
-  // Ctrl+V into a focused session: paste TEXT normally, but if the clipboard holds an IMAGE (and no
-  // text), stage it to a space-free path and INSERT that path so Claude Code loads the picture — the
-  // same trick as the 📷 button, minus the file-picker fallback. Bound to ctrl+v when a terminal is
-  // focused (Windows only; tmux/native paste handles it elsewhere). We check clipboard text first so
-  // the common text paste stays instant and never spawns powershell.
+  // Ctrl+V into a focused session: paste TEXT normally, but if the clipboard holds an IMAGE or copied
+  // image FILES (and no text), stage them to space-free paths and INSERT those so Claude Code loads the
+  // pictures — the same trick as the 📷 button, minus the file-picker fallback. Bound to ctrl+v when a
+  // terminal is focused (Windows only; tmux/native paste handles it elsewhere). We check clipboard text
+  // first so the common text paste stays instant and never spawns powershell.
   async smartPaste() {
     const normalPaste = () => vscode.commands.executeCommand('workbench.action.terminal.paste');
     let text = '';
@@ -540,14 +529,40 @@ class DevSummaryProvider {
     if (!IS_WIN) return normalPaste();
     const target = vscode.window.activeTerminal || this._current;
     if (!target) return normalPaste();
+    this._stageClipboardImages((files) => (files.length ? this._insertImages(target, files) : normalPaste()));
+  }
+
+  // insert staged image paths (no Enter); Claude Code / Codex pick up an image path on submit
+  _insertImages(target, files) {
+    target.show();
+    target.sendText(files.map((f) => (IS_WIN ? f.replace(/\//g, '\\') : f)).join(' ') + ' ', false);
+  }
+
+  // copy into the space-free staging dir so the inserted path can't trip Claude's path auto-detect
+  _stageImageFile(src, i = 0) {
+    const dir = path.join(WTD, 'state', 'pasted-images');
+    fs.mkdirSync(dir, { recursive: true });
+    const staged = path.join(dir, 'img-' + Date.now() + (i ? '-' + i : '') + (path.extname(src) || '.png'));
+    fs.copyFileSync(src, staged);
+    return staged;
+  }
+
+  // Windows clipboard → staged image paths: a bitmap (screenshot) is saved as png; copied files
+  // (Explorer Ctrl+C) are staged only if every one is an image. [] when there's nothing to stage.
+  _stageClipboardImages(cb) {
     const dir = path.join(WTD, 'state', 'pasted-images');
     try { fs.mkdirSync(dir, { recursive: true }); } catch {}
     const dest = path.join(dir, 'img-' + Date.now() + '.png');
     const psPath = dest.replace(/\//g, '\\').replace(/'/g, "''");
-    const ps = "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $i=[System.Windows.Forms.Clipboard]::GetImage(); if($i){ $i.Save('" + psPath + "',[System.Drawing.Imaging.ImageFormat]::Png); $i.Dispose(); exit 0 } else { exit 3 }";
-    cp.execFile('powershell.exe', ['-NoProfile', '-STA', '-Command', ps], { timeout: 8000 }, (e) => {
-      if (!e) { target.show(); target.sendText(dest.replace(/\//g, '\\') + ' ', false); }  // image → insert path
-      else normalPaste();   // nothing pasteable as an image → ordinary paste
+    const ps = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $i=[System.Windows.Forms.Clipboard]::GetImage(); if($i){ $i.Save('" + psPath + "',[System.Drawing.Imaging.ImageFormat]::Png); $i.Dispose(); exit 0 }; $f=[System.Windows.Forms.Clipboard]::GetFileDropList(); if($f.Count){ $f; exit 4 }; exit 3";
+    cp.execFile('powershell.exe', ['-NoProfile', '-STA', '-Command', ps], { timeout: 8000 }, (e, out) => {
+      if (!e) return cb([dest]);
+      if (e.code !== 4) return cb([]);
+      const files = String(out).split(/\r?\n/).filter(Boolean);
+      if (!files.every((f) => PASTE_IMAGE_EXTS.includes(path.extname(f).slice(1).toLowerCase()))) return cb([]);
+      let staged = [];
+      try { staged = files.map((f, i) => this._stageImageFile(f, i)); } catch {}
+      cb(staged);
     });
   }
 
@@ -779,46 +794,101 @@ class DevSummaryProvider {
   }
 
 
-  // Agent messages awaiting the user's approval: a notification per new request; Review shows the full
-  // text with Send / Edit & send / Deny. Nothing reaches the target agent without one of those clicks.
+  // Agent messages awaiting the user's approval. Nothing reaches the target agent without an Approve
+  // click. A toast can be missed (Do Not Disturb, auto-hide), so the status-bar item, the Fleet view
+  // badge and the 💬 on the sender's row stay up until every request is decided.
+  _pendingMsgs() { return ((this.daemon && this.daemon.messages) || []).filter((m) => m.state === 'pending'); }
+
   _onMessages() {
     this._notifiedMsgs = this._notifiedMsgs || new Set();
-    for (const m of (this.daemon && this.daemon.messages) || []) {
-      if (m.state !== 'pending' || this._notifiedMsgs.has(m.id)) continue;
+    const pending = this._pendingMsgs();
+    this._msgCue(pending);
+    for (const m of pending) {
+      if (this._notifiedMsgs.has(m.id)) continue;
       this._notifiedMsgs.add(m.id);
-      const first = (m.body.split('\n').find((l) => l.trim()) || '').slice(0, 90);
-      vscode.window.showInformationMessage('$(comment-discussion) ' + m.from + ' wants to message ' + m.to + ': “' + first + (m.body.length > first.length ? '…' : '') + '”', 'Review', 'Deny')
-        .then((ch) => { if (ch === 'Review') this.reviewMessage(m.id); else if (ch === 'Deny') this._decide(m.id, false); });
+      const first = (m.body.split('\n').find((l) => l.trim()) || '').slice(0, 160);
+      vscode.window.showInformationMessage('$(comment-discussion) ' + m.from + ' wants to message ' + m.to + ': “' + first + (m.body.length > first.length ? '…' : '') + '”', 'Approve', 'Edit', 'Deny')
+        .then((ch) => {
+          if (ch === 'Approve') this._decide(m.id, true);
+          else if (ch === 'Edit') this._editMessage(m);
+          else if (ch === 'Deny') this._decide(m.id, false);
+        });
     }
+  }
+
+  _msgCue(pending = this._pendingMsgs()) {
+    const n = pending.length;
+    const tip = n + ' agent message' + (n === 1 ? '' : 's') + ' awaiting your approval — click to review';
+    if (this.msgBar) {
+      this.msgBar.text = '$(comment-discussion) ' + n + ' awaiting approval';
+      this.msgBar.tooltip = tip;
+      if (n) this.msgBar.show(); else this.msgBar.hide();
+    }
+    if (this.view) this.view.badge = n ? { value: n, tooltip: tip } : undefined;
   }
 
   _decide(id, approve, body) {
+    const m = ((this.daemon && this.daemon.messages) || []).find((x) => x.id === id);
+    const target = m && this.daemon.wts.get(m.to);
+    const when = !target ? 'delivered when the target’s session runs' : target.status === 'working' || target.status === 'reviewing' ? 'delivered when ' + m.to + ' finishes its turn' : 'delivering to ' + m.to + ' now';
     return this.daemon.request('message.decide', Object.assign({ id, approve }, body ? { body } : {}))
-      .then(() => vscode.window.setStatusBarMessage(approve ? '$(check) Message #' + id + ' approved — delivered when the target finishes its turn' : '$(x) Message #' + id + ' denied', 5000),
+      .then(() => vscode.window.setStatusBarMessage(approve ? '$(check) Message #' + id + ' approved — ' + when : '$(x) Message #' + id + ' denied', 6000),
             (e) => vscode.window.showErrorMessage('Message #' + id + ': ' + e.message));
   }
 
-  async reviewMessage(id) {
-    const m = ((this.daemon && this.daemon.messages) || []).find((x) => x.id === id && x.state === 'pending');
-    if (!m) return;
-    const ch = await vscode.window.showInformationMessage('Message from ' + m.from + ' to ' + m.to, { modal: true,
-      detail: m.body + '\n\n— It is delivered to ' + m.to + '’s agent as a prompt when its current turn ends.' }, 'Send', 'Edit & send', 'Deny');
-    if (ch === 'Send') return this._decide(id, true);
-    if (ch === 'Deny') return this._decide(id, false);
-    if (ch === 'Edit & send') {
-      const doc = await vscode.workspace.openTextDocument({ content: m.body, language: 'markdown' });
-      await vscode.window.showTextDocument(doc, { preview: false });
-      const go = await vscode.window.showInformationMessage('Edit message #' + id + ' to ' + m.to + ' in the editor, then send it.', 'Send edited', 'Deny');
-      if (go === 'Send edited') { await this._decide(id, true, doc.getText()); }
-      else if (go === 'Deny') { await this._decide(id, false); }
-      if (vscode.window.activeTextEditor && vscode.window.activeTextEditor.document === doc)
-        await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
-    }
+  _decideMany(ids, approve) {
+    return this.daemon.request('message.decide', { ids, approve })
+      .catch(() => Promise.all(ids.map((id) => this.daemon.request('message.decide', { id, approve }).catch(() => {}))))   // a daemon without bulk decide
+      .then(() => vscode.window.setStatusBarMessage((approve ? '$(check) Approved ' : '$(x) Denied ') + ids.length + ' message' + (ids.length === 1 ? '' : 's'), 6000),
+            (e) => vscode.window.showErrorMessage('Messages: ' + e.message));
   }
 
-  async reviewMessagesFrom(worktree) {
-    for (const m of ((this.daemon && this.daemon.messages) || []).filter((x) => x.state === 'pending' && x.from === worktree)) await this.reviewMessage(m.id);
+  async reviewMessage(id) {
+    const m = this._pendingMsgs().find((x) => x.id === id);
+    if (!m) return;
+    const gone = !this.daemon.wts.has(m.to);
+    const ch = await vscode.window.showInformationMessage('Message #' + m.id + ' from ' + m.from + ' to ' + m.to, { modal: true,
+      detail: m.body + '\n\n— ' + (gone ? m.to + ' no longer exists; this can never be delivered.' : 'Delivered to ' + m.to + '’s agent as a prompt when its current turn ends (right away if it’s idle).') }, 'Approve', 'Edit', 'Deny');
+    if (ch === 'Approve') return this._decide(id, true);
+    if (ch === 'Deny') return this._decide(id, false);
+    if (ch === 'Edit') return this._editMessage(m);
   }
+
+  async _editMessage(m) {
+    const doc = await vscode.workspace.openTextDocument({ content: m.body, language: 'markdown' });
+    await vscode.window.showTextDocument(doc, { preview: false });
+    const go = await vscode.window.showInformationMessage('Edit message #' + m.id + ' to ' + m.to + ' in the editor, then send it.', 'Send edited', 'Deny');
+    if (go === 'Send edited') { await this._decide(m.id, true, doc.getText()); }
+    else if (go === 'Deny') { await this._decide(m.id, false); }
+    if (vscode.window.activeTextEditor && vscode.window.activeTextEditor.document === doc)
+      await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+  }
+
+  // every pending request in one list: pick some (stale ones, e.g. to a removed worktree), then
+  // approve or deny them together, or step through each
+  async reviewMessages(from) {
+    const pending = this._pendingMsgs().filter((m) => !from || m.from === from);
+    if (!pending.length) { vscode.window.setStatusBarMessage('$(check) No messages awaiting approval', 4000); return; }
+    if (pending.length === 1) return this.reviewMessage(pending[0].id);
+    const items = pending.map((m) => {
+      const gone = !this.daemon.wts.has(m.to);
+      return { m, picked: true, label: '#' + m.id + ' ' + m.from + ' → ' + m.to, description: (gone ? '$(warning) target gone · ' : '') + fmtAge(m.created),
+               detail: (m.body.split('\n').find((l) => l.trim()) || '').slice(0, 200) };
+    });
+    const sel = await vscode.window.showQuickPick(items, { canPickMany: true, title: 'Agent messages awaiting approval', placeHolder: 'Select messages, then choose what to do with them' });
+    if (!sel || !sel.length) return;
+    const ids = sel.map((it) => it.m.id), s = ids.length === 1 ? '' : 's';
+    const act = await vscode.window.showQuickPick([
+      { label: '$(eye) Review each', description: 'Approve / Edit / Deny one at a time', a: 'each' },
+      { label: '$(check) Approve ' + ids.length + ' message' + s, a: 'approve' },
+      { label: '$(x) Deny ' + ids.length + ' message' + s, a: 'deny' },
+    ], { title: ids.length + ' message' + s + ' selected' });
+    if (!act) return;
+    if (act.a === 'each') { for (const id of ids) await this.reviewMessage(id); return; }
+    return this._decideMany(ids, act.a === 'approve');
+  }
+
+  reviewMessagesFrom(worktree) { return this.reviewMessages(worktree); }
 
   // user-defined roster groups (stored by the daemon). Names come from native input boxes.
   async _groupOp(m) {
@@ -870,6 +940,7 @@ class DevSummaryProvider {
 
   resolveWebviewView(view) {
     this.view = view;
+    this._msgCue();
     const media = vscode.Uri.joinPath(this._extUri, 'media');
     view.webview.options = { enableScripts: true, localResourceRoots: [media] };
     view.webview.html = this._html().replace('__CODICON_HREF__', view.webview.asWebviewUri(vscode.Uri.joinPath(media, 'codicon.css')).toString());
@@ -1609,6 +1680,12 @@ class DevSummaryProvider {
 // New Session: account → repo → work item → branch name (→ group). A native multi-step Quick Pick.
 
 // `wtd <args>` → parsed JSON from its last stdout line (error text from stderr)
+// unix seconds → "5m ago" / "3h ago" / "2d ago"
+function fmtAge(ts) {
+  const m = Math.max(0, Math.floor((Date.now() / 1000 - ts) / 60));
+  return m < 60 ? m + 'm ago' : m < 1440 ? Math.floor(m / 60) + 'h ago' : Math.floor(m / 1440) + 'd ago';
+}
+
 function wtdJson(args) {
   return new Promise((resolve, reject) => {
     cp.execFile(wtdExe(), args, { windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (e, so, se) => {
@@ -1923,6 +2000,12 @@ function activate(context) {
   reg('claudeStatus.openSettings', () => dev._openSettings());
   reg('claudeStatus.openAssistant', () => dev.openOrFocusAssistant());
   reg('claudeStatus.openTerminal', () => dev.openOrFocusTerminal());
+  reg('claudeStatus.reviewMessages', () => dev.reviewMessages());
+  dev.msgBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 1000);
+  dev.msgBar.command = 'claudeStatus.reviewMessages';
+  dev.msgBar.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+  context.subscriptions.push(dev.msgBar);
+  dev._msgCue();
   context.subscriptions.push(vscode.window.registerWebviewViewProvider('claudeStatus.limit', dev));
   dev.gitView = new GitView(context, dev, TESTS_FLAG);
   dev.changes = new ChangesPanel(context, dev, TESTS_FLAG);

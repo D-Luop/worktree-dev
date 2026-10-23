@@ -10,6 +10,8 @@ winget install Git.Git                  # Git + Git Bash (Claude Code needs it; 
 winget install Rustlang.Rustup          # Rust toolchain, to build wtd.exe
 winget install Microsoft.VisualStudio.2022.BuildTools   # pick "Desktop development with C++"
 winget install jqlang.jq                # the installer merges JSON config with jq
+winget install Python.Python.3.12       # builds the VS Code extension's .vsix at install time
+winget install OpenJS.NodeJS.LTS        # checks the extension's webview scripts before packaging
 winget install GitHub.cli               # optional: GitHub issues / Projects in New Session
 winget install dandavison.delta         # optional
 ```
@@ -41,7 +43,7 @@ The installer is idempotent. Re-run it any time; it doesn't stop a running daemo
 - points Claude's status hooks at `wtd.exe hook <event>`, merged into `~/.claude/settings.json`
   without touching your other hooks
 - registers the `wtd` MCP server (the fleet tools) for every Claude account
-- installs the VS Code extension and the control-window settings (`.vscode/settings.json` in the
+- builds the VS Code extension from source (`build-vsix.py`) and installs it, plus the control-window settings (`.vscode/settings.json` in the
   dev root)
 - starts the tray icon and sets it to start at logon
 
@@ -101,8 +103,9 @@ The icon sits in the taskbar's `^` overflow; drag it onto the taskbar to keep it
 - **An updated `wtd.exe` isn't picked up**: a running daemon keeps the version it started with,
   because it hosts your sessions. Restart it from the tray when convenient. Old copies
   (`*.exe.old-*`) are cleaned up on the next install.
-- **The extension looks stale**: run *Developer: Reload Window*, and check that it's installed with
-  `code --list-extensions | grep claude-status`.
+- **The extension looks stale**: re-run `install.sh` (it rebuilds the vsix from source), run
+  *Developer: Reload Window*, and check the version with
+  `code --list-extensions --show-versions | grep claude-status`.
 - **Logs**: the daemon's log is `.wtd/state/daemon.log`. `wtd ls` prints the fleet as the daemon
   sees it.
 

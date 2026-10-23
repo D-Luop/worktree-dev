@@ -2,7 +2,7 @@
   "name": "claude-status",
   "displayName": "Claude Status",
   "description": "WorkTreeDev: a fleet roster for parallel Claude/Codex worktrees driven by the wtd.exe daemon — session list with groups and search, New Session picker, usage limits, native commit/diff browser, and status-coloured worktree folders.",
-  "version": "0.0.109",
+  "version": "0.0.108",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -50,6 +50,12 @@
         "title": "Open Assistant",
         "category": "WorkTreeDev",
         "icon": "$(hubot)"
+      },
+      {
+        "command": "claudeStatus.reviewMessages",
+        "title": "Review Agent Messages Awaiting Approval",
+        "category": "WorkTreeDev",
+        "icon": "$(comment-discussion)"
       },
       {
         "command": "claudeStatus.openTerminal",

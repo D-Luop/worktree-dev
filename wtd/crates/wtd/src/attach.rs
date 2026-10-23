@@ -7,8 +7,9 @@
 //! Closing the terminal only detaches: the agent keeps running in the daemon. If the daemon isn't
 //! running, `wtd host` falls back to `wtd run` (the session then lives in this terminal).
 
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -195,6 +196,73 @@ pub fn attach_main(args: &[String]) -> Result<i32> {
     relay(method::SESSION_ATTACH, params)
 }
 
+const IMAGE_EXTS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "webp", "bmp"];
+
+/// Dropping image files onto the terminal types their (quoted) paths. Copy them to the space-free
+/// staging dir the clipboard-image paste uses and send those paths instead, so the agent loads them.
+/// `None` (pass the input through) unless the input is nothing but existing image files.
+fn stage_dropped_images(input: &[u8], dir: &Path) -> Option<Vec<u8>> {
+    let body = input.strip_prefix(b"\x1b[200~").and_then(|b| b.strip_suffix(b"\x1b[201~")).unwrap_or(input);
+    let text = std::str::from_utf8(body).ok()?;
+    let lower = text.to_ascii_lowercase();
+    if !IMAGE_EXTS.iter().any(|e| lower.contains(&format!(".{e}"))) {
+        return None;
+    }
+    let files = split_dropped_paths(text)?;
+    let is_image = |f: &Path| f.extension().is_some_and(|e| IMAGE_EXTS.contains(&e.to_string_lossy().to_ascii_lowercase().as_str()));
+    if !files.iter().map(Path::new).all(|f| f.is_absolute() && is_image(f) && f.is_file()) {
+        return None;
+    }
+    std::fs::create_dir_all(dir).ok()?;
+    let ms = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_millis();
+    let mut out = String::new();
+    for (i, f) in files.iter().enumerate() {
+        let ext = Path::new(f).extension()?.to_string_lossy();
+        let name = if i == 0 { format!("img-{ms}.{ext}") } else { format!("img-{ms}-{i}.{ext}") };
+        let staged = dir.join(name);
+        std::fs::copy(f, &staged).ok()?;
+        out.push_str(&staged.to_string_lossy());
+        out.push(' ');
+    }
+    Some(out.into_bytes())
+}
+
+/// Split dropped paths as VS Code quotes them: `"a b.png"`, `'a b.png'` / `& 'it''s.png'`
+/// (PowerShell) or bare. `None` if anything else is mixed in.
+fn split_dropped_paths(text: &str) -> Option<Vec<String>> {
+    let mut out = Vec::new();
+    let mut rest = text.trim();
+    while !rest.is_empty() {
+        rest = rest.strip_prefix("& ").unwrap_or(rest);
+        let (tok, after) = if let Some(r) = rest.strip_prefix('"') {
+            let end = r.find('"')?;
+            (r[..end].to_string(), &r[end + 1..])
+        } else if let Some(r) = rest.strip_prefix('\'') {
+            let mut tok = String::new();
+            let mut i = 0;
+            loop {
+                let j = i + r[i..].find('\'')?;
+                tok.push_str(&r[i..j]);
+                if r[j + 1..].starts_with('\'') {
+                    tok.push('\'');
+                    i = j + 2;
+                } else {
+                    break (tok, &r[j + 1..]);
+                }
+            }
+        } else {
+            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            (rest[..end].to_string(), &rest[end..])
+        };
+        if !after.is_empty() && !after.starts_with(char::is_whitespace) {
+            return None;
+        }
+        out.push(tok);
+        rest = after.trim_start();
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 fn relay(method: &str, params: Value) -> Result<i32> {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     rt.block_on(relay_async(method, params))
@@ -235,6 +303,7 @@ async fn relay_async(method: &str, params: Value) -> Result<i32> {
 
     // keyboard → input frames (a blocking console read, so its own thread)
     let tx_in = tx.clone();
+    let image_dir = paths::dev_root().ok().map(|d| paths::state_dir(&d).join("pasted-images"));
     std::thread::spawn(move || {
         let Some(h) = std_handle(STD_INPUT_HANDLE) else { return };
         let mut buf = [0u8; 4096];
@@ -243,7 +312,9 @@ async fn relay_async(method: &str, params: Value) -> Result<i32> {
             if unsafe { ReadFile(h, buf.as_mut_ptr(), buf.len() as u32, &mut n, std::ptr::null_mut()) } == FALSE || n == 0 {
                 break;
             }
-            if tx_in.send(frame(F_DATA, &buf[..n as usize])).is_err() {
+            let input = &buf[..n as usize];
+            let staged = image_dir.as_deref().and_then(|d| stage_dropped_images(input, d));
+            if tx_in.send(frame(F_DATA, staged.as_deref().unwrap_or(input))).is_err() {
                 break;
             }
         }
@@ -301,4 +372,54 @@ async fn relay_async(method: &str, params: Value) -> Result<i32> {
     stop.store(true, Ordering::Relaxed);
     writer.abort();
     Ok(code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn splits_vscode_quoted_paths() {
+        let v = |s: &str| split_dropped_paths(s);
+        let own = |v: &[&str]| Some(v.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(v(r#""C:\My Pics\a.png""#), own(&[r"C:\My Pics\a.png"]));
+        assert_eq!(v(r"C:\x\a.png "), own(&[r"C:\x\a.png"]));
+        assert_eq!(v(r"& 'C:\it''s here\a.png'"), own(&[r"C:\it's here\a.png"]));
+        assert_eq!(v(r#""C:\a b\1.png" C:\c\2.jpg"#), own(&[r"C:\a b\1.png", r"C:\c\2.jpg"]));
+        assert_eq!(v(r#""C:\a.png"x"#), None);
+        assert_eq!(v(r#""C:\a.png"#), None);
+        assert_eq!(v("  "), None);
+    }
+
+    #[test]
+    fn stages_only_image_drops() {
+        let t = std::env::temp_dir().join(format!("wtd-drop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        let src = t.join("my pics");
+        std::fs::create_dir_all(&src).unwrap();
+        let (png, txt) = (src.join("a.PNG"), src.join("notes.txt"));
+        std::fs::write(&png, b"png").unwrap();
+        std::fs::write(&txt, b"txt").unwrap();
+        let stage = t.join("pasted-images");
+
+        let dropped = format!("\x1b[200~\"{}\"\x1b[201~", png.display());
+        let out = String::from_utf8(stage_dropped_images(dropped.as_bytes(), &stage).unwrap()).unwrap();
+        let staged = Path::new(out.trim_end());
+        assert!(out.ends_with(' '));
+        assert_eq!(staged.parent(), Some(stage.as_path()));
+        assert!(staged.file_name().unwrap().to_string_lossy().starts_with("img-"));
+        assert_eq!(std::fs::read(staged).unwrap(), b"png");
+
+        let passthrough = [
+            format!("\"{}\"", txt.display()),
+            format!("\"{}\" \"{}\"", png.display(), txt.display()),
+            "look at a.png".into(),
+            r"C:\missing\b.png".into(),
+            "x".into(),
+        ];
+        for p in passthrough {
+            assert_eq!(stage_dropped_images(p.as_bytes(), &stage), None, "{p}");
+        }
+        std::fs::remove_dir_all(&t).ok();
+    }
 }
