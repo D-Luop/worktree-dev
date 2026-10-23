@@ -1229,7 +1229,7 @@ class DevSummaryProvider {
       if (w.kind === 'dev') continue;   // the assistant has its own pinned row
       const slug = w.slug, name = w.name;
       rows.push({ id: w.id, group: w.group || null, parent: w.parent || null, slug, name, status: w.status === 'none' ? '' : w.status, dirty: !!(w.git && w.git.dirty), ahead: (w.git && w.git.ahead) || 0,
-                  branch: (w.git && w.git.branch) || '', plan: w.plan_title || '', account: w.account || '', live: !!w.live, kind: w.kind || '', program: w.program || '', msgPending: pendingFrom[w.id] || 0, limitResetsAt: w.limit_resets_at || 0, ticket: ticketOf(w.path) });
+                  branch: (w.git && w.git.branch) || '', plan: w.plan_title || '', account: w.account || '', live: !!w.live, kind: w.kind || '', program: w.program || '', platform: w.platform || 'windows', msgPending: pendingFrom[w.id] || 0, limitResetsAt: w.limit_resets_at || 0, ticket: ticketOf(w.path) });
       if (w.live) live.add(slug + '-' + name);
     }
     return { rows, live };
@@ -1606,7 +1606,7 @@ class DevSummaryProvider {
     if(activeOnly && !w.active) return false;
     if(statuses.size && !statuses.has(w.status||'stopped')) return false;
     if(query){
-      const hay=[w.slug,w.name,w.status,w.branch,w.plan,w.account].join(' ').toLowerCase();
+      const hay=[w.slug,w.name,w.status,w.branch,w.plan,w.account,w.platform].join(' ').toLowerCase();
       return query.toLowerCase().split(/\\s+/).filter(Boolean).every(t=>hay.includes(t));
     }
     return true;
@@ -1620,14 +1620,16 @@ class DevSummaryProvider {
     const acct = (w.active && w.program==='codex') ? '<span class="badge" title="Codex session'+(acctName&&acctName!=='default'?' · account '+esc(acctName):'')+'">codex'+(acctName&&acctName!=='default'?' · '+esc(acctName):'')+'</span>'
       : (multiAcct && w.active && w.account && w.account!=='default') ? '<span class="badge" title="Claude account">'+esc(w.account)+'</span>' : '';
     const role = w.kind==='delegate' ? '<span class="badge" title="Delegator for '+esc(w.name)+': keeps its docs and research, and starts worktrees">delegator</span>' : '';
+    const distro = (w.platform||'').indexOf('wsl:')===0 ? w.platform.slice(4) : '';
+    const plat = distro ? '<span class="badge" title="Runs in WSL ('+esc(distro)+')">🐧 WSL</span>' : '';
     const lim = w.status==='limited' ? limTxt(w.limitResetsAt) : '';
-    const tip = w.slug+'/'+w.name+' — '+s[1]+(lim?' · '+lim:'')+(w.active?' · live session':'')+(w.branch?' · '+w.branch:'')+(w.plan?'\\n'+w.plan:'')+'\\nclick to open';
+    const tip = w.slug+'/'+w.name+' — '+s[1]+(lim?' · '+lim:'')+(distro?' · WSL '+distro:'')+(w.active?' · live session':'')+(w.branch?' · '+w.branch:'')+(w.plan?'\\n'+w.plan:'')+'\\nclick to open';
     const drag = groupsData && canEditGroups;
     const tk = w.ticket;
     const tkIco = !tk ? 'link' : tk.kind==='issue' ? (tk.state==='CLOSED'?'issue-closed':'issue-opened') : (tk.state==='MERGED'?'git-merge':'git-pull-request');
     return '<div class="row wt'+(child?' child':'')+(w.active?' live':'')+(w.unread?' unread':'')+(w.current?' current':'')+'" data-id="'+esc(w.id||'')+'" data-slug="'+esc(w.slug)+'" data-name="'+esc(w.name)+'" data-glyph="'+g+'" title="'+esc(tip)+'"'+(drag?' draggable="true"':'')+'>'
       +'<span class="st" style="color:'+s[3]+'">'+ico(s[2])+'</span>'
-      +'<span class="nm">'+esc(w.name)+'</span>'+(groupsData&&w.kind!=='delegate'?'<span class="rb" title="repository">'+esc(w.slug)+'</span>':'')+role+acct
+      +'<span class="nm">'+esc(w.name)+'</span>'+(groupsData&&w.kind!=='delegate'?'<span class="rb" title="repository">'+esc(w.slug)+'</span>':'')+role+plat+acct
       +(lim?'<span class="badge" style="color:'+s[3]+'" title="'+esc(lim)+'">'+esc(lim.replace(/^limit · /,''))+'</span>':'')
       +(w.msgPending?'<i class="codicon codicon-comment-unresolved msgp" title="'+w.msgPending+' message'+(w.msgPending===1?'':'s')+' from this agent awaiting your approval — click to review"></i>':'')
       +(w.preview?'<i class="codicon codicon-file-media pv" title="Staged previews: open them in the Changes panel"></i>':'')
@@ -1916,6 +1918,8 @@ async function newSessionWizard(dev) {
   const usage = new Map(((dev.daemon && dev.daemon.accounts) || []).map((a) => [a.name, a]));
   const accountsP = wtdJson(['account', 'ls']);
   const reposP = wtdJson(['repo', 'ls']);
+  const platformsP = wtdJson(['platforms']).catch(() => []);
+  const platformCfgP = wtdJson(['config', 'platform']).catch(() => ({}));
   const st = { step: 1 };
   for (;;) {
     if (st.step === 1) {
@@ -1949,7 +1953,13 @@ async function newSessionWizard(dev) {
         active: (i) => st.repo && i.repo && i.repo.slug === st.repo.slug });
       if (!it) return; if (it === BACK) { st.step = 1; continue; }
       if (it.add) { dev._openSettings && dev._openSettings(); return; }
-      st.plan = !!it.plan; st.repo = it.repo || null; st.item = null; st.step = st.plan ? 4 : 3; continue;
+      st.plan = !!it.plan; st.repo = it.repo || null; st.item = null; st.platform = null;
+      if (!st.plan) {
+        const p = await pickPlatform(st.repo, platformsP, platformCfgP);
+        if (!p) return; if (p === BACK) continue;
+        st.platform = p.id;
+      }
+      st.step = st.plan ? 4 : 3; continue;
     }
     if (st.step === 3) {
       const slug = st.repo.slug;
@@ -2010,6 +2020,29 @@ async function newSessionWizard(dev) {
   }
 }
 
+// Windows or a WSL distro, preselected by: repo default → global default → windows. Skipped (→ the
+// resolved default) when Windows is the only platform. A Quick Pick can't disable items, so unavailable
+// distros are marked ⊘ with their hints and refused on pick.
+async function pickPlatform(repo, platformsP, cfgP) {
+  const [list, cfg] = await Promise.all([platformsP, cfgP]);
+  const want = (repo && repo.platform) || (cfg && cfg.default_platform) || 'windows';
+  if (!list || list.length < 2) return { id: null };   // `agent` resolves the default itself
+  const source = repo && repo.platform ? 'default for ' + repo.slug : cfg && cfg.default_platform && cfg.default_platform !== 'windows' ? 'global default' : '';
+  for (;;) {
+    const items = list.map((p) => ({
+      label: (p.kind === 'wsl' ? '$(terminal-linux) ' + p.distro : '$(window) Windows') + (p.ok ? '' : ' $(circle-slash)'),
+      description: [p.id === want && source ? source : '', p.default_user ? 'as ' + p.default_user : '',
+        ['git', 'claude', 'codex'].filter((t) => p.tools && p.tools[t]).join(' · ')].filter(Boolean).join(' · '),
+      detail: p.ok ? undefined : (p.hints || []).join(' · ') || 'not available',
+      p,
+    }));
+    const it = await wizardPick({ title: 'New Session', step: 2, total: 4, placeholder: 'Run it on which platform?', items, active: (i) => i.p.id === want });
+    if (!it || it === BACK) return it;
+    if (it.p.ok) return it.p;
+    vscode.window.showWarningMessage(it.p.id + ' isn’t ready: ' + ((it.p.hints || [])[0] || 'not available'));
+  }
+}
+
 // branches on origin, newest first (for "Existing branch…")
 async function pickBranch(dev, slug) {
   const bare = path.join(DEV, 'repos', slug, '.bare');
@@ -2032,6 +2065,8 @@ async function launchSession(dev, st) {
   if (dev.daemon && dev.daemon.wts.has(id)) { dev.openOrFocus(slug, name); return; }
   const args = [];
   if (st.account) args.push('--account', st.account.provider === 'codex' ? 'codex:' + st.account.name : st.account.name);
+  if (st.platform) args.push('--platform', st.platform);
+  const onWsl = !!st.platform && st.platform !== 'windows';
   if (st.item) {
     let detail = null;
     if (st.item.number && st.item.repo) detail = await wtdJson(['issues', 'show', st.item.repo, String(st.item.number)]).catch(() => null);
@@ -2050,7 +2085,7 @@ async function launchSession(dev, st) {
   // above was too early for them), join the chosen group, move the project card
   const afterCreate = async () => {
     const wt = dev._wtPath(slug, name);
-    for (let i = 0; i < 60 && !(dev.daemon && dev.daemon.wts.has(id) && fs.existsSync(path.join(wt, '.git'))); i++) await new Promise((r) => setTimeout(r, 1000));
+    for (let i = 0; i < 60 && !(dev.daemon && dev.daemon.wts.has(id) && (onWsl || fs.existsSync(path.join(wt, '.git')))); i++) await new Promise((r) => setTimeout(r, 1000));
     if (t.exitStatus === undefined && dev._current === t) dev._focusSession(t, dev.onTermActive(t));
     if (st.group && dev.daemon && dev.daemon.running) dev.daemon.request('group.assign', { worktree: id, group: st.group }).catch(() => {});
     if (st.item && st.item.item_id) {
