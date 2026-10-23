@@ -4,8 +4,8 @@
 #   preview <file.html> [label]
 #
 # Stages the file to .wtd/state/previews/<slug>/<name>/<label>.html. A worktree can hold MANY previews
-# at once — the claude-status VSCode extension shows one button per <label> at the top of the preview
-# panel to switch between them. <label> defaults to the file's basename; the living plan uses `plan`.
+# at once — the claude-status VSCode extension shows each <label> as a tab in the Changes panel's
+# bottom pane, beside the Diff tab. <label> defaults to the file's basename; the living plan uses `plan`.
 # Make the HTML self-contained (inline CSS, data-URI images); it renders sandboxed with no network, so
 # external <link>/<img src=http…>/<script src> won't load.
 set -euo pipefail
@@ -36,4 +36,4 @@ name="${rel#*/}"
 dest="$WTD/state/previews/$slug/$name/$label.html"
 mkdir -p "$(dirname "$dest")"
 cp -f "$src" "$dest"
-echo "preview '$label' staged for $slug/$name → open the panel (🖼) and pick the '$label' tab"
+echo "preview '$label' staged for $slug/$name → click 🖼 on its roster row (the Changes panel's '$label' tab)"

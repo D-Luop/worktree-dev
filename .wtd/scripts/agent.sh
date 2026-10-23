@@ -414,7 +414,7 @@ while read -r td; do [ -n "$td" ] && PATH="$td:$PATH"; done < <("$WTD/scripts/cu
 export PATH
 
 # ensure the always-present living-plan preview tab exists (seed a placeholder until the agent writes a
-# real plan via /plan). Every worktree gets a 'plan' tab in the preview panel this way.
+# real plan via /plan). Every worktree gets a 'plan' tab in the Changes panel this way.
 pvplan="$WTD/state/previews/$repo/$name/plan.html"
 if [ ! -f "$pvplan" ]; then
   mkdir -p "$(dirname "$pvplan")"

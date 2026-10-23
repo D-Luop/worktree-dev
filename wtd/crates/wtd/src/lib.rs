@@ -55,7 +55,7 @@ Worktrees & sessions (also on PATH as plain `agent`, `archive`, … via ~/.local
                                      WTD_REVIEW_NO_OPEN=1 leaves them on disk)
   wtd ask <slug>[@branch] [question] ask an expert about another repo/branch
   wtd ref add|sync|rm|ls …           read-only reference checkouts for agents
-  wtd preview <file.html> [label]    stage an HTML design for the preview panel
+  wtd preview <file.html> [label]    stage an HTML design as a Changes-panel tab
   wtd preflight [<slug>/<name>]      run the repo's PR guardrails here (agent pr requires a pass)
   wtd ticket link|unlink|sync|show … the linked GitHub issue/PR, written to .claude-ticket.md
   wtd custom ls|effective|new|disable|apply|proposals …

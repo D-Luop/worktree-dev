@@ -2,7 +2,7 @@
 name: plan
 description: >
   Create and maintain a LIVING visual plan for this worktree — a self-contained HTML checklist that
-  opens in the fleet roster's preview panel and is kept in sync as work progresses. Use when the user
+  opens as the `plan` tab of the Worktree Changes panel and is kept in sync as work progresses. Use when the user
   wants a visual plan, a plan they can watch, a living checklist, or invokes /plan. Builds the plan at
   .claude/plans/active-plan.html and stages it with the `preview` skill so a 🖼 appears on this
   worktree's row; re-stage after each step to tick items off. Pairs with /blueprint (which owns the
@@ -12,8 +12,8 @@ allowed-tools: Read, Grep, Glob, Bash, Write, Edit
 
 # Living plan (visual checklist)
 
-Turn the work for this worktree into a **self-contained HTML checklist** that lives in the roster
-preview panel and stays current as you execute. The agent owns it: you tick items off and log
+Turn the work for this worktree into a **self-contained HTML checklist** that lives in the Worktree
+Changes panel's `plan` tab and stays current as you execute. The agent owns it: you tick items off and log
 progress here as you go, so the user can watch the plan fill in without reading the terminal.
 
 The state of record is this HTML file — a step is **done** when its checkbox has `checked`. Ticking a
@@ -47,7 +47,7 @@ Then edit `.claude/plans/active-plan.html` (the template's top comment documents
 Keep it **self-contained** — all CSS/JS inline, no network (it renders sandboxed). Don't add external
 images or fonts.
 
-Every item carries a **▶ Start** button. When the plan is open in the preview panel, clicking it tells
+Every item carries a **▶ Start** button. When the plan is open in the Changes panel, clicking it tells
 **this worktree's session** to begin that step (it sends the step's **title** as the instruction — so
 titles must be self-contained and imperative). The button is inert if the file is opened outside the
 panel. You don't wire anything for this; the panel host does. Just write clear titles.
