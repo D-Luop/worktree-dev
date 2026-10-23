@@ -238,6 +238,86 @@ pub fn is_null(h: HANDLE) -> bool {
     h.is_null()
 }
 
+// --- HKCU registry ---------------------------------------------------------------------------------
+
+pub mod reg {
+    use windows_sys::Win32::System::Registry::*;
+
+    use super::wide;
+
+    fn get(key: &str, value: &str, flags: u32, buf: Option<&mut [u8]>) -> Option<u32> {
+        let mut size = buf.as_ref().map_or(0, |b| b.len() as u32);
+        let ptr = buf.map_or(std::ptr::null_mut(), |b| b.as_mut_ptr() as *mut _);
+        let rc = unsafe { RegGetValueW(HKEY_CURRENT_USER, wide(key).as_ptr(), wide(value).as_ptr(), flags, std::ptr::null_mut(), ptr, &mut size) };
+        (rc == 0).then_some(size)
+    }
+
+    pub fn exists(key: &str, value: &str) -> bool {
+        get(key, value, RRF_RT_ANY, None).is_some()
+    }
+
+    pub fn get_sz(key: &str, value: &str) -> Option<String> {
+        let size = get(key, value, RRF_RT_REG_SZ, None)?;
+        let mut buf = vec![0u8; size as usize];
+        let n = get(key, value, RRF_RT_REG_SZ, Some(&mut buf))? as usize;
+        let units: Vec<u16> = buf[..n].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        Some(String::from_utf16_lossy(&units).trim_end_matches('\0').to_string())
+    }
+
+    pub fn get_dword(key: &str, value: &str) -> Option<u32> {
+        let mut buf = [0u8; 4];
+        get(key, value, RRF_RT_REG_DWORD, Some(&mut buf))?;
+        Some(u32::from_le_bytes(buf))
+    }
+
+    pub fn set_sz(key: &str, value: &str, data: &str) -> bool {
+        let data = wide(data);
+        unsafe { RegSetKeyValueW(HKEY_CURRENT_USER, wide(key).as_ptr(), wide(value).as_ptr(), REG_SZ, data.as_ptr() as *const _, (data.len() * 2) as u32) == 0 }
+    }
+
+    pub fn set_dword(key: &str, value: &str, data: u32) -> bool {
+        unsafe { RegSetKeyValueW(HKEY_CURRENT_USER, wide(key).as_ptr(), wide(value).as_ptr(), REG_DWORD, &data as *const u32 as *const _, 4) == 0 }
+    }
+
+    pub fn delete(key: &str, value: &str) {
+        unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, wide(key).as_ptr(), wide(value).as_ptr()) };
+    }
+
+    /// Create `key` if missing. A volatile key lives in memory only: Windows drops it at sign-out.
+    /// Its parent must already exist (and be non-volatile), or missing parents would be volatile too.
+    pub fn create(key: &str, volatile: bool) -> bool {
+        let opt = if volatile { REG_OPTION_VOLATILE } else { REG_OPTION_NON_VOLATILE };
+        let mut h: HKEY = std::ptr::null_mut();
+        unsafe {
+            let rc = RegCreateKeyExW(HKEY_CURRENT_USER, wide(key).as_ptr(), 0, std::ptr::null(), opt, KEY_WRITE, std::ptr::null(), &mut h, std::ptr::null_mut());
+            if rc == 0 {
+                RegCloseKey(h);
+            }
+            rc == 0
+        }
+    }
+
+    pub fn subkeys(key: &str) -> Vec<String> {
+        let mut out = vec![];
+        unsafe {
+            let mut h: HKEY = std::ptr::null_mut();
+            if RegOpenKeyExW(HKEY_CURRENT_USER, wide(key).as_ptr(), 0, KEY_READ, &mut h) != 0 {
+                return out;
+            }
+            let mut name = [0u16; 256];
+            for i in 0.. {
+                let mut len = name.len() as u32;
+                if RegEnumKeyExW(h, i, name.as_mut_ptr(), &mut len, std::ptr::null(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) != 0 {
+                    break;
+                }
+                out.push(String::from_utf16_lossy(&name[..len as usize]));
+            }
+            RegCloseKey(h);
+        }
+        out
+    }
+}
+
 // --- processes holding a folder as their working directory ------------------------------------------
 
 #[repr(C)]
@@ -345,5 +425,24 @@ mod tests {
         child.wait().unwrap();
         assert!(super::kill_processes_in(&dir.join("elsewhere")).is_empty());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn hkcu_values_round_trip() {
+        use super::reg;
+        let key = format!(r"Software\wtd-test-{}", std::process::id());
+        let sub = format!(r"{key}\Session");
+        assert!(reg::create(&key, false) && reg::create(&sub, true));
+        assert!(reg::set_sz(&sub, "s", "running — ok") && reg::set_dword(&key, "d", 7));
+        assert_eq!(reg::get_sz(&sub, "s").as_deref(), Some("running — ok"));
+        assert_eq!(reg::get_dword(&key, "d"), Some(7));
+        assert!(reg::exists(&key, "d") && !reg::exists(&key, "missing"));
+        assert_eq!(reg::subkeys(&key), vec!["Session".to_string()]);
+        reg::delete(&key, "d");
+        assert!(!reg::exists(&key, "d"));
+        unsafe {
+            use windows_sys::Win32::System::Registry::{RegDeleteTreeW, HKEY_CURRENT_USER};
+            RegDeleteTreeW(HKEY_CURRENT_USER, super::wide(&key).as_ptr());
+        }
     }
 }
