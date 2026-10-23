@@ -154,9 +154,12 @@ in VS Code (with a diff) or with `wtd custom accept <id>`.
 worktree (`fleet_send`). Every message needs two approvals before delivery:
 
 1. The sending agent asks you in its chat.
-2. You **Review → Send / Edit / Deny** in VS Code.
+2. You **Approve / Edit / Deny** it in VS Code: the notification, the "awaiting approval" status-bar item, or
+   the 💬 on the sender's roster row. **WorkTreeDev: Review Agent Messages** lists every pending request
+   for bulk approve/deny. Saying "approved" in the agent's chat doesn't release it.
 
-Once approved, the message is typed into the target session after its current turn ends.
+Once approved, the message is typed into the target session after its current turn ends (right away if it's
+idle). Messages to a worktree that's been archived or deleted expire.
 
 **Status colours** show on the worktree folders in the Explorer and on the roster glyphs:
 🔵 working · 🟡 your turn · 🟣 waiting on review · 🔹 PR ready · 🟢 done · 🔴 stopped.

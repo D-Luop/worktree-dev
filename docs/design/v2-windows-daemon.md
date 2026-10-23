@@ -293,8 +293,8 @@ the daemon, so the approval rule applies equally to them.
 **"Always ask" is enforced in two layers:**
 1. **The daemon (the guarantee).** `fleet_send` never delivers anything directly. It creates a
    *pending* message and returns `pending_approval` to the sender. The extension raises an approval
-   prompt (a notification, plus a badge on the sender's row) showing sender → target, the full text,
-   and **Send · Edit & send · Deny**. Only the user's click releases it. This holds in every Claude
+   prompt (a notification, a status-bar item and Fleet view badge that stay until it's decided, and a
+   badge on the sender's row) showing sender → target, the full text, and **Approve · Edit · Deny**. Only the user's click releases it. This holds in every Claude
    permission mode (`auto`, `bypassPermissions`), and whether the agent uses the MCP tool or the CLI,
    because there is no other path into another session.
 2. **The agent (good behaviour).** The seeded `CLAUDE.md` tells agents to propose a cross-worktree
