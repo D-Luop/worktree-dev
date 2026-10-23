@@ -352,9 +352,17 @@ Since Phase 4 (2026-10-05):
   `wtd ticket link`). `sync` renders the issue, its comments, the closing PRs and the branch's PR, with
   reviews and inline review threads, to `.claude-ticket.md`, writing only on a change. The daemon
   re-syncs live worktrees every 300 s.
-- **Customizations** (`custom.rs`): `.wtd/custom/` plus `repos/<slug>/` layers of skills, tools (on the
-  session's PATH and its shell's), a CLAUDE.md block between markers (re-synced on each open), and
-  `hooks.json`, merged into `.claude/settings.json` and tracked so a re-apply replaces it.
+- **Presets** (`custom.rs`): layers built-in → `.wtd/custom/` → `platforms/<os>/` → `repos/<slug>/` →
+  `repos/<slug>/platforms/<os>/`. Directory items (skills, agents, commands, rules) merge by name,
+  are copied for Claude (`.claude/…`) and, for skills, Codex (`.agents/skills`), recorded in
+  `.claude/.wtd-custom.json` so stale copies are removed, skipped when the repo tracks the path, and
+  hidden via anchored `info/exclude` lines. A `disabled` file drops items (including built-ins).
+  CLAUDE.md gets a marked block; Codex gets `AGENTS.override.md` (repo AGENTS.md + block + a pointer
+  to CLAUDE.md). `hooks.json` is merged into `.claude/settings.json` and tracked so a re-apply
+  replaces it. Tools go on the session's PATH.
+- **Preset proposals** (`proposal.rs`): MCP `preset_propose` stores a pending change under
+  `.wtd/state/preset-proposals/`; the extension asks the user (with a diff) and `wtd custom
+  accept|reject` applies or drops it. Paths are limited to preset kinds; tools can't be proposed.
 
 What changed from the plan while building Phases 1–3:
 

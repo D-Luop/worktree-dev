@@ -1,4 +1,5 @@
-//! Claude account discovery + live 5h/7d usage (the endpoint the `/usage` panel uses; zero tokens).
+//! Claude and Codex account discovery + live 5h/7d usage (the endpoints Claude's `/usage` and Codex's
+//! `/status` use; zero tokens).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -38,7 +39,7 @@ fn read_json(p: &Path) -> Option<Value> {
 /// Fetch every account. `last` keeps the previous good result per account so a failed fetch (429,
 /// offline, expired token) shows the last known numbers (with their old `ts`) rather than nothing.
 pub fn fetch_all(home: &Path, last: &mut HashMap<String, Account>, now: i64) -> Vec<Account> {
-    account_dirs(home)
+    let mut all: Vec<Account> = account_dirs(home)
         .into_iter()
         .map(|a| {
             let email = read_json(&a.json)
@@ -48,7 +49,7 @@ pub fn fetch_all(home: &Path, last: &mut HashMap<String, Account>, now: i64) -> 
                 .and_then(|j| j.pointer("/claudeAiOauth/accessToken").and_then(Value::as_str).map(String::from));
             if let Some(tok) = token {
                 if let Some((five, seven)) = fetch(&tok) {
-                    let acct = Account { name: a.name.clone(), email, five_hour: Some(five), seven_day: Some(seven), ts: now, nologin: false };
+                    let acct = Account { name: a.name.clone(), email, five_hour: Some(five), seven_day: Some(seven), ts: now, nologin: false, provider: "claude".into() };
                     last.insert(a.name, acct.clone());
                     return acct;
                 }
@@ -57,16 +58,80 @@ pub fn fetch_all(home: &Path, last: &mut HashMap<String, Account>, now: i64) -> 
                 return Account { email: if email.is_empty() { prev.email.clone() } else { email }, ..prev.clone() };
             }
             from_statusline_file(&a.dir, &a.name, &email)
-                .unwrap_or(Account { name: a.name, nologin: email.is_empty(), email, ..Default::default() })
+                .unwrap_or(Account { name: a.name, nologin: email.is_empty(), email, provider: "claude".into(), ..Default::default() })
         })
-        .collect()
+        .collect();
+    all.extend(codex_dirs(home).into_iter().map(|(name, dir)| {
+            let key = format!("codex:{name}");
+            if let Some(acct) = fetch_codex(&dir, &key, now) {
+                last.insert(key, acct.clone());
+                return acct;
+            }
+            let logged_in = dir.join("auth.json").is_file();
+            last.get(&key).cloned().filter(|_| logged_in)
+                .unwrap_or(Account { name: key, nologin: !logged_in, provider: "codex".into(), ..Default::default() })
+    }));
+    all
+}
+
+/// The default Codex login (`~/.codex`, when it has one) plus every `~/.codex-accounts/<name>`.
+fn codex_dirs(home: &Path) -> Vec<(String, PathBuf)> {
+    let mut v = vec![];
+    if home.join(".codex").join("auth.json").is_file() {
+        v.push(("default".to_string(), home.join(".codex")));
+    }
+    let mut extra: Vec<(String, PathBuf)> = std::fs::read_dir(home.join(".codex-accounts")).into_iter().flatten().flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| (e.file_name().to_string_lossy().to_string(), e.path()))
+        .collect();
+    extra.sort();
+    v.extend(extra);
+    v
+}
+
+/// Live ChatGPT-plan usage for a Codex home: its primary (5h) and secondary (weekly) windows.
+fn fetch_codex(dir: &Path, name: &str, now: i64) -> Option<Account> {
+    let auth = read_json(&dir.join("auth.json"))?;
+    let token = auth.pointer("/tokens/access_token")?.as_str()?;
+    let mut req = ureq::get("https://chatgpt.com/backend-api/wham/usage")
+        .set("Authorization", &format!("Bearer {token}"))
+        .set("User-Agent", "codex_cli_rs")
+        .timeout(Duration::from_secs(10));
+    if let Some(acct) = auth.pointer("/tokens/account_id").and_then(Value::as_str) {
+        req = req.set("ChatGPT-Account-Id", acct);
+    }
+    let j: Value = serde_json::from_str(&req.call().ok()?.into_string().ok()?).ok()?;
+    let (five, seven) = codex_limits(&j);
+    if five.is_none() && seven.is_none() {
+        return None;
+    }
+    Some(Account {
+        name: name.into(),
+        email: j.get("email").and_then(Value::as_str).unwrap_or_default().into(),
+        five_hour: five,
+        seven_day: seven,
+        ts: now,
+        nologin: false,
+        provider: "codex".into(),
+    })
+}
+
+/// `rate_limit.{primary,secondary}_window` → (≤1-day window, longer window).
+fn codex_limits(j: &Value) -> (Option<Limit>, Option<Limit>) {
+    let (mut short, mut long) = (None, None);
+    for k in ["primary_window", "secondary_window"] {
+        let Some(w) = j.pointer(&format!("/rate_limit/{k}")).filter(|w| w.is_object()) else { continue };
+        let lim = Limit { used: w.get("used_percent").and_then(Value::as_f64).map(f64::round), resets_at: w.get("reset_at").and_then(Value::as_i64).unwrap_or(0) };
+        if w.get("limit_window_seconds").and_then(Value::as_i64).unwrap_or(0) <= 86_400 { short = Some(lim) } else { long = Some(lim) }
+    }
+    (short, long)
 }
 
 /// Live usage for one account config dir (Claude), or None without a login / on failure.
 pub fn fetch_dir(dir: &Path) -> Option<Account> {
     let token = read_json(&dir.join(".credentials.json"))?.pointer("/claudeAiOauth/accessToken")?.as_str()?.to_string();
     let (five, seven) = fetch(&token)?;
-    Some(Account { name: String::new(), email: String::new(), five_hour: Some(five), seven_day: Some(seven), ts: 0, nologin: false })
+    Some(Account { name: String::new(), email: String::new(), five_hour: Some(five), seven_day: Some(seven), ts: 0, nologin: false, provider: "claude".into() })
 }
 
 fn fetch(token: &str) -> Option<(Limit, Limit)> {
@@ -107,6 +172,7 @@ fn from_statusline_file(dir: &Path, name: &str, email: &str) -> Option<Account> 
         seven_day: seven,
         ts: j.get("ts").and_then(Value::as_i64).unwrap_or(0),
         nologin: false,
+        provider: "claude".into(),
     })
 }
 
@@ -145,7 +211,17 @@ pub fn parse_rfc3339(s: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_rfc3339;
+    use super::{codex_limits, parse_rfc3339};
+
+    #[test]
+    fn codex_windows_map_to_5h_and_7d() {
+        let j: serde_json::Value = serde_json::from_str(r#"{"rate_limit":{"primary_window":{"used_percent":19,"limit_window_seconds":18000,"reset_at":5},
+            "secondary_window":{"used_percent":6.4,"limit_window_seconds":604800,"reset_at":9}}}"#).unwrap();
+        let (f, s) = codex_limits(&j);
+        assert_eq!((f.as_ref().unwrap().used, f.unwrap().resets_at), (Some(19.0), 5));
+        assert_eq!(s.unwrap().used, Some(6.0));
+        assert_eq!(codex_limits(&serde_json::json!({})), (None, None));
+    }
 
     #[test]
     fn rfc3339() {
