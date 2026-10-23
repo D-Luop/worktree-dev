@@ -1,0 +1,5 @@
+{
+  "editor.fontSize": 13,
+  "terminal.integrated.tabs.title": "${process}",
+  "workbench.colorTheme": "Default Dark Modern"
+}
