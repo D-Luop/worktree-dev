@@ -1,10 +1,12 @@
 //! The tray's flyout: a Windows 11-style panel opened from the notification-area icon. Daemon state
-//! and controls, per-account usage, and the sessions grouped by repo.
+//! and controls, per-account usage, and the sessions grouped by repo. "New session" swaps the list
+//! for an inline form (flyout_new.rs holds its rules); Create runs in the background.
 //!
 //! Drawn into a 32-bit DIB: shapes (buttons, bars, status dots) are antialiased per pixel here, then
 //! GDI draws ClearType text on top. Lives on the tray's UI thread.
 
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
@@ -13,12 +15,15 @@ use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_ESCAPE};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyState, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_F4, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+};
 use windows_sys::Win32::UI::Shell::{Shell_NotifyIconGetRect, NOTIFYICONIDENTIFIER};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use wtd_core::model::{Account, Worktree, WorktreeKind};
 use wtd_core::status::Status;
 
+use crate::flyout_new::{self as new, Choice, Field, Form, IssueOpt, Kind, PlatformOpt, RepoOpt};
 use crate::frontend::{self, Frontend};
 use crate::{paths, tray, win};
 
@@ -31,8 +36,19 @@ const BTN_H: f32 = 24.0;
 const FOOT_BTN_H: f32 = 28.0;
 const BAR_H: f32 = 4.0;
 const MAX_ACCOUNTS: usize = 4;
-// winuser.h; windows-sys files it under UI::Controls
+// winuser.h; windows-sys files these under UI::Controls
 const WM_MOUSELEAVE: u32 = 0x02A3;
+const EM_SETSEL: u32 = 0x00B1;
+// the New Session form
+const LABEL_H: f32 = 18.0;
+const FIELD_H: f32 = 28.0;
+const NOTE_H: f32 = 15.0;
+const FIELD_GAP: f32 = 6.0;
+/// a worker thread's result (lparam: Box<Bg>)
+const WM_BG: u32 = WM_APP + 20;
+/// Tab / Enter / Esc pressed in a text field (wparam: key, lparam: shift held)
+const WM_FORM_KEY: u32 = WM_APP + 21;
+const SPIN_TIMER: usize = 1;
 
 const MI_OPEN: usize = 1; // + index into Frontend::ALL
 const MI_STOP: usize = 10;
@@ -66,6 +82,10 @@ struct Theme {
     track: Rgb,
     accent: Rgb,
     on_accent: Rgb,
+    field: Rgb,
+    border: Rgb,
+    danger: Rgb,
+    warn: Rgb,
 }
 
 fn theme(dark: bool) -> Theme {
@@ -81,6 +101,10 @@ fn theme(dark: bool) -> Theme {
             track: Rgb(0x3a, 0x3a, 0x3a),
             accent: Rgb(0x4a, 0xa3, 0xff),
             on_accent: Rgb(0x0b, 0x1a, 0x2b),
+            field: Rgb(0x2c, 0x2c, 0x2c),
+            border: Rgb(0x45, 0x45, 0x45),
+            danger: Rgb(0xff, 0x99, 0xa4),
+            warn: Rgb(0xfc, 0xe1, 0x00),
         }
     } else {
         Theme {
@@ -94,6 +118,10 @@ fn theme(dark: bool) -> Theme {
             track: Rgb(0xe0, 0xe0, 0xe0),
             accent: Rgb(0x00, 0x67, 0xc0),
             on_accent: Rgb(0xff, 0xff, 0xff),
+            field: Rgb(0xff, 0xff, 0xff),
+            border: Rgb(0xd0, 0xd0, 0xd0),
+            danger: Rgb(0xc4, 0x2b, 0x1c),
+            warn: Rgb(0x9d, 0x5d, 0x00),
         }
     }
 }
@@ -131,6 +159,14 @@ enum Act {
     Row(String),
     New,
     Gear,
+    // the New Session form
+    Back,
+    Wizard,
+    Focus(Field),
+    Select(Field),
+    Kind(Kind),
+    Prefix(usize),
+    Create,
 }
 
 /// x0, y0, x1, y1 in DIP; rounded only once scaled to device pixels.
@@ -147,6 +183,8 @@ struct Hit {
 enum Op {
     Round { x0: f32, y0: f32, x1: f32, y1: f32, r: f32, c: Rgb, clip: bool },
     Ring { cx: f32, cy: f32, r: f32, t: f32, c: Rgb, clip: bool },
+    /// part of a ring: `sweep` radians clockwise from `start`
+    Arc { cx: f32, cy: f32, r: f32, t: f32, c: Rgb, start: f32, sweep: f32 },
     Text { r: Rf, s: String, font: Font, c: Rgb, flags: u32, clip: bool },
 }
 
@@ -174,6 +212,31 @@ struct Fly {
     /// when it last closed by losing focus: a click on the tray icon closes it first, so don't reopen
     closed_at: Instant,
     tracking: bool,
+    /// the New Session form, while it replaces the list
+    nv: Option<NewView>,
+    /// the text fields' background (WM_CTLCOLOREDIT)
+    field_brush: HBRUSH,
+    /// the repo the last Create used, preselected next time
+    last_repo: Option<String>,
+}
+
+struct NewView {
+    form: Form,
+    focus: Field,
+    name_edit: HWND,
+    prompt_edit: HWND,
+    /// each field's box, from the last layout
+    boxes: Vec<(Field, Rf)>,
+    spin: f32,
+}
+
+/// Results from the form's worker threads.
+enum Bg {
+    Repos(Vec<RepoOpt>),
+    Platforms(Vec<PlatformOpt>),
+    Branches(String, Result<Vec<String>, String>),
+    Issues(String, Result<Vec<IssueOpt>, String>),
+    Created(String, Result<(), String>, Option<Frontend>),
 }
 
 thread_local! {
@@ -200,11 +263,19 @@ pub fn toggle() {
 
 /// The fleet or daemon state changed: redraw (and resize) if open.
 pub fn refresh() {
-    let hwnd = FLY.with(|f| f.borrow().as_ref().map(|f| f.hwnd));
+    let hwnd = FLY.with(|f| {
+        let mut b = f.borrow_mut();
+        let f = b.as_mut()?;
+        if let Some(nv) = f.nv.as_mut() {
+            nv.form.existing = tray::FLEET.lock().unwrap().iter().map(|w| w.id.clone()).collect();
+        }
+        Some(f.hwnd)
+    });
     if let Some(h) = hwnd {
         if unsafe { IsWindowVisible(h) } != 0 {
             place();
             unsafe { InvalidateRect(h, std::ptr::null(), 0) };
+            sync_edits();
         }
     }
 }
@@ -212,16 +283,21 @@ pub fn refresh() {
 // Win32 calls that move, show or hide the window can deliver messages to wndproc synchronously, so
 // none of them run while FLY is borrowed.
 
+/// Closing drops an unsubmitted New Session form, as Windows' own flyouts do; one that's creating
+/// stays, to show its outcome.
 fn hide() {
     let hwnd = FLY.with(|f| {
         let mut b = f.try_borrow_mut().ok()?;
         let f = b.as_mut()?;
         f.closed_at = Instant::now();
         f.hover = None;
-        Some(f.hwnd)
+        Some((f.hwnd, f.nv.as_ref().is_some_and(|nv| !nv.form.busy)))
     });
-    if let Some(h) = hwnd {
+    if let Some((h, drop_form)) = hwnd {
         unsafe { ShowWindow(h, SW_HIDE) };
+        if drop_form {
+            leave_form(h);
+        }
     }
 }
 
@@ -238,7 +314,7 @@ fn create() -> bool {
             ..std::mem::zeroed()
         };
         RegisterClassW(&wc);
-        let hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, class.as_ptr(), win::wide("WorkTreeDev").as_ptr(), WS_POPUP,
+        let hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, class.as_ptr(), win::wide("WorkTreeDev").as_ptr(), WS_POPUP | WS_CLIPCHILDREN,
             0, 0, 10, 10, std::ptr::null_mut(), std::ptr::null_mut(), hinst, std::ptr::null());
         if hwnd.is_null() {
             return false;
@@ -260,6 +336,9 @@ fn create() -> bool {
                 height: 0.0,
                 closed_at: Instant::now() - Duration::from_secs(1),
                 tracking: false,
+                nv: None,
+                field_brush: std::ptr::null_mut(),
+                last_repo: None,
             })
         });
         true
@@ -287,6 +366,10 @@ fn show() {
                 f.dark = dark;
                 f.icon_face = pick_face("Segoe Fluent Icons", "Segoe MDL2 Assets");
                 f.fonts = make_fonts(scale, pick_face("Segoe UI Variable Text", "Segoe UI"), f.icon_face);
+                if !f.field_brush.is_null() {
+                    DeleteObject(f.field_brush);
+                }
+                f.field_brush = CreateSolidBrush(theme(dark).field.cref());
             }
             f.scroll = 0.0;
         });
@@ -294,6 +377,7 @@ fn show() {
         ShowWindow(hwnd, SW_SHOW);
         SetForegroundWindow(hwnd);
         InvalidateRect(hwnd, std::ptr::null(), 0);
+        sync_edits();
     }
 }
 
@@ -446,6 +530,13 @@ fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Rf {
 
 /// Everything to draw, in DIP; the hit areas; and the full content height (unscrolled).
 fn layout(f: &mut Fly, t: &Theme) -> (Vec<Op>, Vec<Hit>, f32) {
+    if f.nv.is_some() {
+        return layout_form(f, t);
+    }
+    layout_list(f, t)
+}
+
+fn layout_list(f: &mut Fly, t: &Theme) -> (Vec<Op>, Vec<Hit>, f32) {
     let d = data();
     let mut ops = vec![];
     let mut hits = vec![];
@@ -613,6 +704,182 @@ fn layout(f: &mut Fly, t: &Theme) -> (Vec<Op>, Vec<Hit>, f32) {
     (ops, hits, content)
 }
 
+fn field_label(form: &Form, fld: Field) -> &'static str {
+    match fld {
+        Field::Repo => "Repository",
+        Field::Kind => "Kind",
+        Field::Name if form.kind == Kind::Plan => "Plan name",
+        Field::Name => "Branch name",
+        Field::Base => "Base",
+        Field::Platform => "Platform",
+        Field::Account => "Account",
+        Field::Issue => "Issue (optional)",
+        Field::Prompt => "First prompt (optional)",
+        Field::Open => "Open after create",
+    }
+}
+
+/// The New Session form: header, fields with their inline notes, Create / Cancel.
+fn layout_form(f: &mut Fly, t: &Theme) -> (Vec<Op>, Vec<Hit>, f32) {
+    let mut ops = vec![];
+    let mut hits = vec![];
+    let mut boxes = vec![];
+    let nv = f.nv.as_ref().unwrap();
+    let form = &nv.form;
+    let hov = |a: &Act| f.hover.as_ref() == Some(a);
+    let right = WIDTH - PAD;
+    let txt = |ops: &mut Vec<Op>, r: Rf, s: &str, font: Font, c: Rgb, flags: u32| {
+        ops.push(Op::Text { r, s: s.into(), font, c, flags: flags | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX, clip: false });
+    };
+    let round = |ops: &mut Vec<Op>, r: Rf, rad: f32, c: Rgb| ops.push(Op::Round { x0: r.0, y0: r.1, x1: r.2, y1: r.3, r: rad, c, clip: false });
+    // a field's box: a 1px border, or a 2px accent ring when focused
+    let field_box = |ops: &mut Vec<Op>, r: Rf, focused: bool, fill: Rgb| {
+        let w = if focused { 2.0 } else { 1.0 };
+        round(ops, r, 4.0, if focused { t.accent } else { t.border });
+        round(ops, rect(r.0 + w, r.1 + w, r.2 - w, r.3 - w), 4.0 - w, fill);
+    };
+
+    // header: ← New session ······ VS Code wizard
+    let y = 8.0;
+    let act = Act::Back;
+    if hov(&act) {
+        round(&mut ops, rect(PAD - 6.0, y, PAD + 18.0, y + 24.0), 4.0, t.hover);
+    }
+    txt(&mut ops, rect(PAD - 6.0, y, PAD + 18.0, y + 24.0), "\u{E72B}", Font::Icon, t.text, DT_CENTER);
+    hits.push(Hit { r: rect(PAD - 6.0, y, PAD + 18.0, y + 24.0), act, in_list: false });
+    txt(&mut ops, rect(PAD + 24.0, y, right, y + 24.0), "New session", Font::Title, t.text, DT_LEFT);
+    let link = "VS Code wizard";
+    let lw = text_width(f, Font::Small, link) + 16.0;
+    let act = Act::Wizard;
+    if hov(&act) {
+        round(&mut ops, rect(right - lw - 4.0, y + 2.0, right + 4.0, y + 22.0), 4.0, t.hover);
+    }
+    txt(&mut ops, rect(right - lw, y, right - 14.0, y + 24.0), link, Font::Small, t.accent, DT_RIGHT);
+    txt(&mut ops, rect(right - 12.0, y, right, y + 24.0), "\u{E8A7}", Font::Icon, t.accent, DT_CENTER);
+    hits.push(Hit { r: rect(right - lw - 4.0, y + 2.0, right + 4.0, y + 22.0), act, in_list: false });
+    let mut y = y + 24.0 + 6.0;
+
+    let notes = form.notes();
+    let fields = form.fields();
+    let mut i = 0;
+    while i < fields.len() {
+        // Base and Platform share a row
+        let row: Vec<Field> = if fields[i] == Field::Base && fields.get(i + 1) == Some(&Field::Platform) { vec![Field::Base, Field::Platform] } else { vec![fields[i]] };
+        i += row.len();
+        let col_w = (right - PAD - 8.0 * (row.len() - 1) as f32) / row.len() as f32;
+        for (c, &fld) in row.iter().enumerate() {
+            let x0 = PAD + c as f32 * (col_w + 8.0);
+            let x1 = x0 + col_w;
+            let focused = nv.focus == fld;
+            if fld != Field::Kind {
+                txt(&mut ops, rect(x0, y, x1, y + LABEL_H - 2.0), field_label(form, fld), Font::Small, t.muted, DT_LEFT);
+            }
+            // prefix chips on the branch name's label row
+            if fld == Field::Name && form.kind == Kind::Branch {
+                let mut cx = x1;
+                for (k, p) in new::PREFIXES.iter().enumerate().rev() {
+                    let w = text_width(f, Font::Small, p) + 12.0;
+                    let r = rect(cx - w, y - 1.0, cx, y + LABEL_H - 3.0);
+                    let act = Act::Prefix(k);
+                    let on = form.name.starts_with(p);
+                    round(&mut ops, r, 7.0, if on { t.accent } else if hov(&act) { t.button_hover } else { t.button });
+                    txt(&mut ops, r, p, Font::Small, if on { t.on_accent } else { t.text }, DT_CENTER);
+                    hits.push(Hit { r, act, in_list: false });
+                    cx -= w + 4.0;
+                }
+            }
+            let by = if fld == Field::Kind { y } else { y + LABEL_H };
+            let r = rect(x0, by, x1, by + FIELD_H);
+            boxes.push((fld, r));
+            match fld {
+                Field::Kind => {
+                    let sw = (x1 - x0) / Kind::ALL.len() as f32;
+                    field_box(&mut ops, r, focused, t.button);
+                    for (k, kind) in Kind::ALL.into_iter().enumerate() {
+                        let sr = rect(x0 + k as f32 * sw, by, x0 + (k + 1) as f32 * sw, by + FIELD_H);
+                        let act = Act::Kind(kind);
+                        let on = form.kind == kind;
+                        let inset = rect(sr.0 + 3.0, sr.1 + 3.0, sr.2 - 3.0, sr.3 - 3.0);
+                        if on {
+                            round(&mut ops, inset, 3.0, t.accent);
+                        } else if hov(&act) {
+                            round(&mut ops, inset, 3.0, t.button_hover);
+                        }
+                        txt(&mut ops, sr, kind.label(), Font::Body, if on { t.on_accent } else { t.text }, DT_CENTER);
+                        hits.push(Hit { r: sr, act, in_list: false });
+                    }
+                }
+                // native EDITs sit inside these (sync_edits); a click on the padding focuses them
+                Field::Name | Field::Prompt => {
+                    field_box(&mut ops, r, focused, t.field);
+                    hits.push(Hit { r, act: Act::Focus(fld), in_list: false });
+                }
+                _ => {
+                    let act = Act::Select(fld);
+                    field_box(&mut ops, r, focused, if hov(&act) { t.button_hover } else { t.field });
+                    let value = form.value_text(fld);
+                    let quiet = value.starts_with("None") || value.starts_with("Loading");
+                    ops.push(Op::Text { r: rect(x0 + 9.0, by, x1 - 26.0, by + FIELD_H), s: value, font: Font::Body, c: if quiet { t.muted } else { t.text },
+                        flags: DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX, clip: false });
+                    txt(&mut ops, rect(x1 - 24.0, by, x1 - 8.0, by + FIELD_H), "\u{E70D}", Font::Icon, t.muted, DT_CENTER);
+                    hits.push(Hit { r, act, in_list: false });
+                }
+            }
+        }
+        y += if row[0] == Field::Kind { FIELD_H } else { LABEL_H + FIELD_H };
+        for n in notes.iter().filter(|n| row.contains(&n.field)) {
+            ops.push(Op::Text { r: rect(PAD, y + 1.0, right, y + 1.0 + NOTE_H), s: n.text.clone(), font: Font::Small, c: if n.warn { t.warn } else { t.danger },
+                flags: DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX, clip: false });
+            y += NOTE_H;
+        }
+        y += FIELD_GAP;
+    }
+
+    // a failed Create: the error, wrapped
+    if let Some(e) = &form.error {
+        let lines = (text_width(f, Font::Small, e) / (right - PAD - 4.0)).ceil().clamp(1.0, 4.0);
+        let h = lines * NOTE_H;
+        ops.push(Op::Text { r: rect(PAD, y, right, y + h), s: e.clone(), font: Font::Small, c: t.danger, flags: DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX, clip: false });
+        y += h + FIELD_GAP;
+    }
+
+    // footer: Create · Cancel
+    ops.push(Op::Round { x0: 0.0, y0: y, x1: WIDTH, y1: y + 1.0, r: 0.0, c: t.divider, clip: false });
+    let y = y + 1.0 + 8.0;
+    let cancel_w = 76.0;
+    let cx1 = right - cancel_w - 6.0;
+    let act = Act::Create;
+    let enabled = form.can_create();
+    let lit = enabled || form.busy;
+    let mut accent = t.accent;
+    if hov(&act) && enabled {
+        accent = Rgb(accent.0.saturating_add(18), accent.1.saturating_add(18), accent.2.saturating_add(18));
+    }
+    round(&mut ops, rect(PAD, y, cx1, y + FOOT_BTN_H), 4.0, if lit { accent } else { t.button });
+    let fg = if lit { t.on_accent } else { t.muted };
+    let label = if form.busy { "Creating…" } else if form.exists() { "Open" } else { "Create" };
+    let lw = text_width(f, Font::Body, label);
+    let lx = PAD + (cx1 - PAD - lw) / 2.0 + if form.busy { 9.0 } else { 0.0 };
+    if form.busy {
+        ops.push(Op::Arc { cx: lx - 12.0, cy: y + FOOT_BTN_H / 2.0, r: 5.5, t: 1.6, c: fg, start: nv.spin, sweep: 4.4 });
+    }
+    txt(&mut ops, rect(lx, y, lx + lw + 4.0, y + FOOT_BTN_H), label, Font::Body, fg, DT_LEFT);
+    if enabled {
+        hits.push(Hit { r: rect(PAD, y, cx1, y + FOOT_BTN_H), act, in_list: false });
+    }
+    let act = Act::Back;
+    let r = rect(right - cancel_w, y, right, y + FOOT_BTN_H);
+    round(&mut ops, r, 4.0, if hov(&act) { t.button_hover } else { t.button });
+    txt(&mut ops, r, "Cancel", Font::Body, t.text, DT_CENTER);
+    hits.push(Hit { r, act, in_list: false });
+    let content = y + FOOT_BTN_H + 10.0;
+
+    f.nv.as_mut().unwrap().boxes = boxes;
+    f.list = (0.0, content);
+    f.max_scroll = 0.0;
+    (ops, hits, content)
+}
+
 // --- painting ---------------------------------------------------------------------------------------
 
 /// Blend `c` at `cov` (0..1) into a BGRA pixel.
@@ -659,6 +926,21 @@ impl Canvas<'_> {
             }
         }
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn arc(&mut self, cx: f32, cy: f32, r: f32, t: f32, c: Rgb, start: f32, sweep: f32) {
+        let e = r + t;
+        for y in ((cy - e).floor() as i32).max(0)..((cy + e).ceil() as i32).min(self.h) {
+            for x in ((cx - e).floor() as i32).max(0)..((cx + e).ceil() as i32).min(self.w) {
+                let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+                if (dy.atan2(dx) - start).rem_euclid(std::f32::consts::TAU) > sweep {
+                    continue;
+                }
+                let d = (dx * dx + dy * dy).sqrt();
+                blend(&mut self.px[(y * self.w + x) as usize], c, (0.5 - ((d - r).abs() - t / 2.0)).clamp(0.0, 1.0));
+            }
+        }
+    }
 }
 
 unsafe fn paint(hwnd: HWND) {
@@ -691,6 +973,7 @@ unsafe fn paint(hwnd: HWND) {
             match *op {
                 Op::Round { x0, y0, x1, y1, r, c, clip } => cv.round(x0 * s, y0 * s, x1 * s, y1 * s, r * s, c, clip),
                 Op::Ring { cx, cy, r, t, c, clip } => cv.ring(cx * s, cy * s, r * s, t * s, c, clip),
+                Op::Arc { cx, cy, r, t, c, start, sweep } => cv.arc(cx * s, cy * s, r * s, t * s, c, start, sweep),
                 Op::Text { .. } => {}
             }
         }
@@ -750,8 +1033,58 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             0
         }
+        WM_KEYDOWN | WM_FORM_KEY if FLY.with(|f| f.try_borrow().ok().is_some_and(|f| f.as_ref().is_some_and(|f| f.nv.is_some()))) => {
+            let shift = if msg == WM_FORM_KEY { lp != 0 } else { GetKeyState(VK_SHIFT as i32) < 0 };
+            form_key(hwnd, wp as u16, shift);
+            0
+        }
         WM_KEYDOWN if wp as u16 == VK_ESCAPE => {
             hide();
+            0
+        }
+        WM_COMMAND => {
+            let code = (wp >> 16) as u32 & 0xffff;
+            let edit = lp as HWND;
+            if code == EN_CHANGE || code == EN_SETFOCUS {
+                let text = (code == EN_CHANGE).then(|| edit_text(edit));
+                let hit = with_form(|nv| {
+                    let fld = if edit == nv.name_edit { Field::Name } else if edit == nv.prompt_edit { Field::Prompt } else { return false };
+                    match text {
+                        Some(s) if fld == Field::Name => nv.form.name = s,
+                        Some(s) => nv.form.prompt = s,
+                        None => nv.focus = fld,
+                    }
+                    true
+                });
+                if hit == Some(true) {
+                    refresh_form(hwnd);
+                }
+            }
+            0
+        }
+        WM_CTLCOLOREDIT => {
+            let colors = FLY.with(|fl| {
+                let b = fl.try_borrow().ok()?;
+                let f = b.as_ref()?;
+                let t = theme(f.dark);
+                Some((t.text, t.field, f.field_brush))
+            });
+            match colors {
+                Some((fg, bg, brush)) => {
+                    SetTextColor(wp as HDC, fg.cref());
+                    SetBkColor(wp as HDC, bg.cref());
+                    brush as LRESULT
+                }
+                None => DefWindowProcW(hwnd, msg, wp, lp),
+            }
+        }
+        WM_TIMER if wp == SPIN_TIMER => {
+            with_form(|nv| nv.spin = (nv.spin + 0.3) % std::f32::consts::TAU);
+            InvalidateRect(hwnd, std::ptr::null(), 0);
+            0
+        }
+        WM_BG => {
+            on_bg(hwnd, *Box::from_raw(lp as *mut Bg));
             0
         }
         WM_MOUSEMOVE => {
@@ -826,12 +1159,387 @@ fn run(hwnd: HWND, act: Act, right_click: bool) {
                 _ => {}
             }
         }
-        Act::New => {
-            hide();
-            std::thread::spawn(move || tray::report(paths::dev_root().and_then(|dev| frontend::new_session(&dev, def)), &format!("start a session in {}", def.label())));
-        }
+        Act::New => open_form(hwnd),
         Act::Gear => gear_menu(hwnd, def),
+        Act::Back => leave_form(hwnd),
+        Act::Wizard => {
+            leave_form(hwnd);
+            hide();
+            std::thread::spawn(|| tray::report(paths::dev_root().and_then(|dev| frontend::new_session(&dev, Frontend::VsCode)), "open the VS Code wizard"));
+        }
+        Act::Focus(f) => focus_field(hwnd, f),
+        Act::Select(f) => open_select(hwnd, f),
+        Act::Kind(k) => set_kind(hwnd, k),
+        Act::Prefix(i) => {
+            with_form(|nv| nv.form.set_prefix(new::PREFIXES[i]));
+            refresh_form(hwnd);
+            focus_field(hwnd, Field::Name);
+        }
+        Act::Create => submit(hwnd),
     }
+}
+
+// --- the New Session form ---------------------------------------------------------------------------
+//
+// Win32 calls that send messages back to wndproc (SetFocus, SetWindowText, DestroyWindow, menus) run
+// with FLY released, as above.
+
+fn post(hwnd: isize, bg: Bg) {
+    let p = Box::into_raw(Box::new(bg));
+    if unsafe { PostMessageW(hwnd as HWND, WM_BG, 0, p as LPARAM) } == 0 {
+        drop(unsafe { Box::from_raw(p) });
+    }
+}
+
+fn spawn_bg(hwnd: HWND, work: impl FnOnce() -> Bg + Send + 'static) {
+    let h = hwnd as isize;
+    std::thread::spawn(move || post(h, work()));
+}
+
+/// Swap the session list for the form; its lists load in the background.
+fn open_form(hwnd: HWND) {
+    let Ok(dev) = paths::dev_root() else { return };
+    let usage = tray::ACCOUNTS.lock().unwrap().clone();
+    let existing = tray::FLEET.lock().unwrap().iter().map(|w| w.id.clone()).collect();
+    let form = Form::new(frontend::default_frontend(&dev), new::accounts(&usage), existing);
+    let (name_edit, prompt_edit) = unsafe { (make_edit(hwnd), make_edit(hwnd)) };
+    FLY.with(|fl| {
+        if let Some(f) = fl.borrow_mut().as_mut() {
+            f.nv = Some(NewView { form, focus: Field::Name, name_edit, prompt_edit, boxes: vec![], spin: 0.0 });
+            f.hover = None;
+            f.scroll = 0.0;
+        }
+    });
+    spawn_bg(hwnd, move || Bg::Repos(new::load_repos(&dev)));
+    spawn_bg(hwnd, || Bg::Platforms(new::load_platforms()));
+    refresh_form(hwnd);
+    focus_field(hwnd, Field::Name);
+}
+
+/// Back to the session list.
+fn leave_form(hwnd: HWND) {
+    let nv = FLY.with(|fl| {
+        let mut b = fl.try_borrow_mut().ok()?;
+        let f = b.as_mut()?;
+        f.hover = None;
+        f.nv.take()
+    });
+    if let Some(nv) = nv {
+        unsafe {
+            KillTimer(hwnd, SPIN_TIMER);
+            SetFocus(hwnd);
+            DestroyWindow(nv.name_edit);
+            DestroyWindow(nv.prompt_edit);
+        }
+        refresh();
+    }
+}
+
+fn refresh_form(hwnd: HWND) {
+    place();
+    unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
+    sync_edits();
+}
+
+/// A borderless EDIT, subclassed so Tab / Enter / Esc drive the form.
+unsafe fn make_edit(parent: HWND) -> HWND {
+    let h = CreateWindowExW(0, win::wide("EDIT").as_ptr(), win::wide("").as_ptr(), WS_CHILD | ES_AUTOHSCROLL as u32, 0, 0, 10, 10, parent, std::ptr::null_mut(),
+        GetModuleHandleW(std::ptr::null()), std::ptr::null());
+    let old = SetWindowLongPtrW(h, GWLP_WNDPROC, edit_proc as *const () as isize);
+    EDIT_PROC.store(old, Ordering::Relaxed);
+    h
+}
+
+/// The EDIT class's own window procedure (the same for every EDIT).
+static EDIT_PROC: AtomicIsize = AtomicIsize::new(0);
+
+unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    let key = wp as u16;
+    match msg {
+        WM_KEYDOWN if matches!(key, VK_TAB | VK_RETURN | VK_ESCAPE) => {
+            let shift = GetKeyState(VK_SHIFT as i32) < 0;
+            PostMessageW(GetParent(hwnd), WM_FORM_KEY, wp, shift as LPARAM);
+            return 0;
+        }
+        // Ctrl+A selects all (the classic EDIT doesn't); the others were handled on WM_KEYDOWN
+        WM_CHAR if wp == 1 && GetKeyState(VK_CONTROL as i32) < 0 => {
+            SendMessageW(hwnd, EM_SETSEL, 0, -1);
+            return 0;
+        }
+        WM_CHAR if matches!(wp, 9 | 10 | 13 | 27) => return 0,
+        _ => {}
+    }
+    let old: WNDPROC = std::mem::transmute(EDIT_PROC.load(Ordering::Relaxed));
+    CallWindowProcW(old, hwnd, msg, wp, lp)
+}
+
+fn edit_text(h: HWND) -> String {
+    unsafe {
+        let n = GetWindowTextLengthW(h);
+        let mut buf = vec![0u16; n as usize + 1];
+        let got = GetWindowTextW(h, buf.as_mut_ptr(), buf.len() as i32);
+        String::from_utf16_lossy(&buf[..got.max(0) as usize])
+    }
+}
+
+/// Put the EDITs over their boxes from the last layout, with the form's text and the current font.
+fn sync_edits() {
+    let Some((edits, s, font)) = FLY.with(|fl| {
+        let b = fl.try_borrow().ok()?;
+        let f = b.as_ref()?;
+        let nv = f.nv.as_ref()?;
+        let at = |fld: Field| nv.boxes.iter().find(|(x, _)| *x == fld).map(|(_, r)| *r);
+        Some(([(nv.name_edit, at(Field::Name), nv.form.name.clone()), (nv.prompt_edit, at(Field::Prompt), nv.form.prompt.clone())], f.scale, font_of(f, Font::Body)))
+    }) else {
+        return;
+    };
+    unsafe {
+        let line = {
+            let dc = GetDC(std::ptr::null_mut());
+            let old = SelectObject(dc, font);
+            let mut tm: TEXTMETRICW = std::mem::zeroed();
+            GetTextMetricsW(dc, &mut tm);
+            SelectObject(dc, old);
+            ReleaseDC(std::ptr::null_mut(), dc);
+            tm.tmHeight
+        };
+        for (h, r, text) in edits {
+            let Some(r) = r else {
+                ShowWindow(h, SW_HIDE);
+                continue;
+            };
+            SendMessageW(h, WM_SETFONT, font as WPARAM, 0);
+            let (x0, x1) = (((r.0 + 9.0) * s).round() as i32, ((r.2 - 9.0) * s).round() as i32);
+            let y = (((r.1 + r.3) / 2.0) * s).round() as i32 - line / 2;
+            SetWindowPos(h, std::ptr::null_mut(), x0, y, x1 - x0, line, SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            if edit_text(h) != text {
+                SetWindowTextW(h, win::wide(&text).as_ptr());
+                let n = text.encode_utf16().count();
+                SendMessageW(h, EM_SETSEL, n, n as LPARAM);
+            }
+        }
+    }
+}
+
+fn focus_field(hwnd: HWND, fld: Field) {
+    let edit = FLY.with(|fl| {
+        let mut b = fl.borrow_mut();
+        let nv = b.as_mut()?.nv.as_mut()?;
+        nv.focus = fld;
+        match fld {
+            Field::Name => Some(nv.name_edit),
+            Field::Prompt => Some(nv.prompt_edit),
+            _ => None,
+        }
+    });
+    unsafe {
+        match edit {
+            Some(e) => {
+                SetFocus(e);
+                let n = GetWindowTextLengthW(e) as usize;
+                SendMessageW(e, EM_SETSEL, n, n as LPARAM);
+            }
+            None => {
+                SetFocus(hwnd);
+            }
+        }
+        InvalidateRect(hwnd, std::ptr::null(), 0);
+    }
+}
+
+/// Run `f` on the open form; None when there's none.
+fn with_form<R>(f: impl FnOnce(&mut NewView) -> R) -> Option<R> {
+    FLY.with(|fl| fl.try_borrow_mut().ok()?.as_mut()?.nv.as_mut().map(f))
+}
+
+/// The repo changed: load its branches and issues.
+fn load_repo(hwnd: HWND) {
+    let Some(Some(r)) = with_form(|nv| nv.form.repo_opt().cloned()) else { return };
+    let slug = r.slug.clone();
+    spawn_bg(hwnd, move || Bg::Branches(r.slug.clone(), new::load_branches(&r.path).map_err(|e| format!("{e:#}"))));
+    spawn_bg(hwnd, move || Bg::Issues(slug.clone(), new::load_issues(&slug).map_err(|e| format!("{e:#}"))));
+}
+
+fn choose(hwnd: HWND, c: Choice) {
+    let repo_changed = with_form(|nv| {
+        let before = nv.form.repo.clone();
+        nv.form.choose(c);
+        nv.form.repo != before
+    });
+    if repo_changed == Some(true) {
+        load_repo(hwnd);
+    }
+    refresh_form(hwnd);
+}
+
+/// A select's native menu, dropped from under its box.
+fn open_select(hwnd: HWND, fld: Field) {
+    focus_field(hwnd, fld);
+    let Some((opts, Some(r), s)) = FLY.with(|fl| {
+        let b = fl.borrow();
+        let f = b.as_ref()?;
+        let nv = f.nv.as_ref()?;
+        Some((nv.form.options(fld), nv.boxes.iter().find(|(x, _)| *x == fld).map(|(_, r)| *r), f.scale))
+    }) else {
+        return;
+    };
+    let pick = unsafe {
+        let m = CreatePopupMenu();
+        for (i, o) in opts.iter().enumerate() {
+            let flags = MF_STRING | if o.enabled { 0 } else { MF_GRAYED } | if o.checked { MF_CHECKED } else { MF_UNCHECKED };
+            AppendMenuW(m, flags, i + 1, win::wide(&o.label.replace('&', "&&")).as_ptr());
+        }
+        let mut pt = POINT { x: (r.0 * s).round() as i32, y: (r.3 * s).round() as i32 + 2 };
+        ClientToScreen(hwnd, &mut pt);
+        let c = TrackPopupMenu(m, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, pt.x, pt.y, 0, hwnd, std::ptr::null());
+        DestroyMenu(m);
+        c as usize
+    };
+    if let Some(o) = pick.checked_sub(1).and_then(|i| opts.get(i)) {
+        choose(hwnd, o.choice.clone());
+    }
+}
+
+fn set_kind(hwnd: HWND, k: Kind) {
+    with_form(|nv| {
+        nv.form.set_kind(k);
+        nv.focus = Field::Kind;
+    });
+    refresh_form(hwnd);
+    focus_field(hwnd, Field::Kind);
+}
+
+fn form_key(hwnd: HWND, vk: u16, shift: bool) {
+    let Some((focus, fields, kind)) = with_form(|nv| (nv.focus, nv.form.fields(), nv.form.kind)) else { return };
+    let select = !matches!(focus, Field::Kind | Field::Name | Field::Prompt);
+    match vk {
+        VK_ESCAPE => leave_form(hwnd),
+        VK_RETURN => submit(hwnd),
+        VK_TAB => {
+            let i = fields.iter().position(|f| *f == focus).unwrap_or(0);
+            let n = fields.len();
+            focus_field(hwnd, fields[if shift { (i + n - 1) % n } else { (i + 1) % n }]);
+        }
+        VK_LEFT | VK_RIGHT | VK_UP | VK_DOWN if focus == Field::Kind => {
+            let i = Kind::ALL.iter().position(|k| *k == kind).unwrap_or(0);
+            let n = Kind::ALL.len();
+            set_kind(hwnd, Kind::ALL[if matches!(vk, VK_LEFT | VK_UP) { (i + n - 1) % n } else { (i + 1) % n }]);
+        }
+        VK_SPACE | VK_F4 if select => open_select(hwnd, focus),
+        VK_UP | VK_DOWN if select => {
+            if let Some(Some(c)) = with_form(|nv| nv.form.step(focus, vk == VK_DOWN)) {
+                choose(hwnd, c);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Create (or open) the session off the UI thread; an invalid form focuses its first error instead.
+fn submit(hwnd: HWND) {
+    let Ok(dev) = paths::dev_root() else { return };
+    enum Next {
+        Focus(Field),
+        Run(Box<new::Job>, Option<Frontend>),
+    }
+    let next = with_form(|nv| {
+        let form = &mut nv.form;
+        if form.busy {
+            return None;
+        }
+        if !form.can_create() {
+            return form.notes().into_iter().find(|n| !n.warn).map(|n| Next::Focus(n.field));
+        }
+        match form.job(&dev) {
+            Ok(job) => {
+                form.busy = true;
+                form.error = None;
+                Some(Next::Run(Box::new(job), form.open))
+            }
+            Err(e) => {
+                form.error = Some(format!("{e:#}"));
+                None
+            }
+        }
+    })
+    .flatten();
+    match next {
+        Some(Next::Focus(f)) => focus_field(hwnd, f),
+        Some(Next::Run(job, open)) => {
+            unsafe { SetTimer(hwnd, SPIN_TIMER, 30, None) };
+            spawn_bg(hwnd, move || {
+                let r = new::create(&dev, &job).map_err(|e| format!("{e:#}"));
+                Bg::Created(job.id, r, open)
+            });
+        }
+        None => {}
+    }
+    refresh_form(hwnd);
+}
+
+fn on_bg(hwnd: HWND, bg: Bg) {
+    match bg {
+        Bg::Repos(list) => {
+            let picked = FLY.with(|fl| {
+                let mut b = fl.borrow_mut();
+                let f = b.as_mut()?;
+                let last = f.last_repo.clone();
+                let form = &mut f.nv.as_mut()?.form;
+                let slug = last.filter(|l| list.iter().any(|r| &r.slug == l)).or_else(|| list.first().map(|r| r.slug.clone()));
+                form.repos = new::Load::Ready(list);
+                form.set_repo(slug.as_deref()?);
+                Some(())
+            });
+            if picked.is_some() {
+                load_repo(hwnd);
+            }
+        }
+        Bg::Platforms(list) => {
+            with_form(|nv| nv.form.platforms = new::Load::Ready(list));
+        }
+        Bg::Branches(slug, r) => {
+            with_form(|nv| {
+                if nv.form.repo.as_deref() == Some(&*slug) {
+                    nv.form.branches = r.map_or_else(new::Load::Failed, new::Load::Ready);
+                }
+            });
+        }
+        Bg::Issues(slug, r) => {
+            with_form(|nv| {
+                if nv.form.repo.as_deref() == Some(&*slug) {
+                    nv.form.issues = r.map_or_else(new::Load::Failed, new::Load::Ready);
+                }
+            });
+        }
+        Bg::Created(id, r, open) => {
+            unsafe { KillTimer(hwnd, SPIN_TIMER) };
+            match r {
+                Ok(()) => {
+                    FLY.with(|fl| {
+                        if let Some(f) = fl.borrow_mut().as_mut() {
+                            f.last_repo = f.nv.as_ref().and_then(|nv| nv.form.repo.clone()).or(f.last_repo.take());
+                        }
+                    });
+                    leave_form(hwnd);
+                    if let Some(fe) = open {
+                        std::thread::spawn(move || tray::report(paths::dev_root().and_then(|dev| frontend::open(&dev, &id, fe)), &format!("open {id} in {}", fe.label())));
+                    }
+                }
+                Err(e) => {
+                    let shown = with_form(|nv| {
+                        nv.form.busy = false;
+                        nv.form.error = Some(e.clone());
+                    })
+                    .is_some()
+                        && unsafe { IsWindowVisible(hwnd) } != 0;
+                    if !shown {
+                        tray::report(Err(anyhow::anyhow!(e)), &format!("create {id}"));
+                    }
+                }
+            }
+        }
+    }
+    refresh_form(hwnd);
 }
 
 /// A native popup menu at the cursor; returns the chosen id.

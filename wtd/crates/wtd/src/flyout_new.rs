@@ -260,17 +260,17 @@ impl Form {
         }
         if self.uses(Field::Name) {
             let name = self.name.trim();
-            if let Some(e) = branch_error(name) {
+            if let Some(p) = PREFIXES.iter().find(|p| name == **p || name == p.trim_end_matches('/')) {
+                note(Field::Name, &format!("Type a name after {}", p), false);
+            } else if let Some(e) = branch_error(name) {
                 note(Field::Name, e, false);
-            } else if PREFIXES.iter().any(|p| name == p.trim_end_matches('/')) {
-                note(Field::Name, "add a name after the prefix", false);
-            } else if self.exists() {
+            } else if self.exists() && !self.busy {
                 note(Field::Name, "This worktree exists: Create opens it", true);
             } else if self.kind == Kind::Branch && self.branches.ready().is_some_and(|b| b.iter().any(|b| b == name)) {
                 note(Field::Name, "This branch exists: Create checks it out", true);
             }
         }
-        if self.kind == Kind::Delegator && self.exists() {
+        if self.kind == Kind::Delegator && self.exists() && !self.busy {
             note(Field::Repo, "This repo has a delegator: Create opens it", true);
         }
         if self.uses(Field::Base) {
@@ -336,6 +336,189 @@ impl Form {
         }
         Ok(a)
     }
+
+    /// The fields this kind shows, in tab order.
+    pub fn fields(&self) -> Vec<Field> {
+        Field::ALL.into_iter().filter(|f| self.uses(*f)).collect()
+    }
+
+    /// A select field's choices (empty for text fields and the kind switch).
+    pub fn options(&self, f: Field) -> Vec<Opt> {
+        let opt = |label: String, choice: Choice, on: bool| Opt { label, enabled: true, checked: on, choice };
+        let mut v = match f {
+            Field::Repo => self.repos.ready().map(|r| r.iter().map(|r| opt(r.slug.clone(), Choice::Repo(r.slug.clone()), self.repo.as_ref() == Some(&r.slug))).collect()).unwrap_or_default(),
+            Field::Base => {
+                let def = self.repo_opt().map(|r| r.default_branch.clone()).unwrap_or_default();
+                let mut v = vec![opt(format!("{def} (default)"), Choice::Base(None), self.base.is_none())];
+                let others = self.branches.ready().into_iter().flatten().filter(|b| **b != def).take(MENU_MAX);
+                v.extend(others.map(|b| opt(b.clone(), Choice::Base(Some(b.clone())), self.base.as_ref() == Some(b))));
+                v
+            }
+            Field::Platform => self
+                .platforms
+                .ready()
+                .into_iter()
+                .flatten()
+                .map(|p| Opt {
+                    label: if p.ok { p.label.clone() } else { format!("{} — {}", p.label, p.hint) },
+                    enabled: p.ok,
+                    checked: self.platform.as_ref() == Some(&p.id),
+                    choice: Choice::Platform(p.id.clone()),
+                })
+                .collect(),
+            Field::Account => {
+                let best = self.accounts.iter().find(|a| a.logged_in && !a.maxed()).map(|a| a.label.clone());
+                self.accounts
+                    .iter()
+                    .map(|a| Opt {
+                        label: format!("{}{}", if best.as_ref() == Some(&a.label) { "★ " } else { "" }, account_text(a)),
+                        enabled: a.logged_in,
+                        checked: self.account.as_ref() == Some(&a.label),
+                        choice: Choice::Account(a.label.clone()),
+                    })
+                    .collect()
+            }
+            Field::Issue => {
+                let mut v = vec![opt("None".into(), Choice::Issue(None), self.issue.is_none())];
+                let picked = |i: &IssueOpt| self.issue.as_ref().is_some_and(|x| x.number == i.number && x.title == i.title);
+                v.extend(self.issues.ready().into_iter().flatten().take(MENU_MAX).map(|i| opt(i.label(), Choice::Issue(Some(i.clone())), picked(i))));
+                v
+            }
+            Field::Open => [Some(Frontend::VsCode), Some(Frontend::Terminal), Some(Frontend::Zed), None]
+                .into_iter()
+                .map(|fe| opt(open_text(fe).into(), Choice::Open(fe), self.open == fe))
+                .collect(),
+            Field::Kind | Field::Name | Field::Prompt => return vec![],
+        };
+        let pending = match f {
+            Field::Repo => state("repos", &self.repos),
+            Field::Base => match &self.branches {
+                Load::Ready(_) => None,
+                l => state("branches", l),
+            },
+            Field::Platform => state("platforms", &self.platforms),
+            Field::Issue => match &self.issues {
+                Load::Ready(_) => None,
+                l => state("issues", l),
+            },
+            _ => None,
+        };
+        if let Some(p) = pending {
+            v.push(Opt { label: p, enabled: false, checked: false, choice: Choice::None });
+        }
+        v
+    }
+
+    pub fn choose(&mut self, c: Choice) {
+        match c {
+            Choice::Repo(s) => self.set_repo(&s),
+            Choice::Base(b) => self.base = b,
+            Choice::Platform(p) => self.platform = Some(p),
+            Choice::Account(a) => self.account = Some(a),
+            Choice::Issue(i) => self.set_issue(i),
+            Choice::Open(o) => self.open = o,
+            Choice::None => {}
+        }
+    }
+
+    /// The next (or previous) enabled choice after the current one, for arrow keys on a select.
+    pub fn step(&self, f: Field, forward: bool) -> Option<Choice> {
+        let opts: Vec<Opt> = self.options(f).into_iter().filter(|o| o.enabled).collect();
+        let cur = opts.iter().position(|o| o.checked);
+        let i = match (cur, forward) {
+            (None, _) => 0,
+            (Some(i), true) => (i + 1).min(opts.len().checked_sub(1)?),
+            (Some(i), false) => i.saturating_sub(1),
+        };
+        opts.get(i).map(|o| o.choice.clone())
+    }
+
+    /// What a select shows when closed.
+    pub fn value_text(&self, f: Field) -> String {
+        match f {
+            Field::Repo => match (&self.repos, &self.repo) {
+                (_, Some(r)) => r.clone(),
+                (Load::Loading, _) => "Loading…".into(),
+                (Load::Ready(v), _) if v.is_empty() => "No repos".into(),
+                _ => "Pick a repo".into(),
+            },
+            Field::Base => match (&self.base, self.repo_opt()) {
+                (Some(b), _) => b.clone(),
+                (None, Some(r)) => format!("{} (default)", r.default_branch),
+                (None, None) => "Default branch".into(),
+            },
+            Field::Platform => match &self.platform {
+                Some(p) => self.platforms.ready().and_then(|l| l.iter().find(|o| &o.id == p)).map(|o| o.label.clone()).unwrap_or_else(|| platform_label(p)),
+                None => "Default".into(),
+            },
+            Field::Account => match self.account.as_ref().and_then(|l| self.accounts.iter().find(|a| &a.label == l)) {
+                Some(a) => account_text(a),
+                None => "No logged-in account".into(),
+            },
+            Field::Issue => match (&self.issue, &self.issues) {
+                (Some(i), _) => i.label(),
+                (None, Load::Loading) => "None (loading issues…)".into(),
+                (None, _) => "None".into(),
+            },
+            Field::Open => open_text(self.open).into(),
+            Field::Kind => self.kind.label().into(),
+            Field::Name => self.name.clone(),
+            Field::Prompt => self.prompt.clone(),
+        }
+    }
+}
+
+const MENU_MAX: usize = 40;
+
+/// The status line a select shows while its list isn't usable.
+fn state<T>(what: &str, l: &Load<Vec<T>>) -> Option<String> {
+    match l {
+        Load::Loading => Some(format!("Loading {what}…")),
+        Load::Failed(e) => Some(e.clone()),
+        Load::Ready(v) if v.is_empty() => Some(format!("No {what}")),
+        Load::Ready(_) => None,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Choice {
+    Repo(String),
+    Base(Option<String>),
+    Platform(String),
+    Account(String),
+    Issue(Option<IssueOpt>),
+    Open(Option<Frontend>),
+    /// a status line ("Loading…"), not a choice
+    None,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Opt {
+    pub label: String,
+    pub enabled: bool,
+    pub checked: bool,
+    pub choice: Choice,
+}
+
+impl Field {
+    pub const ALL: [Field; 9] = [Field::Repo, Field::Kind, Field::Name, Field::Base, Field::Platform, Field::Account, Field::Issue, Field::Prompt, Field::Open];
+}
+
+fn account_text(a: &AccountOpt) -> String {
+    let (provider, name) = match a.label.strip_prefix("codex:") {
+        Some(n) => ("Codex", n),
+        None => ("Claude", a.label.as_str()),
+    };
+    let state = match (a.logged_in, a.used) {
+        (false, _) => " · not logged in".to_string(),
+        (true, Some(u)) => format!(" · {u:.0}% used"),
+        (true, None) => String::new(),
+    };
+    format!("{provider} · {name}{state}")
+}
+
+fn open_text(f: Option<Frontend>) -> &'static str {
+    f.map(Frontend::label).unwrap_or("Don't open")
 }
 
 /// git's branch-name rules, as the New Session wizards check them.
@@ -467,6 +650,13 @@ pub fn load_branches(repo: &Path) -> Result<Vec<String>> {
     Ok(parse_branches(&out))
 }
 
+fn platform_label(id: &str) -> String {
+    match id.strip_prefix("wsl:") {
+        Some(d) => format!("WSL · {d}"),
+        None => "Windows".into(),
+    }
+}
+
 /// `wtd platforms` JSON → options.
 pub fn parse_platforms(v: &Value) -> Vec<PlatformOpt> {
     v.as_array()
@@ -474,10 +664,7 @@ pub fn parse_platforms(v: &Value) -> Vec<PlatformOpt> {
             a.iter()
                 .filter_map(|p| {
                     let id = p["id"].as_str()?.to_string();
-                    let label = match p["distro"].as_str() {
-                        Some(d) => format!("WSL · {d}"),
-                        None => "Windows".into(),
-                    };
+                    let label = platform_label(&id);
                     let hint = p["hints"].as_array().and_then(|h| h.first()).and_then(Value::as_str).unwrap_or("not available").to_string();
                     Some(PlatformOpt { id, label, ok: p["ok"].as_bool().unwrap_or(false), hint })
                 })
@@ -550,7 +737,14 @@ pub fn create(dev: &Path, job: &Job) -> Result<()> {
         std::fs::create_dir_all(file.parent().unwrap())?;
         std::fs::write(file, issue_markdown(i, detail.as_ref()))?;
     }
-    let out = win::no_window(std::process::Command::new(paths::wtd_exe()).args(&job.args)).current_dir(dev).stdin(Stdio::null()).output()?;
+    // only stderr is read: the session it starts mustn't hold a pipe we wait on
+    let out = win::no_window(std::process::Command::new(paths::wtd_exe()).args(&job.args))
+        .current_dir(dev)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?
+        .wait_with_output()?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let line = err.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or("wtd agent failed");
@@ -594,7 +788,7 @@ mod tests {
     #[test]
     fn branch_validation() {
         let mut f = form();
-        assert_eq!(errors(&f), [(Field::Name, false)], "a bare prefix needs a name");
+        assert_eq!(f.notes()[0].text, "Type a name after feat/", "a bare prefix needs a name");
         f.name = "feat/thing".into();
         assert!(errors(&f).is_empty());
         assert!(f.can_create());
@@ -737,6 +931,38 @@ mod tests {
         let i = parse_issues(&json!({ "items": [{ "kind": "issue", "number": 3, "title": "T", "url": "u", "repo": "o/r", "labels": ["bug"], "item_id": null }] }));
         assert_eq!(i, [IssueOpt { number: Some(3), title: "T".into(), url: Some("u".into()), repo: Some("o/r".into()), labels: vec!["bug".into()], item_id: None }]);
         assert_eq!(i[0].label(), "#3 T");
+    }
+
+    #[test]
+    fn select_options() {
+        let mut f = form();
+        f.accounts = rank_accounts(vec![acct("default", Some(60.0), true, true), acct("spare", Some(5.0), true, false), acct("out", None, false, false)]);
+        let labels: Vec<(String, bool, bool)> = f.options(Field::Account).into_iter().map(|o| (o.label, o.enabled, o.checked)).collect();
+        assert_eq!(labels, [
+            ("★ Claude · spare · 5% used".into(), true, false),
+            ("Claude · default · 60% used".into(), true, true),
+            ("Claude · out · not logged in".into(), false, false),
+        ]);
+        let p = f.options(Field::Platform);
+        assert_eq!((p[1].label.as_str(), p[1].enabled), ("WSL · Ubuntu — install git", false));
+        assert_eq!(f.step(Field::Platform, true), Some(Choice::Platform("windows".into())), "disabled platforms are skipped");
+        let base: Vec<String> = f.options(Field::Base).into_iter().map(|o| o.label).collect();
+        assert_eq!(base, ["main (default)", "feat/old", "release"]);
+        f.choose(f.step(Field::Base, true).unwrap());
+        assert_eq!(f.value_text(Field::Base), "feat/old");
+        assert_eq!(f.value_text(Field::Issue), "None (loading issues…)");
+        assert_eq!(f.options(Field::Issue).last().unwrap().label, "Loading issues…");
+        f.issues = Load::Failed("gh isn't installed".into());
+        assert_eq!(f.options(Field::Issue).last().unwrap().choice, Choice::None);
+        f.platforms = Load::Loading;
+        assert_eq!(f.value_text(Field::Platform), "Windows");
+        f.choose(Choice::Open(None));
+        assert_eq!(f.value_text(Field::Open), "Don't open");
+        f.choose(Choice::Repo("web".into()));
+        assert_eq!((f.base.clone(), f.branches.clone()), (None, Load::Loading), "a new repo resets its branches");
+        assert_eq!(f.fields(), Field::ALL);
+        f.set_kind(Kind::Delegator);
+        assert_eq!(f.fields(), [Field::Repo, Field::Kind, Field::Account, Field::Prompt, Field::Open]);
     }
 
     #[test]
