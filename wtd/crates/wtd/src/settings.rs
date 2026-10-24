@@ -554,15 +554,15 @@ fn project_fields(owner: &str, number: &str) -> Result<i32> {
 // --- accounts ---------------------------------------------------------------------------------------
 
 #[derive(Serialize, Clone)]
-struct AccountInfo {
-    provider: &'static str, // "claude" | "codex"
-    name: String,
+pub(crate) struct AccountInfo {
+    pub(crate) provider: &'static str, // "claude" | "codex"
+    pub(crate) name: String,
     dir: String,
-    email: String,
-    plan: String,
-    logged_in: bool,
+    pub(crate) email: String,
+    pub(crate) plan: String,
+    pub(crate) logged_in: bool,
     /// roles this account is the default for
-    roles: Vec<String>,
+    pub(crate) roles: Vec<String>,
 }
 
 fn roles_path(home: &Path) -> PathBuf {
@@ -657,7 +657,7 @@ fn subdirs(p: &Path) -> Vec<(String, PathBuf)> {
     v
 }
 
-fn account_list(home: &Path) -> Vec<AccountInfo> {
+pub(crate) fn account_list(home: &Path) -> Vec<AccountInfo> {
     let mut v = vec![claude_account("default", home.join(".claude"), home.join(".claude.json"))];
     for (n, d) in subdirs(&home.join(".claude-accounts")) {
         let j = d.join(".claude.json");

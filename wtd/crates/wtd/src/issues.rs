@@ -52,7 +52,7 @@ fn source_for(slug: &str) -> Result<Value> {
     }
 }
 
-fn list(slug: &str) -> Result<Value> {
+pub(crate) fn list(slug: &str) -> Result<Value> {
     let src = source_for(slug)?;
     let me = my_login();
     let mut items = match src.get("kind").and_then(Value::as_str) {
@@ -133,7 +133,7 @@ fn list(slug: &str) -> Result<Value> {
     Ok(json!({ "source": src, "items": items }))
 }
 
-fn show(repo: &str, number: &str) -> Result<Value> {
+pub(crate) fn show(repo: &str, number: &str) -> Result<Value> {
     let v = gh_json(&["issue", "view", number, "-R", repo, "--json", "number,title,body,url,labels"])?;
     Ok(json!({
         "number": v.get("number"), "title": v.get("title"), "url": v.get("url"),
@@ -142,7 +142,7 @@ fn show(repo: &str, number: &str) -> Result<Value> {
 }
 
 /// Move a Project card to the source's `onStart` column (no-op when none is configured).
-fn start(slug: &str, item_id: &str) -> Result<Value> {
+pub(crate) fn start(slug: &str, item_id: &str) -> Result<Value> {
     let src = source_for(slug)?;
     if src.get("kind").and_then(Value::as_str) != Some("project") {
         return Ok(json!({ "moved": false, "reason": "not a project source" }));
