@@ -9,7 +9,7 @@ use wtd_core::model::{DiskUsage, Metrics, ProcUsage, SessionUsage, WorktreeDisk}
 
 use crate::win::{self, JobSample, ProcSample};
 
-const TOP_PER_SESSION: usize = 5;
+const TOP_PER_SESSION: usize = 8;
 const TOP_OTHERS: usize = 6;
 const MB: u64 = 1024 * 1024;
 

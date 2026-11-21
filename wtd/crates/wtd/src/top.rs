@@ -2,7 +2,7 @@
 
 use anyhow::{bail, Result};
 use serde_json::json;
-use wtd_core::model::Metrics;
+use wtd_core::model::{Metrics, ProcUsage};
 use wtd_core::protocol::{method, Push, ServerLine};
 
 use crate::client::Client;
@@ -62,6 +62,7 @@ pub fn size(bytes: u64) -> String {
     let b = bytes as f64;
     match bytes {
         0 => "0".into(),
+        n if n < 1024 => format!("{n}B"),
         n if n < 1 << 20 => format!("{:.0}K", b / 1024.0),
         n if n < 1 << 30 => format!("{:.0}M", b / (1 << 20) as f64),
         _ => format!("{:.1}G", b / (1u64 << 30) as f64),
@@ -77,6 +78,21 @@ fn ago(ts: i64) -> String {
     if s < 90 { format!("{s}s ago") } else if s < 5400 { format!("{}m ago", s / 60) } else { format!("{}h ago", s / 3600) }
 }
 
+/// (name, count, summed cpu) in first-seen order: ten rustc's read as one entry.
+fn by_name(ps: &[ProcUsage]) -> Vec<(String, usize, f64)> {
+    let mut v: Vec<(String, usize, f64)> = vec![];
+    for p in ps {
+        match v.iter_mut().find(|(n, _, _)| *n == p.name) {
+            Some(e) => {
+                e.1 += 1;
+                e.2 += p.cpu_pct;
+            }
+            None => v.push((p.name.clone(), 1, p.cpu_pct)),
+        }
+    }
+    v
+}
+
 pub fn render(m: &Metrics) -> String {
     let mut o = String::new();
     let fleet_cpu: f64 = m.per_session.iter().map(|s| s.cpu_pct).sum();
@@ -89,7 +105,7 @@ pub fn render(m: &Metrics) -> String {
         o += "  (no live sessions)\n";
     }
     for s in &m.per_session {
-        let top = s.top.iter().take(3).map(|p| format!("{} {:.1}%", p.name, p.cpu_pct)).collect::<Vec<_>>().join(", ");
+        let top = by_name(&s.top).iter().take(3).map(|(n, k, c)| if *k > 1 { format!("{n} ×{k} {c:.1}%") } else { format!("{n} {c:.1}%") }).collect::<Vec<_>>().join(", ");
         o += &format!(
             "{:<38} {:<9} {:>6.1} {:>7} {:>7} {:>5} {:>7} {:>7}  {}\n",
             s.worktree, s.kind, s.cpu_pct, mb(s.mem_mb), mb(s.private_mb), s.procs, size(s.read_bps), size(s.write_bps), top
@@ -124,7 +140,7 @@ pub fn render(m: &Metrics) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wtd_core::model::{DiskUsage, ProcUsage, SessionUsage, WorktreeDisk};
+    use wtd_core::model::{DiskUsage, SessionUsage, WorktreeDisk};
 
     #[test]
     fn renders_sessions_others_and_disk() {
@@ -137,7 +153,11 @@ mod tests {
                 kind: "agent".into(),
                 cpu_pct: 42.5,
                 mem_mb: 2048,
-                top: vec![ProcUsage { name: "rustc.exe".into(), pid: 9, cpu_pct: 40.0, mem_mb: 900, count: 1 }],
+                top: vec![
+                    ProcUsage { name: "rustc.exe".into(), pid: 9, cpu_pct: 30.0, mem_mb: 900, count: 1 },
+                    ProcUsage { name: "rustc.exe".into(), pid: 10, cpu_pct: 10.0, mem_mb: 900, count: 1 },
+                    ProcUsage { name: "cargo.exe".into(), pid: 8, cpu_pct: 0.5, mem_mb: 20, count: 1 },
+                ],
                 ..Default::default()
             }],
             others: vec![ProcUsage { name: "Code.exe".into(), pid: 3, cpu_pct: 2.0, mem_mb: 1500, count: 12 }],
@@ -145,9 +165,10 @@ mod tests {
             ..Default::default()
         };
         let s = render(&m);
-        assert!(s.contains("r/feat/x") && s.contains("rustc.exe 40.0%") && s.contains("42.5"), "{s}");
+        assert!(s.contains("r/feat/x") && s.contains("rustc.exe ×2 40.0%, cargo.exe 0.5%") && s.contains("42.5"), "{s}");
         assert!(s.contains("Code.exe ×12") && s.contains("target    4.0G"), "{s}");
         assert_eq!(size(1536), "2K");
+        assert_eq!(size(300), "300B");
         assert_eq!(size(3 << 30), "3.0G");
     }
 }
