@@ -47,7 +47,11 @@ try {
   checkScripts('settings', st.settingsHtml());
 } catch (e) { failures++; console.error('settings check failed: ' + e.message); }
 
-// 3. The Changes panel page (a static file with placeholders)
+// 3. The Resources page: resources.resourcesHtml() is a plain function too.
+try { checkScripts('resources', require(path.join(HERE, 'resources.js')).resourcesHtml()); }
+catch (e) { failures++; console.error('resources check failed: ' + e.message); }
+
+// 4. The Changes panel page (a static file with placeholders)
 try { checkScripts('changes', fs.readFileSync(path.join(HERE, 'changes.html'), 'utf8')); }
 catch (e) { failures++; console.error('changes check failed: ' + e.message); }
 

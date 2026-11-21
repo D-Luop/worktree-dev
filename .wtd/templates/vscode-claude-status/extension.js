@@ -6,6 +6,7 @@ const cp = require('child_process');
 const { GitView } = require('./gitview.js');   // the native Worktree Changes tree + diffs
 const { ChangesPanel } = require('./changespanel.js');   // the docked right-half commits/diff panel
 const { SettingsPanel } = require('./settings.js');   // the WorkTreeDev Settings editor tab
+const { ResourcesPanel } = require('./resources.js'); // per-session CPU / memory / disk editor tab
 const wsl = require('./wslpath.js');   // WSL worktrees: git and shells through wsl.exe
 
 const STATUS_FILE = '.claude-status';
@@ -204,6 +205,7 @@ class DaemonClient {
     this.groups = [];     // user-defined roster groups, in display order
     this.messages = [];   // agent messages still in flight (pending approval / queued)
     this.update = null;   // `wtd update status` (installed builds: available / staged / applied)
+    this.wantMetrics = false;   // the daemon samples resources only while a client asks for them
     this._sock = null; this._buf = ''; this._pending = new Map(); this._next = 1; this._retry = null; this._stopped = false;
   }
   start() { this._stopped = false; this._connect(); }
@@ -217,7 +219,7 @@ class DaemonClient {
     s.on('connect', () => {
       this.running = true;
       this._send('hello', { client: 'vscode', protocol: 1 });
-      this._send('subscribe', { metrics: true });
+      this._send('subscribe', { metrics: this.wantMetrics || !!this._legacyMetrics });
       this.request('update.status').then((u) => { this.update = u; this.onChange('update'); }).catch(() => {});   // an older daemon has no updater
       this.onChange('daemon');
     });
@@ -241,6 +243,18 @@ class DaemonClient {
       if (!this._stopped) this._retry = setTimeout(() => this._connect(), 2000);
     };
     s.on('error', down); s.on('close', down);
+  }
+
+  watchMetrics(on) {
+    if (on === this.wantMetrics) return;
+    this.wantMetrics = on;
+    if (!this._sock || !this.running || this._legacyMetrics) return;
+    // a daemon from before metrics.watch: reconnect with metrics always on, as it used to be
+    this.request('metrics.watch', { on }).catch((e) => {
+      if (!/unknown|method/i.test(e.message)) return;
+      this._legacyMetrics = true;
+      if (this._sock) this._sock.destroy();
+    });
   }
 
   _send(method, params) {
@@ -1080,6 +1094,8 @@ class DevSummaryProvider {
         this._groupOp(m).catch((e) => vscode.window.showErrorMessage('Group: ' + e.message));
       } else if (m.cmd === 'reviewMessages' && m.worktree) {
         this.reviewMessagesFrom(m.worktree);
+      } else if (m.cmd === 'resources') {
+        if (this.resources) this.resources.open();
       } else if (m.cmd === 'settings') {
         if (this._openSettings) this._openSettings();
       } else if (m.cmd === 'newAssistant') {
@@ -1129,12 +1145,14 @@ class DevSummaryProvider {
     this.limTimer = setInterval(() => safe('limits', () => this._postLimits()), 60000);
     // everything is push-driven by the daemon; this slow tick only catches terminal-focus drift
     this.rosTimer = setInterval(() => safe('roster', () => this._postRoster()), 30000);
-    view.onDidChangeVisibility(() => { if (view.visible) postAll(); });
+    view.onDidChangeVisibility(() => { if (view.visible) postAll(); this._syncMetrics(); });
+    this._syncMetrics();
     view.onDidDispose(() => {
       if (this.limTimer) clearInterval(this.limTimer);
       if (this.rosTimer) clearInterval(this.rosTimer);
       if (this.monTimer) clearInterval(this.monTimer);
       this.limTimer = this.rosTimer = this.monTimer = this.view = this._postAll = null;
+      this._syncMetrics();
     });
   }
 
@@ -1369,12 +1387,27 @@ class DevSummaryProvider {
 
 
 
+  // sample resources only while the sidebar or the Resources tab is on screen
+  _syncMetrics() {
+    if (this.daemon) this.daemon.watchMetrics(!!((this.view && this.view.visible) || (this.resources && this.resources.visible())));
+  }
+
   _postMonitor() {
+    if (this.resources) this.resources.update();
     if (!this.view || !this.view.visible) return;
     const m = this.daemon && this.daemon.running ? this.daemon.metrics : null;
+    // per worktree: its sessions summed (an agent and a review can run side by side)
+    const ps = {};
+    for (const s of (m && m.per_session) || []) {
+      const r = ps[s.worktree] || (ps[s.worktree] = { cpu: 0, mem: 0, priv: 0, procs: 0, rd: 0, wr: 0, top: [], vm: null });
+      r.cpu += s.cpu_pct; r.mem += s.mem_mb; r.priv += s.private_mb; r.procs += s.procs; r.rd += s.read_bps; r.wr += s.write_bps;
+      r.top = r.top.concat(s.top || []).sort((a, b) => b.cpu_pct - a.cpu_pct).slice(0, 4);
+      if (s.vm) r.vm = s.vm;
+    }
     this.view.webview.postMessage({ type: 'monitor', m: m && {
       sess: m.sessions, nag: m.agents, rev: m.reviews, acpu: m.cpu_pct, amem: m.mem_mb,
-      mt: m.sys_total_mb, msys: m.sys_used_mb, ncpu: m.ncpu, load: 'n/a' } });
+      mt: m.sys_total_mb, msys: m.sys_used_mb, ncpu: m.ncpu, load: 'n/a',
+      scpu: m.sys_cpu_pct || 0, rated: (m.interval_ms || 0) > 0, ps, other: (m.others || [])[0] || null } });
   }
 
 
@@ -1495,6 +1528,10 @@ class DevSummaryProvider {
   .stat{display:flex;gap:5px;align-items:baseline;} .sk{color:var(--vscode-descriptionForeground);} .sv{font-variant-numeric:tabular-nums;}
   .mlbl{width:26px;flex:none;color:var(--vscode-descriptionForeground);}
   #mon .bar{height:16px;margin:1px 0;} #mon .meta{min-width:0;text-align:right;white-space:nowrap;}
+  #mon{cursor:pointer;border-radius:4px;} #mon:hover{background:var(--vscode-list-hoverBackground);}
+  .topline{margin:2px 2px 1px;color:var(--vscode-descriptionForeground);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .row .res{flex:none;font-size:10.5px;color:var(--vscode-descriptionForeground);font-variant-numeric:tabular-nums;white-space:nowrap;}
+  .row .res.hot{color:var(--vscode-editorWarning-foreground,#d2a000);}
 </style></head><body>
 <div id="lim"><div class="none">waiting for usage…</div></div>
 <hr>
@@ -1518,7 +1555,7 @@ class DevSummaryProvider {
 <div id="monwrap">
 <hr>
 <div class="sect">Monitor</div>
-<div id="mon"><div class="none">…</div></div>
+<div id="mon" title="Click for the Resources view: per-session CPU, memory, processes and disk"><div class="none">…</div></div>
 </div>
 <script>
   const vsc = acquireVsCodeApi();
@@ -1639,6 +1676,7 @@ class DevSummaryProvider {
       +(lim?'<span class="badge" style="color:'+s[3]+'" title="'+esc(lim)+'">'+esc(lim.replace(/^limit · /,''))+'</span>':'')
       +(w.msgPending?'<i class="codicon codicon-comment-unresolved msgp" title="'+w.msgPending+' message'+(w.msgPending===1?'':'s')+' from this agent awaiting your approval — click to review"></i>':'')
       +(w.preview?'<i class="codicon codicon-file-media pv" title="Staged previews: open them in the Changes panel"></i>':'')
+      +'<span class="res" data-r="'+esc(w.id||'')+'"></span>'
       +'<span class="git">'+git+'</span>'
       +'<span class="acts">'
       +'<i class="codicon codicon-'+tkIco+' tkt" title="'+esc(tk?'#'+tk.n+' '+tk.title:'Link an issue or PR…')+'"></i>'
@@ -1698,6 +1736,24 @@ class DevSummaryProvider {
     el.querySelectorAll('.wt').forEach(x=>x.onclick=()=>vsc.postMessage({cmd:'open',slug:x.dataset.slug,name:x.dataset.name,glyph:x.dataset.glyph}));
     on('.arch','archive'); on('.del','delete'); on('.term','terminate'); on('.unr','markunread'); on('.acc','switchAccount'); on('.tkt','ticket'); on('.pv','preview');
     el.querySelectorAll('.msgp').forEach(x=>x.onclick=(ev)=>{ ev.stopPropagation(); vsc.postMessage({cmd:'reviewMessages', worktree:x.closest('.wt').dataset.id}); });
+    renderRes();
+  }
+
+  // inline cpu/mem on rows whose sessions use notable resources; idle rows stay clean
+  const RES_CPU=5, RES_MEM=1536;   // percent of all cores, MB
+  function renderRes(){
+    const ps=(mon&&mon.ps)||{};
+    const gb=x=>x>=1024?(x/1024).toFixed(1)+'G':Math.round(x)+'M';
+    document.querySelectorAll('.res[data-r]').forEach(el=>{
+      const r=ps[el.dataset.r];
+      if(!r || (r.cpu<RES_CPU && r.mem<RES_MEM)){ if(el.textContent){ el.textContent=''; el.removeAttribute('title'); } return; }
+      el.textContent=Math.round(r.cpu)+'% · '+gb(r.mem);
+      el.classList.toggle('hot', r.cpu>=25);
+      el.title='CPU '+r.cpu.toFixed(1)+'% of all cores · memory '+gb(r.mem)+' (private '+gb(r.priv)+') · '+r.procs+' processes'
+        +((r.rd||r.wr)?' · disk read '+gb(r.rd/1048576)+'/s, write '+gb(r.wr/1048576)+'/s':'')
+        +(r.top.length?'\\n'+r.top.map(p=>p.name+'  '+p.cpu_pct.toFixed(1)+'%  '+gb(p.mem_mb)).join('\\n'):'')
+        +(r.vm?'\\nWSL VM (shared by every WSL session): '+r.vm.cpu_pct.toFixed(1)+'% · '+gb(r.vm.mem_mb):'');
+    });
   }
 
   // group headers: collapse, rename, delete; drag rows onto a group, drag headers to reorder
@@ -1754,11 +1810,21 @@ class DevSummaryProvider {
     const mbar=(lbl,pct,meta,title)=>'<div class="bar" title="'+title+'"><span class="mlbl">'+lbl+'</span><div class="track"><div class="fill" style="width:'+pct+'%;background:'+col(pct)+'"></div></div><span class="pct">'+pct+'%</span><span class="meta">'+meta+'</span></div>';
     el.innerHTML = '<div class="statline">'+stat('sessions', mon.sess, 'fleet sessions running')+stat('agents', mon.nag, 'interactive agents')+stat('reviews', mon.rev, 'review workers')+'</div>'
       + mbar('cpu', cpuPct, cores+'/'+mon.ncpu+'c', 'Agents: '+cores+' of '+mon.ncpu+' cores ('+cpuPct+'% of CPU)')
-      + mbar('mem', memPct, gb(mon.amem)+'G', 'Agents using '+gb(mon.amem)+' GB ('+memPct+'% of '+gb(mon.mt)+'G) · system '+gb(mon.msys)+'/'+gb(mon.mt)+'G ('+sysPct+'%)');
+      + mbar('mem', memPct, gb(mon.amem)+'G', 'Agents using '+gb(mon.amem)+' GB ('+memPct+'% of '+gb(mon.mt)+'G) · system '+gb(mon.msys)+'/'+gb(mon.mt)+'G ('+sysPct+'%)')
+      + topLine();
+  }
+  function topLine(){
+    if(!mon.rated) return '';
+    const ps=mon.ps||{}, ids=Object.keys(ps).sort((a,b)=>ps[b].cpu-ps[a].cpu);
+    const t=ids.length&&ps[ids[0]].cpu>=1?ids[0]:null;
+    const lead=t?'top: '+esc(t.split('/').pop())+' '+ps[t].cpu.toFixed(0)+'%'+(ps[t].top[0]?' ('+esc(ps[t].top[0].name.replace(/[.]exe$/i,''))+')':''):'fleet idle';
+    const o=mon.other&&(mon.other.cpu_pct>=5||mon.other.mem_mb>=2048)?' · outside: '+esc(mon.other.name.replace(/[.]exe$/i,''))+' '+mon.other.cpu_pct.toFixed(0)+'%':'';
+    return '<div class="topline" title="system CPU '+mon.scpu.toFixed(0)+'% · click for details">'+lead+o+' · sys '+mon.scpu.toFixed(0)+'%</div>';
   }
 
   // --- toolbar wiring ---
   document.getElementById('daemon').onclick=()=>vsc.postMessage({cmd:'daemonToggle'});
+  document.getElementById('mon').onclick=()=>vsc.postMessage({cmd:'resources'});
   document.getElementById('active').onclick=()=>{ activeOnly=!activeOnly; save(); renderRoster(); };
   document.getElementById('search').onclick=()=>{ searchOpen=!searchOpen; if(!searchOpen){ query=''; document.getElementById('q').value=''; } save(); renderRoster(); if(searchOpen) document.getElementById('q').focus(); };
   const q=document.getElementById('q'); q.value=query;
@@ -1789,7 +1855,7 @@ class DevSummaryProvider {
     else if(m.type==='limits'){ accts=m.accounts||[]; renderLim(); }
     else if(m.type==='roster'){ ros=m.rows||[]; asstState=m.assistant||{}; termState=m.terminal||{}; multiAcct=!!m.multiAccount;
       groupsData=m.groups||null; canEditGroups=!!m.canEditGroups; renderRoster(); }
-    else if(m.type==='monitor'){ mon=m.m; renderMonitor(); }
+    else if(m.type==='monitor'){ mon=m.m; renderMonitor(); renderRes(); }
     else if(m.type==='daemon'){ daemon={installed:!!m.installed, running:!!m.running, busy:!!m.busy}; renderRoster(); renderLim(); renderMonitor(); }
   });
   renderRoster();
@@ -2146,6 +2212,7 @@ function activate(context) {
     if (kind === 'update') { dev._onUpdate(); if (settings) settings.onDaemonChange(); }
     kick(kind);
   });
+  const reg0 = (id, fn) => context.subscriptions.push(vscode.commands.registerCommand(id, fn));
   settings = new SettingsPanel({
     vscode, wtdExe, daemonInstalled, daemon: dev.daemon, log: _dbg,
     media: vscode.Uri.joinPath(context.extensionUri, 'media'),
@@ -2153,6 +2220,12 @@ function activate(context) {
     restartToUpdate: () => dev.restartToUpdate(),
   });
   dev._openSettings = () => settings.open();
+  dev.resources = new ResourcesPanel({
+    vscode, media: vscode.Uri.joinPath(context.extensionUri, 'media'),
+    daemon: () => dev.daemon, onVisibility: () => dev._syncMetrics(),
+  });
+  context.subscriptions.push({ dispose: () => dev.resources.dispose() });
+  reg0('claudeStatus.openResources', () => dev.resources.open());
   context.subscriptions.push({ dispose: () => settings.dispose() });
   if (daemonInstalled()) dev.daemon.start();
   context.subscriptions.push({ dispose: () => dev.daemon.dispose() });

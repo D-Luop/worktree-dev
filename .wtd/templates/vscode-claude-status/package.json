@@ -64,6 +64,12 @@
         "icon": "$(terminal)"
       },
       {
+        "command": "claudeStatus.openResources",
+        "title": "Open Resources (CPU / memory / disk per session)",
+        "category": "WorkTreeDev",
+        "icon": "$(pulse)"
+      },
+      {
         "command": "claudeStatus.openSettings",
         "title": "Open Settings",
         "category": "WorkTreeDev",
