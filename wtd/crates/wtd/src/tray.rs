@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -17,7 +18,7 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::Shell::{Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
-use wtd_core::model::{Account, Worktree};
+use wtd_core::model::{Account, Metrics, Worktree};
 use wtd_core::protocol::{method, Push, ServerLine};
 use wtd_core::status::Status;
 
@@ -26,6 +27,7 @@ use crate::{client::Client, paths, win};
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_STATE: u32 = WM_APP + 2;
 const WM_PIN_HINT: u32 = WM_APP + 3;
+const WM_METRICS: u32 = WM_APP + 4;
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "WorkTreeDev";
 const WTD_KEY: &str = r"Software\WorkTreeDev";
@@ -61,6 +63,9 @@ pub(crate) static FLEET: Mutex<Vec<Worktree>> = Mutex::new(Vec::new());
 pub(crate) static ACCOUNTS: Mutex<Vec<Account>> = Mutex::new(Vec::new());
 /// the daemon's update status (`wtd update status`), for the ⚙ menu
 pub(crate) static UPDATE: Mutex<Option<serde_json::Value>> = Mutex::new(None);
+/// resource usage, sampled only while the flyout is open
+pub(crate) static METRICS: Mutex<Option<Metrics>> = Mutex::new(None);
+static METRICS_GEN: AtomicU64 = AtomicU64::new(0);
 /// the staged version a "ready to update" balloon was last shown for
 static UPDATE_BALLOON: Mutex<String> = Mutex::new(String::new());
 
@@ -70,6 +75,36 @@ pub(crate) fn view() -> View {
 
 pub(crate) fn hwnd() -> HWND {
     TRAY.lock().unwrap().as_ref().map(|t| t.hwnd).unwrap_or(std::ptr::null_mut())
+}
+
+/// Hold a metrics subscription while the flyout is open: the daemon samples resources only while
+/// someone subscribes. The watcher thread ends at its next push (~2 s) after `on` turns false.
+pub(crate) fn watch_metrics(on: bool) {
+    let gen = METRICS_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    if !on {
+        return;
+    }
+    *METRICS.lock().unwrap() = None;
+    let hwnd = hwnd() as isize;
+    std::thread::spawn(move || {
+        let Ok(Some(mut c)) = Client::connect() else { return };
+        if c.request(method::SUBSCRIBE, serde_json::json!({ "metrics": true })).is_err() {
+            return;
+        }
+        while METRICS_GEN.load(Ordering::SeqCst) == gen {
+            match c.read() {
+                Ok(Some(ServerLine::Push(Push::Metrics { metrics, .. }))) => {
+                    if METRICS_GEN.load(Ordering::SeqCst) != gen {
+                        break;
+                    }
+                    *METRICS.lock().unwrap() = Some(metrics);
+                    unsafe { PostMessageW(hwnd as HWND, WM_METRICS, 0, 0) };
+                }
+                Ok(Some(_)) => continue,
+                _ => break,
+            }
+        }
+    });
 }
 
 /// `wtd tray [--spawn | --ensure | --open | --quit | --logon on|off|refresh]`
@@ -243,6 +278,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
         WM_PIN_HINT => {
             show_pin_hint();
+            0
+        }
+        WM_METRICS => {
+            crate::flyout::refresh();
             0
         }
         WM_CLOSE => {
