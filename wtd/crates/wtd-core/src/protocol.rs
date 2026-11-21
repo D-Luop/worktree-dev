@@ -74,6 +74,11 @@ pub mod method {
     pub const HELLO: &str = "hello";
     /// `{metrics?: bool}` → `{}` then pushes on this connection.
     pub const SUBSCRIBE: &str = "subscribe";
+    /// `{on: bool}` → `{}`: start/stop `metrics` pushes on this connection. The daemon samples
+    /// resources only while at least one connection has them on.
+    pub const METRICS_WATCH: &str = "metrics.watch";
+    /// `{}` → `{}`: rescan disk usage now (the result arrives in the next `metrics` push).
+    pub const RESOURCES_DISK_REFRESH: &str = "resources.disk_refresh";
     /// Notification from `wtd hook` after it applied a status change: [`super::HookParams`].
     pub const HOOK: &str = "hook";
     /// From `wtd run`, held for the session's lifetime: [`super::SessionParams`] → `{}`.

@@ -149,9 +149,7 @@ fn exited(d: &Arc<Daemon>, id: u64, wt: &str, code: i32) {
         let _ = statusfile::write(&d.dev, wt, &root, old, new);
     }
     let mut inner = d.lock();
-    if let Some(s) = inner.sessions.remove(&id) {
-        inner.cpu_prev.remove(&s.job);
-    }
+    inner.sessions.remove(&id);
     if let Some(mut w) = inner.worktrees.get(wt).cloned() {
         w.status = new.status;
         w.last_activity = now();

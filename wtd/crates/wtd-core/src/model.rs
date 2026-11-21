@@ -210,13 +210,90 @@ pub struct Metrics {
     pub agents: u32,
     /// Review / ask workers.
     pub reviews: u32,
-    /// Summed CPU of all session process trees, percent of one core (may exceed 100).
+    /// Summed CPU of all session process trees, percent of ONE core (may exceed 100); the newer
+    /// fields below use percent of all cores.
     pub cpu_pct: f64,
     /// Summed working set of all session process trees, MB.
     pub mem_mb: u64,
     pub sys_total_mb: u64,
     pub sys_used_mb: u64,
     pub ncpu: u32,
+    /// Unix seconds this sample was taken.
+    #[serde(default)]
+    pub ts: i64,
+    /// Time since the previous sample; 0 = first sample, so no CPU or I/O rates yet.
+    #[serde(default)]
+    pub interval_ms: u64,
+    /// Whole-machine CPU, percent of all cores.
+    #[serde(default)]
+    pub sys_cpu_pct: f64,
+    #[serde(default)]
+    pub read_bps: u64,
+    #[serde(default)]
+    pub write_bps: u64,
+    /// One entry per live session, busiest first.
+    #[serde(default)]
+    pub per_session: Vec<SessionUsage>,
+    /// The biggest processes outside every session (the WSL VM, editors, browsers…).
+    #[serde(default)]
+    pub others: Vec<ProcUsage>,
+    /// Cached; recomputed every few minutes or on `resources.disk_refresh`.
+    #[serde(default)]
+    pub disk: Option<DiskUsage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SessionUsage {
+    pub worktree: String,
+    pub kind: String,
+    /// Percent of all cores.
+    pub cpu_pct: f64,
+    /// Working set.
+    pub mem_mb: u64,
+    pub private_mb: u64,
+    pub procs: u32,
+    pub read_bps: u64,
+    pub write_bps: u64,
+    /// Busiest processes in the session's job.
+    pub top: Vec<ProcUsage>,
+    /// WSL sessions: the distro VM's total, shared by every WSL session (their work runs there).
+    #[serde(default)]
+    pub vm: Option<ProcUsage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ProcUsage {
+    pub name: String,
+    pub pid: u32,
+    /// Percent of all cores.
+    pub cpu_pct: f64,
+    pub mem_mb: u64,
+    /// Same-named processes summed into this row (VS Code's helpers); `pid` is the largest one.
+    #[serde(default)]
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct DiskUsage {
+    /// Unix seconds the scan finished (0 = never).
+    pub ts: i64,
+    /// A scan is running.
+    pub busy: bool,
+    /// Size of the whole dev root (worktrees, repos, state).
+    pub dev_root_bytes: u64,
+    pub volume_free_bytes: u64,
+    pub volume_total_bytes: u64,
+    /// Largest first.
+    pub worktrees: Vec<WorktreeDisk>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct WorktreeDisk {
+    pub id: String,
+    /// Everything, including the two buckets below. None = not measured (e.g. inside a WSL distro).
+    pub bytes: Option<u64>,
+    pub target_bytes: u64,
+    pub node_modules_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

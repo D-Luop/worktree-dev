@@ -8,6 +8,7 @@ pub mod scan;
 mod host;
 mod messages;
 mod pty;
+mod resources;
 mod store;
 mod update;
 mod watch;
@@ -17,7 +18,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -25,15 +26,17 @@ use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
-use tokio::sync::{broadcast, mpsc, Semaphore};
-use wtd_core::model::{Account, GitState, Group, Metrics, Snapshot, Worktree, DEV_ID};
+use tokio::sync::{broadcast, mpsc, Notify, Semaphore};
+use wtd_core::model::{Account, DiskUsage, GitState, Group, Metrics, Snapshot, Worktree, DEV_ID};
 use wtd_core::protocol::{method, HookParams, Push, Request, Response, ServerLine, SessionParams, PROTOCOL_VERSION};
 
 use crate::{client::Client, paths, win};
 
 const SCAN_EVERY: Duration = Duration::from_secs(10);
 const USAGE_EVERY: Duration = Duration::from_secs(60);
-const METRICS_EVERY: Duration = Duration::from_secs(5);
+const METRICS_EVERY: Duration = Duration::from_secs(2);
+/// Disk usage is recomputed this often while someone watches metrics (or on request).
+const DISK_EVERY: Duration = Duration::from_secs(600);
 /// After hook activity, wait this long for quiet before `git status`…
 const GIT_DEBOUNCE: Duration = Duration::from_secs(2);
 /// …but never longer than this after the first event of a burst.
@@ -150,8 +153,9 @@ struct Inner {
     metrics_subs: usize,
     git_due: HashMap<String, GitDue>,
     git_running: HashMap<String, ()>,
-    /// Last (job CPU 100ns, sample instant) per job for CPU% deltas.
-    cpu_prev: HashMap<String, (u64, Instant)>,
+    /// Previous sample, for CPU and I/O deltas (taken out while a sample runs).
+    sampler: Option<resources::Sampler>,
+    disk: Option<DiskUsage>,
     /// Groups, membership, messages (persisted).
     store: store::Store,
 }
@@ -165,6 +169,10 @@ struct Daemon {
     watchers: Mutex<HashMap<String, notify::RecommendedWatcher>>,
     updates: update::Updates,
     platforms: Mutex<crate::platforms::Cache>,
+    /// Sample now: the first metrics subscriber arrived.
+    metrics_wake: Notify,
+    /// Rescan disk usage now.
+    disk_wake: Notify,
 }
 
 impl Daemon {
@@ -273,7 +281,7 @@ async fn serve(dev: PathBuf) -> Result<()> {
 
     let (tx, _) = broadcast::channel(1024);
     let inner = Inner { store: store::Store::load(&dev), ..Default::default() };
-    let d = Arc::new(Daemon { dev: dev.clone(), inner: Mutex::new(inner), tx, next_conn: AtomicU64::new(1), watchers: Mutex::new(HashMap::new()), updates: Default::default(), platforms: Default::default() });
+    let d = Arc::new(Daemon { dev: dev.clone(), inner: Mutex::new(inner), tx, next_conn: AtomicU64::new(1), watchers: Mutex::new(HashMap::new()), updates: Default::default(), platforms: Default::default(), metrics_wake: Notify::new(), disk_wake: Notify::new() });
     eprintln!("[{}] wtd daemon {} up: pid {}, dev {}", now(), env!("CARGO_PKG_VERSION"), std::process::id(), dev.display());
 
     rescan(&d).await;
@@ -281,6 +289,7 @@ async fn serve(dev: PathBuf) -> Result<()> {
     tokio::spawn(git_loop(d.clone()));
     tokio::spawn(usage_loop(d.clone()));
     tokio::spawn(metrics_loop(d.clone()));
+    tokio::spawn(disk_loop(d.clone()));
     tokio::spawn(jobs_loop(d.clone()));
     tokio::spawn(tickets_loop(d.clone()));
     tokio::spawn(update::update_loop(d.clone()));
@@ -321,7 +330,8 @@ async fn handle(d: Arc<Daemon>, conn: NamedPipeServer) -> Result<()> {
     });
 
     let mut forwarder: Option<tokio::task::JoinHandle<()>> = None;
-    let mut wants_metrics = false;
+    let metrics_on = Arc::new(AtomicBool::new(false));
+    let mut counted = false;
     let mut attach_to: Option<(Arc<host::Hosted>, bool, u16, u16)> = None;
     let mut lines = BufReader::new(r).lines();
     while let Some(l) = lines.next_line().await? {
@@ -339,8 +349,12 @@ async fn handle(d: Arc<Daemon>, conn: NamedPipeServer) -> Result<()> {
         let mut start_sub = false;
         let result = match req.method.as_str() {
             method::SUBSCRIBE => {
-                wants_metrics = req.params.get("metrics").and_then(Value::as_bool).unwrap_or(false);
+                watch_metrics(&d, &metrics_on, &mut counted, req.params.get("metrics").and_then(Value::as_bool).unwrap_or(false));
                 start_sub = forwarder.is_none();
+                Ok(json!({}))
+            }
+            method::METRICS_WATCH => {
+                watch_metrics(&d, &metrics_on, &mut counted, req.params.get("on").and_then(Value::as_bool).unwrap_or(true));
                 Ok(json!({}))
             }
             method::SESSION_SPAWN | method::SESSION_ATTACH => {
@@ -369,7 +383,7 @@ async fn handle(d: Arc<Daemon>, conn: NamedPipeServer) -> Result<()> {
         }
         // after the response, so a client that waits for it never skips past the snapshot
         if start_sub {
-            forwarder = Some(subscribe(&d, out.clone(), wants_metrics));
+            forwarder = Some(subscribe(&d, out.clone(), metrics_on.clone()));
         }
         if attach_to.is_some() {
             break; // the rest of this connection is the binary attach stream
@@ -385,11 +399,10 @@ async fn handle(d: Arc<Daemon>, conn: NamedPipeServer) -> Result<()> {
     }
     {
         let mut inner = d.lock();
-        if wants_metrics {
+        if counted {
             inner.metrics_subs = inner.metrics_subs.saturating_sub(1);
         }
         if let Some(s) = inner.sessions.remove(&id) {
-            inner.cpu_prev.remove(&s.job);
             d.refresh_liveness(&mut inner, &s.wt);
             Daemon::schedule_git(&mut inner, &s.wt, true);
         }
@@ -399,14 +412,32 @@ async fn handle(d: Arc<Daemon>, conn: NamedPipeServer) -> Result<()> {
     Ok(())
 }
 
+/// Turn this connection's metrics pushes on or off; sampling runs while any connection has them on.
+fn watch_metrics(d: &Daemon, flag: &AtomicBool, counted: &mut bool, on: bool) {
+    flag.store(on, Ordering::Relaxed);
+    if on == *counted {
+        return;
+    }
+    *counted = on;
+    let mut inner = d.lock();
+    if on {
+        inner.metrics_subs += 1;
+        if inner.metrics_subs == 1 {
+            d.metrics_wake.notify_one();
+        }
+        if inner.disk.is_none() {
+            d.disk_wake.notify_one();
+        }
+    } else {
+        inner.metrics_subs = inner.metrics_subs.saturating_sub(1);
+    }
+}
+
 /// Send a snapshot, then forward every later push. Snapshot + subscribe happen under one lock so no
 /// change can slip between them.
-fn subscribe(d: &Arc<Daemon>, out: mpsc::UnboundedSender<Vec<u8>>, metrics: bool) -> tokio::task::JoinHandle<()> {
+fn subscribe(d: &Arc<Daemon>, out: mpsc::UnboundedSender<Vec<u8>>, metrics: Arc<AtomicBool>) -> tokio::task::JoinHandle<()> {
     let (mut rx, snap) = {
-        let mut inner = d.lock();
-        if metrics {
-            inner.metrics_subs += 1;
-        }
+        let inner = d.lock();
         (d.tx.subscribe(), d.snapshot(&inner))
     };
     let _ = out.send(line(&ServerLine::Push(Push::Snapshot { rev: snap.rev, snapshot: snap })));
@@ -414,7 +445,7 @@ fn subscribe(d: &Arc<Daemon>, out: mpsc::UnboundedSender<Vec<u8>>, metrics: bool
     tokio::spawn(async move {
         loop {
             match rx.recv().await {
-                Ok(Push::Metrics { .. }) if !metrics => continue,
+                Ok(Push::Metrics { .. }) if !metrics.load(Ordering::Relaxed) => continue,
                 Ok(p) => {
                     if out.send(line(&ServerLine::Push(p))).is_err() {
                         break;
@@ -511,6 +542,10 @@ async fn dispatch(d: &Arc<Daemon>, conn: u64, req: &Request, out: &mpsc::Unbound
             }
             rescan(d).await;
             res
+        }
+        method::RESOURCES_DISK_REFRESH => {
+            d.disk_wake.notify_one();
+            Ok(json!({}))
         }
         method::FLEET_LIST => Ok(serde_json::to_value(d.lock().worktrees.values().cloned().collect::<Vec<_>>())?),
         method::FLEET_GET => {
@@ -863,54 +898,83 @@ async fn usage_loop(d: Arc<Daemon>) {
 async fn metrics_loop(d: Arc<Daemon>) {
     let ncpu = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1);
     let mut t = tokio::time::interval(METRICS_EVERY);
+    t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        t.tick().await;
-        let (jobs, kinds, prev) = {
-            let inner = d.lock();
+        tokio::select! {
+            _ = t.tick() => {}
+            _ = d.metrics_wake.notified() => t.reset(),
+        }
+        let (sessions, mut sampler) = {
+            let mut inner = d.lock();
             if inner.metrics_subs == 0 {
+                inner.sampler = None; // stale deltas would span the idle gap
                 continue;
             }
-            let jobs: Vec<String> = inner.sessions.values().map(|s| s.job.clone()).collect();
-            let kinds: Vec<String> = inner.sessions.values().map(|s| s.kind.clone()).collect();
-            (jobs, kinds, inner.cpu_prev.clone())
+            let sessions: Vec<resources::SessionRef> = inner
+                .sessions
+                .values()
+                .map(|s| resources::SessionRef {
+                    worktree: s.wt.clone(),
+                    kind: s.kind.clone(),
+                    job: s.job.clone(),
+                    wsl: inner.worktrees.get(&s.wt).is_some_and(|w| w.platform.is_wsl()),
+                })
+                .collect();
+            (sessions, inner.sampler.take().unwrap_or_default())
         };
-        let res = tokio::task::spawn_blocking(move || {
-            let mut cpu_pct = 0.0;
-            let mut mem: u64 = 0;
-            let mut next = HashMap::new();
-            let now_i = Instant::now();
-            for j in jobs.iter().filter(|j| !j.is_empty()) {
-                let Some((cpu, pids)) = win::job_stats(j) else { continue };
-                if let Some((pc, pt)) = prev.get(j) {
-                    let wall = now_i.duration_since(*pt).as_nanos() as f64 / 100.0; // 100ns units
-                    if wall > 0.0 && cpu >= *pc {
-                        cpu_pct += (cpu - pc) as f64 / wall * 100.0;
-                    }
-                }
-                next.insert(j.clone(), (cpu, now_i));
-                mem += pids.iter().map(|p| win::working_set_bytes(*p)).sum::<u64>();
-            }
-            let (total, used) = win::system_memory_mb();
-            (cpu_pct, mem / (1024 * 1024), total, used, next)
+        let Ok((m, sampler)) = tokio::task::spawn_blocking(move || {
+            let m = sampler.sample(&sessions, ncpu);
+            (m, sampler)
         })
-        .await;
-        let Ok((cpu_pct, mem_mb, total, used, next)) = res else { continue };
-        let agents = kinds.iter().filter(|k| *k == "agent" || *k == "assistant").count() as u32;
-        let m = Metrics {
-            sessions: kinds.len() as u32,
-            agents,
-            reviews: kinds.len() as u32 - agents,
-            cpu_pct: cpu_pct.round(),
-            mem_mb,
-            sys_total_mb: total,
-            sys_used_mb: used,
-            ncpu,
+        .await
+        else {
+            continue;
         };
         let mut inner = d.lock();
-        inner.cpu_prev = next;
+        inner.sampler = Some(sampler);
+        let m = Metrics { disk: inner.disk.clone(), ..m };
         inner.rev += 1;
         inner.metrics = Some(m.clone());
         let _ = d.tx.send(Push::Metrics { rev: inner.rev, metrics: m });
+    }
+}
+
+/// Recompute disk usage when it's older than DISK_EVERY and someone is watching, or on request.
+async fn disk_loop(d: Arc<Daemon>) {
+    let mut t = tokio::time::interval(Duration::from_secs(30));
+    loop {
+        let asked = tokio::select! {
+            _ = t.tick() => false,
+            _ = d.disk_wake.notified() => true,
+        };
+        let worktrees = {
+            let mut inner = d.lock();
+            let stale = inner.disk.as_ref().is_none_or(|x| now() - x.ts >= DISK_EVERY.as_secs() as i64);
+            if !asked && !(stale && inner.metrics_subs > 0) {
+                continue;
+            }
+            let mut busy = inner.disk.clone().unwrap_or_default();
+            busy.busy = true;
+            inner.disk = Some(busy);
+            inner
+                .worktrees
+                .values()
+                .filter(|w| w.id != DEV_ID)
+                .map(|w| (w.id.clone(), PathBuf::from(&w.path), !w.platform.is_wsl()))
+                .collect::<Vec<_>>()
+        };
+        let dev = d.dev.clone();
+        let started = Instant::now();
+        let Ok(disk) = tokio::task::spawn_blocking(move || resources::scan_disk(&dev, &worktrees)).await else { continue };
+        eprintln!("[{}] disk usage scanned in {:.1}s", now(), started.elapsed().as_secs_f64());
+        let mut inner = d.lock();
+        inner.disk = Some(disk.clone());
+        if let Some(m) = inner.metrics.clone() {
+            let m = Metrics { disk: Some(disk), ..m };
+            inner.rev += 1;
+            inner.metrics = Some(m.clone());
+            let _ = d.tx.send(Push::Metrics { rev: inner.rev, metrics: m });
+        }
     }
 }
 
