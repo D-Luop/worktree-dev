@@ -20,7 +20,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::Shell::{Shell_NotifyIconGetRect, NOTIFYICONIDENTIFIER};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
-use wtd_core::model::{Account, Worktree, WorktreeKind};
+use wtd_core::model::{Account, Metrics, Worktree, WorktreeKind};
 use wtd_core::status::Status;
 
 use crate::flyout_new::{self as new, Choice, Field, Form, IssueOpt, Kind, PlatformOpt, RepoOpt};
@@ -294,6 +294,7 @@ fn hide() {
         Some((f.hwnd, f.nv.as_ref().is_some_and(|nv| !nv.form.busy)))
     });
     if let Some((h, drop_form)) = hwnd {
+        tray::watch_metrics(false);
         unsafe { ShowWindow(h, SW_HIDE) };
         if drop_form {
             leave_form(h);
@@ -373,6 +374,7 @@ fn show() {
             }
             f.scroll = 0.0;
         });
+        tray::watch_metrics(true);
         place();
         ShowWindow(hwnd, SW_SHOW);
         SetForegroundWindow(hwnd);
@@ -625,6 +627,19 @@ fn layout_list(f: &mut Fly, t: &Theme) -> (Vec<Op>, Vec<Hit>, f32) {
         y -= 2.0;
     }
 
+    // resources: one line
+    if let Some(line) = d.view.running.then(|| tray::METRICS.lock().unwrap().as_ref().map(resource_line)).flatten() {
+        if d.accounts.is_empty() {
+            divider(&mut ops, y);
+            y += 1.0 + 4.0;
+        }
+        let (left, right_txt, hot) = line;
+        let rw = text_width(f, Font::Small, &right_txt);
+        txt(&mut ops, PAD, y, right - rw - 8.0, y + 16.0, &left, Font::Small, if hot { Rgb(0xff, 0xb9, 0x00) } else { t.muted }, DT_LEFT | DT_END_ELLIPSIS);
+        txt(&mut ops, right - rw, y, right, y + 16.0, &right_txt, Font::Small, t.muted, DT_RIGHT);
+        y += 16.0 + 6.0;
+    }
+
     // sessions
     divider(&mut ops, y);
     y += 1.0 + 2.0;
@@ -702,6 +717,27 @@ fn layout_list(f: &mut Fly, t: &Theme) -> (Vec<Op>, Vec<Hit>, f32) {
     hits.push(Hit { r: rect(gx, y, right, y + FOOT_BTN_H), act, in_list: false });
 
     (ops, hits, content)
+}
+
+/// (fleet CPU · RAM · top consumer, system CPU, the fleet is busy)
+fn resource_line(m: &Metrics) -> (String, String, bool) {
+    let cpu: f64 = m.per_session.iter().map(|s| s.cpu_pct).sum();
+    let gb = |mb: u64| if mb >= 1024 { format!("{:.1} GB", mb as f64 / 1024.0) } else { format!("{mb} MB") };
+    let trim = |n: &str| n.strip_suffix(".exe").unwrap_or(n).to_string();
+    let mut s = if m.interval_ms > 0 { format!("Fleet {cpu:.0}% CPU · {}", gb(m.mem_mb)) } else { format!("Fleet {}", gb(m.mem_mb)) };
+    let top = m.per_session.first().filter(|t| t.cpu_pct >= 1.0);
+    let other = m.others.first().filter(|o| o.cpu_pct >= cpu.max(5.0));
+    if let Some(o) = other {
+        s.push_str(&format!(" · top {} {:.0}% (not fleet)", trim(&o.name), o.cpu_pct));
+    } else if let Some(t) = top {
+        let name = t.worktree.rsplit('/').next().unwrap_or(&t.worktree);
+        match t.top.first() {
+            Some(p) => s.push_str(&format!(" · top {name} ({})", trim(&p.name))),
+            None => s.push_str(&format!(" · top {name}")),
+        }
+    }
+    let sys = if m.interval_ms > 0 { format!("system {:.0}%", m.sys_cpu_pct) } else { String::new() };
+    (s, sys, cpu >= 50.0)
 }
 
 fn field_label(form: &Form, fld: Field) -> &'static str {
@@ -1633,4 +1669,27 @@ unsafe fn update_items(m: HMENU) {
     };
     AppendMenuW(m, MF_POPUP, sub(&CHANNELS, &s["channel"], MI_UPD_CHANNEL) as usize, win::wide("Update channel").as_ptr());
     AppendMenuW(m, MF_POPUP, sub(&LIVE, &s["restartWithLiveSessions"], MI_UPD_LIVE) as usize, win::wide("Update while sessions are live").as_ptr());
+}
+
+#[cfg(test)]
+mod tests {
+    use wtd_core::model::{Metrics, ProcUsage, SessionUsage};
+
+    #[test]
+    fn resource_line_names_the_top_consumer() {
+        let p = |name: &str, cpu: f64| ProcUsage { name: name.into(), cpu_pct: cpu, ..Default::default() };
+        let mut m = Metrics {
+            interval_ms: 2000,
+            mem_mb: 4300,
+            sys_cpu_pct: 61.0,
+            per_session: vec![SessionUsage { worktree: "r/feat/build".into(), cpu_pct: 38.0, top: vec![p("rustc.exe", 30.0)], ..Default::default() }],
+            others: vec![p("chrome.exe", 4.0)],
+            ..Default::default()
+        };
+        assert_eq!(super::resource_line(&m), ("Fleet 38% CPU · 4.2 GB · top build (rustc)".into(), "system 61%".into(), false));
+        m.others = vec![p("VmmemWSL", 45.0)];
+        assert_eq!(super::resource_line(&m).0, "Fleet 38% CPU · 4.2 GB · top VmmemWSL 45% (not fleet)");
+        m.interval_ms = 0;
+        assert_eq!(super::resource_line(&m).1, "");
+    }
 }

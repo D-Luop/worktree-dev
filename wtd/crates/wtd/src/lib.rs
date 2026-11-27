@@ -33,6 +33,7 @@ pub mod setup;
 pub mod statusfile;
 pub mod ticket;
 pub mod tools;
+pub mod top;
 pub mod tray;
 pub mod tui;
 pub mod updater;
@@ -82,6 +83,8 @@ Fleet & daemon
   wtd daemon start|stop [--force]|status|run
                                      control the background daemon (--force: also end hosted sessions)
   wtd ls [--json]                    list worktrees (status, git, live session)
+  wtd top [--json] [--watch] [--refresh-disk]
+                                     CPU / memory / disk I/O per session (+ top processes), disk per worktree
   wtd platforms [--refresh]          where worktrees can run: windows + WSL distros and their tools (JSON)
   wtd config platform [--repo <slug>] [windows|wsl:<distro>|--clear]
                                      the default platform for new worktrees (global, or one repo's)
@@ -149,6 +152,7 @@ fn dispatch(cmd: &str, rest: &[String]) -> Result<i32> {
         "platforms" => platforms::main(rest),
         "config" => platforms::config_main(rest),
         "ls" => ls_cmd(rest.iter().any(|a| a == "--json")),
+        "top" => top::main(rest),
         "agent" => agent::main(rest),
         "archive" => agent::archive_main(rest),
         "close" => agent::close_main(),

@@ -10,16 +10,15 @@ use windows_sys::Win32::Security::Authorization::{ConvertStringSecurityDescripto
 use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use windows_sys::Win32::System::Console::{GetStdHandle, SetConsoleCtrlHandler, CTRL_BREAK_EVENT, CTRL_C_EVENT, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation, JobObjectBasicProcessIdList,
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAndIoAccountingInformation, JobObjectBasicProcessIdList,
     JobObjectExtendedLimitInformation, OpenJobObjectW, QueryInformationJobObject, SetInformationJobObject,
-    TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    TerminateJobObject, JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 
 // Job access rights (winnt.h); windows-sys keeps them in SystemServices.
 const JOB_OBJECT_QUERY: u32 = 0x0004;
 const JOB_OBJECT_TERMINATE: u32 = 0x0008;
-use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
@@ -103,26 +102,35 @@ pub fn terminate_own_job(job: &Handle) {
     unsafe { TerminateJobObject(job.0, 1) };
 }
 
-/// (total CPU time in 100ns units, member pids) for a named job.
-pub fn job_stats(name: &str) -> Option<(u64, Vec<u32>)> {
+/// A job's lifetime totals (including processes that already exited) and its current members.
+#[derive(Debug, Clone, Default)]
+pub struct JobSample {
+    /// User + kernel time, 100ns units.
+    pub cpu: u64,
+    pub read_bytes: u64,
+    pub write_bytes: u64,
+    pub pids: Vec<u32>,
+}
+
+pub fn job_sample(name: &str) -> Option<JobSample> {
     unsafe {
         let h = OpenJobObjectW(JOB_OBJECT_QUERY, FALSE, wide(name).as_ptr());
         if h.is_null() {
             return None;
         }
         let job = Handle(h);
-        let mut acct: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = std::mem::zeroed();
+        let mut acct: JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION = std::mem::zeroed();
         if QueryInformationJobObject(
             job.0,
-            JobObjectBasicAccountingInformation,
+            JobObjectBasicAndIoAccountingInformation,
             &mut acct as *mut _ as *mut c_void,
-            std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+            std::mem::size_of::<JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION>() as u32,
             std::ptr::null_mut(),
         ) == FALSE
         {
             return None;
         }
-        let cpu = (acct.TotalUserTime + acct.TotalKernelTime) as u64;
+        let b = &acct.BasicInfo;
         // JOBOBJECT_BASIC_PROCESS_ID_LIST: two u32 counts then ULONG_PTR ids.
         let mut buf = vec![0usize; 2 + 512];
         let mut pids = Vec::new();
@@ -140,24 +148,187 @@ pub fn job_stats(name: &str) -> Option<(u64, Vec<u32>)> {
                 pids.push(buf[1 + i] as u32);
             }
         }
-        Some((cpu, pids))
+        Some(JobSample {
+            cpu: (b.TotalUserTime + b.TotalKernelTime) as u64,
+            read_bytes: acct.IoInfo.ReadTransferCount,
+            write_bytes: acct.IoInfo.WriteTransferCount,
+            pids,
+        })
     }
 }
 
-pub fn working_set_bytes(pid: u32) -> u64 {
-    unsafe {
-        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-        if h.is_null() {
-            return 0;
+/// One running process, from a single system-wide snapshot.
+#[derive(Debug, Clone, Default)]
+pub struct ProcSample {
+    pub pid: u32,
+    pub name: String,
+    /// Creation time (FILETIME); with `pid` it identifies a process across samples.
+    pub created: i64,
+    /// User + kernel time, 100ns units.
+    pub cpu: u64,
+    pub working_set: u64,
+    pub private: u64,
+}
+
+// SYSTEM_PROCESS_INFORMATION (x64) up to the private page count; thread entries follow each record.
+#[repr(C)]
+#[allow(dead_code)]
+struct SystemProcessInformation {
+    next_entry_offset: u32,
+    number_of_threads: u32,
+    working_set_private_size: i64,
+    hard_fault_count: u32,
+    number_of_threads_high_watermark: u32,
+    cycle_time: u64,
+    create_time: i64,
+    user_time: i64,
+    kernel_time: i64,
+    image_name_len: u16,
+    image_name_max: u16,
+    image_name_buf: *const u16,
+    base_priority: i32,
+    unique_process_id: usize,
+    inherited_from: usize,
+    handle_count: u32,
+    session_id: u32,
+    unique_process_key: usize,
+    peak_virtual_size: usize,
+    virtual_size: usize,
+    page_fault_count: u32,
+    peak_working_set_size: usize,
+    working_set_size: usize,
+    quota_peak_paged_pool_usage: usize,
+    quota_paged_pool_usage: usize,
+    quota_peak_non_paged_pool_usage: usize,
+    quota_non_paged_pool_usage: usize,
+    pagefile_usage: usize,
+    peak_pagefile_usage: usize,
+    private_page_count: usize,
+}
+
+#[link(name = "ntdll")]
+extern "system" {
+    fn NtQuerySystemInformation(class: u32, info: *mut c_void, len: u32, ret: *mut u32) -> i32;
+}
+
+/// Every process on the machine in one call: name, CPU time, memory.
+pub fn processes() -> Vec<ProcSample> {
+    const SYSTEM_PROCESS_INFORMATION: u32 = 5;
+    const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC000_0004_u32 as i32;
+    let mut buf: Vec<u64> = vec![0; 128 * 1024]; // u64 for alignment; 1 MB to start
+    loop {
+        let mut ret = 0u32;
+        let st = unsafe { NtQuerySystemInformation(SYSTEM_PROCESS_INFORMATION, buf.as_mut_ptr() as *mut c_void, (buf.len() * 8) as u32, &mut ret) };
+        if st == STATUS_INFO_LENGTH_MISMATCH {
+            buf = vec![0; ret as usize / 8 + 16 * 1024];
+            continue;
         }
-        let p = Handle(h);
-        let mut c: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
-        c.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
-        if K32GetProcessMemoryInfo(p.0, &mut c, c.cb) == FALSE {
-            return 0;
+        if st < 0 {
+            return vec![];
         }
-        c.WorkingSetSize as u64
+        break;
     }
+    let mut out = Vec::with_capacity(400);
+    let base = buf.as_ptr() as *const u8;
+    let mut off = 0usize;
+    loop {
+        let e = unsafe { &*(base.add(off) as *const SystemProcessInformation) };
+        let name = if e.image_name_buf.is_null() {
+            if e.unique_process_id == 0 { "Idle".into() } else { "System".into() }
+        } else {
+            String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(e.image_name_buf, e.image_name_len as usize / 2) })
+        };
+        out.push(ProcSample {
+            pid: e.unique_process_id as u32,
+            name,
+            created: e.create_time,
+            cpu: (e.user_time + e.kernel_time) as u64,
+            working_set: e.working_set_size as u64,
+            private: e.private_page_count as u64,
+        });
+        if e.next_entry_offset == 0 {
+            break;
+        }
+        off += e.next_entry_offset as usize;
+    }
+    out
+}
+
+/// (idle, busy) machine time summed over all cores, 100ns units.
+pub fn system_times() -> (u64, u64) {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetSystemTimes;
+    let ft = |f: FILETIME| ((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64;
+    unsafe {
+        let (mut i, mut k, mut u): (FILETIME, FILETIME, FILETIME) = (std::mem::zeroed(), std::mem::zeroed(), std::mem::zeroed());
+        if GetSystemTimes(&mut i, &mut k, &mut u) == FALSE {
+            return (0, 0);
+        }
+        let idle = ft(i); // kernel time includes idle time
+        (idle, (ft(k) + ft(u)).saturating_sub(idle))
+    }
+}
+
+pub struct DirEntry {
+    pub name: String,
+    pub dir: bool,
+    /// Junction / symlink / other reparse point.
+    pub reparse: bool,
+    /// Same for every hard link to one file (within a volume).
+    pub file_id: i64,
+    /// Size on disk.
+    pub allocated: u64,
+}
+
+/// A directory's entries, with file ids and allocated sizes, from batched listing calls (no per-file
+/// open). `.` and `..` are left out. Empty if the directory can't be opened.
+pub fn list_dir(dir: &std::path::Path) -> Vec<DirEntry> {
+    use windows_sys::Win32::Foundation::GENERIC_READ;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FileIdBothDirectoryInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_BOTH_DIR_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    let mut out = vec![];
+    let h = unsafe {
+        CreateFileW(wide(&dir.to_string_lossy()).as_ptr(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, std::ptr::null(), OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, std::ptr::null_mut())
+    };
+    if h == INVALID_HANDLE_VALUE {
+        return out;
+    }
+    let h = Handle(h);
+    let mut buf: Vec<u64> = vec![0; 8 * 1024]; // 64 KB, 8-byte aligned
+    while unsafe { GetFileInformationByHandleEx(h.0, FileIdBothDirectoryInfo, buf.as_mut_ptr() as *mut c_void, (buf.len() * 8) as u32) } != FALSE {
+        let base = buf.as_ptr() as *const u8;
+        let mut off = 0usize;
+        loop {
+            let e = unsafe { &*(base.add(off) as *const FILE_ID_BOTH_DIR_INFO) };
+            let name = unsafe { std::slice::from_raw_parts(e.FileName.as_ptr(), e.FileNameLength as usize / 2) };
+            if name != [b'.' as u16] && name != [b'.' as u16, b'.' as u16] {
+                out.push(DirEntry {
+                    name: String::from_utf16_lossy(name),
+                    dir: e.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+                    reparse: e.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0,
+                    file_id: e.FileId,
+                    allocated: e.AllocationSize.max(0) as u64,
+                });
+            }
+            if e.NextEntryOffset == 0 {
+                break;
+            }
+            off += e.NextEntryOffset as usize;
+        }
+    }
+    out
+}
+
+/// (free, total) bytes on the volume holding `path`.
+pub fn disk_space(path: &std::path::Path) -> (u64, u64) {
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let (mut free, mut total, mut all_free) = (0u64, 0u64, 0u64);
+    if unsafe { GetDiskFreeSpaceExW(wide(&path.to_string_lossy()).as_ptr(), &mut free, &mut total, &mut all_free) } == FALSE {
+        return (0, 0);
+    }
+    (free, total)
 }
 
 /// (total MB, used MB)
@@ -425,6 +596,20 @@ mod tests {
         child.wait().unwrap();
         assert!(super::kill_processes_in(&dir.join("elsewhere")).is_empty());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn process_snapshot_finds_this_process() {
+        let all = super::processes();
+        assert!(all.len() > 10);
+        let p = all.iter().find(|p| p.pid == std::process::id()).expect("own pid in the snapshot");
+        let exe = std::env::current_exe().unwrap();
+        assert!(exe.file_name().unwrap().to_string_lossy().eq_ignore_ascii_case(&p.name), "{}", p.name);
+        assert!(p.working_set > 1 << 20 && p.private > 0 && p.created > 0);
+        let (idle, busy) = super::system_times();
+        assert!(idle + busy > 0);
+        let (free, total) = super::disk_space(exe.parent().unwrap());
+        assert!(total > free && free > 0);
     }
 
     #[test]

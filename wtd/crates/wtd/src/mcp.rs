@@ -119,6 +119,14 @@ fn tools() -> Value {
             }, "required": ["path", "reason"], "additionalProperties": false }
         },
         {
+            "name": "fleet_resources",
+            "description": "How much CPU, memory and disk the fleet is using and what is using it: per live session (worktree, kind, cpu_pct = percent of ALL cores, mem_mb working set, private_mb, procs, disk read/write bytes per second, top processes inside it such as cargo/rustc/node), WSL sessions' distro VM (vm, shared by every WSL session), the biggest programs outside the fleet (others), whole-machine CPU/RAM, and disk usage per worktree (bytes, target_bytes, node_modules_bytes; cached, rescanned every ~10 minutes). Takes ~2 s (a fresh CPU sample). Read-only.",
+            "inputSchema": { "type": "object", "properties": {
+                "refresh_disk": { "type": "boolean", "description": "also start a disk-usage rescan (slow; the result shows up in later calls)" }
+            }, "additionalProperties": false },
+            "annotations": { "readOnlyHint": true }
+        },
+        {
             "name": "fleet_read_file",
             "description": "Read a file from another worktree (path relative to that worktree's root). Read-only; never edit another worktree.",
             "inputSchema": { "type": "object", "properties": {
@@ -198,6 +206,13 @@ fn call(dev: &Path, me: Option<&str>, name: &str, args: &Value) -> Result<String
                 "Proposal {} ({} {}) is waiting for the user's approval in VS Code, or `wtd custom accept {}`. Nothing changes until they accept. Let the user know it's waiting for them.",
                 p.id, if delete { "delete" } else { "write" }, crate::proposal::target(dev, &p)?.display(), p.id
             ))
+        }
+        "fleet_resources" => {
+            if Client::connect()?.is_none() {
+                bail!("the WorkTreeDev daemon isn't running, so there are no resource samples — ask the user to start it (tray icon or fleet panel)");
+            }
+            let m = crate::top::sample(args.get("refresh_disk").and_then(Value::as_bool).unwrap_or(false))?;
+            Ok(serde_json::to_string_pretty(&m)?)
         }
         "fleet_read_file" => {
             let id = args.get("id").and_then(Value::as_str).context("id is required")?;
